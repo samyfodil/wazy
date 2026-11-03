@@ -363,7 +363,7 @@ func TestCodeSection_ArenaIsBoundedByTheInput(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	code, _, err := decodeCodeSection(in, 0, declared, api.CoreFeaturesV2)
+	code, _, err := decodeCodeSection(in, 0, declared, api.CoreFeaturesV2, 0, nil)
 	runtime.ReadMemStats(&after)
 
 	require.NoError(t, err)

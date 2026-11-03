@@ -369,7 +369,9 @@ func decodeElementSection(buf []byte, offset int, enabledFeatures api.CoreFeatur
 	return result, offset, nil
 }
 
-func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatures api.CoreFeatures) ([]wasm.Code, int, error) {
+// decodeCodeSection decodes the code section. branchHints is the branch hint section, if one came before it;
+// importFunctionCount is how many function indices the imports take, before the first body.
+func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatures api.CoreFeatures, importFunctionCount uint32, branchHints []funcBranchHints) ([]wasm.Code, int, error) {
 	codeSectionStart := offset
 	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
@@ -390,7 +392,16 @@ func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatur
 	// (see decodeCode) allocates at most once per section rather than re-deriving groups per function.
 	var locals []localsGroup
 	for i := uint32(0); i < vs; i++ {
-		offset, arenaOff, err = decodeCode(buf, offset, codeSectionStart, arena, arenaOff, &localTypes, &locals, enabledFeatures, &result[i])
+		// Both run in increasing function index order, so one pass pairs them.
+		var hints []wasm.BranchHint
+		funcIndex := uint64(importFunctionCount) + uint64(i)
+		for len(branchHints) > 0 && uint64(branchHints[0].funcIndex) < funcIndex {
+			branchHints = branchHints[1:]
+		}
+		if len(branchHints) > 0 && uint64(branchHints[0].funcIndex) == funcIndex {
+			hints = branchHints[0].hints
+		}
+		offset, arenaOff, err = decodeCode(buf, offset, codeSectionStart, arena, arenaOff, &localTypes, &locals, enabledFeatures, hints, &result[i])
 		if err != nil {
 			return nil, offset, fmt.Errorf("read %d-th code segment: %v", i, err)
 		}

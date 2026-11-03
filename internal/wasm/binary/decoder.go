@@ -40,6 +40,7 @@ func DecodeModule(
 	// DecodeModule calls never share it.
 	arena := &stringArena{}
 	var lastSectionID wasm.SectionID
+	var branchHints []funcBranchHints
 	var info, line, str, abbrev, ranges []byte // For DWARF Data.
 	offset := 8
 	for offset < len(binary) {
@@ -81,6 +82,11 @@ func DecodeModule(
 
 			// Now, either decode the NameSection or CustomSection
 			limit := sectionSize - nameSize
+
+			// The branch hint section must come before the code section, whose bodies it describes.
+			if name == branchHintSectionName && m.CodeSection == nil && uint64(limit) <= uint64(len(binary)-offset) {
+				branchHints = decodeBranchHintSection(binary[offset : offset+int(limit)])
+			}
 
 			var c *wasm.CustomSection
 			if name != "name" {
@@ -149,7 +155,7 @@ func DecodeModule(
 		case wasm.SectionIDElement:
 			m.ElementSection, offset, err = decodeElementSection(binary, offset, enabledFeatures)
 		case wasm.SectionIDCode:
-			m.CodeSection, offset, err = decodeCodeSection(binary, offset, sectionSize, enabledFeatures)
+			m.CodeSection, offset, err = decodeCodeSection(binary, offset, sectionSize, enabledFeatures, m.ImportFunctionCount, branchHints)
 		case wasm.SectionIDData:
 			m.DataSection, offset, err = decodeDataSection(binary, offset, sectionSize, enabledFeatures)
 		case wasm.SectionIDDataCount:

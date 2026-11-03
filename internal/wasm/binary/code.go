@@ -22,13 +22,16 @@ type localsGroup struct {
 // decodeCode decodes one function body into arena[arenaOff:] and returns the new input offset and the new arena
 // offset. groups is a caller-owned scratch, reused across the section, into which the single locals pass records
 // its (type, count) runs before LocalTypes is materialized once.
-func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff int, localTypesArena *valueTypeArena, groups *[]localsGroup, enabledFeatures api.CoreFeatures, ret *wasm.Code) (newOffset, newArenaOff int, err error) {
+//
+// hints are the function's entries in the branch hint section, which it rebases onto the body.
+func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff int, localTypesArena *valueTypeArena, groups *[]localsGroup, enabledFeatures api.CoreFeatures, hints []wasm.BranchHint, ret *wasm.Code) (newOffset, newArenaOff int, err error) {
 	ss, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return offset, arenaOff, fmt.Errorf("get the size of code: %w", err)
 	}
 	offset += int(n)
 	remaining := int64(ss)
+	localsStart := offset
 
 	// Parse #locals.
 	ls, bytesRead, err := leb128.LoadUint32(buf[offset:])
@@ -113,6 +116,7 @@ func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff
 	}
 
 	bodyOffsetInCodeSection := uint64(offset - codeSectionStart)
+	localsLen := uint32(offset - localsStart)
 	bodyLen := int(remaining)
 	bodySrc, o, err := readBytes(buf, offset, bodyLen)
 	if err != nil {
@@ -139,5 +143,8 @@ func decodeCode(buf []byte, offset, codeSectionStart int, arena []byte, arenaOff
 	ret.BodyOffsetInCodeSection = bodyOffsetInCodeSection
 	ret.LocalTypes = localTypes
 	ret.Body = body
+	if len(hints) > 0 {
+		ret.BranchHints = rebaseBranchHints(hints, localsLen, body)
+	}
 	return offset, arenaOff, nil
 }

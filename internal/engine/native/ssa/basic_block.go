@@ -117,6 +117,10 @@ type (
 		// visited is used during various traversals.
 		visited int32
 
+		// unlikelySucc is the successor a branch hint says this block rarely goes to, or nil. See
+		// Builder.MarkUnlikelyEdge.
+		unlikelySucc *basicBlock
+
 		// child and sibling are the ones in the dominator tree.
 		child, sibling *basicBlock
 	}
@@ -297,6 +301,7 @@ func resetBasicBlock(bb *basicBlock) {
 	bb.varDefsOff, bb.varDefsLen = 0, 0
 	bb.reversePostOrder = -1
 	bb.visited = 0
+	bb.unlikelySucc = nil
 	bb.loopNestingForestChildren = basicBlockVarLengthNil
 	bb.loopHeader = false
 	bb.sibling = nil
@@ -369,8 +374,7 @@ func (bb *basicBlock) validate(b *builder) {
 	if len(bb.preds) > 0 {
 		for _, pred := range bb.preds {
 			if pred.branch.opcode != OpcodeBrTable {
-				blockID := int(pred.branch.rValue)
-				target := b.basicBlocksPool.View(blockID)
+				target := b.basicBlock(BasicBlockID(pred.branch.rValue))
 				if target != bb {
 					panic(fmt.Sprintf("BUG: '%s' is not branch to %s, but to %s",
 						pred.branch.Format(b), bb.Name(), target.Name()))

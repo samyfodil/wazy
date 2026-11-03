@@ -1370,6 +1370,20 @@ type Code struct {
 	// BodyOffsetInCodeSection is the offset of the beginning of the body in the code section.
 	// This is used for DWARF based stack trace where a program counter represents an offset in code section.
 	BodyOffsetInCodeSection uint64
+
+	// BranchHints are what the module's branch hint section says about this function's if and br_if
+	// instructions, in increasing Offset order.
+	BranchHints []BranchHint
+}
+
+// BranchHint is an entry of the branch hint section, metadata.code.branch_hint: the if or br_if at Offset in
+// Code.Body is likely to branch, or likely not to. Producers that know their hot paths emit it, and it shapes
+// only where code is placed, never what it does.
+//
+// See https://github.com/WebAssembly/branch-hinting/blob/main/proposals/branch-hinting/Overview.md
+type BranchHint struct {
+	Offset uint32
+	Likely bool
 }
 
 type DataSegment struct {
