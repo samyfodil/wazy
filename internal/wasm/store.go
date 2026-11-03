@@ -121,6 +121,13 @@ type (
 		// module is alive, and releases them on Close. See holdMemoriesOf.
 		heldMemories []*MemoryInstance
 
+		// slotMux guards the CallSlots this module hands its callEngines: how many registered their own,
+		// and the chunk the rest come from. See CallSlotFor.
+		slotMux     sync.Mutex
+		slotsSingly uint32
+		slotChunk   *callSlotChunk
+		slotNext    int
+
 		// Engine implements function calls for this module.
 		Engine ModuleEngine
 
@@ -352,6 +359,15 @@ func (m *ModuleInstance) applyData(data []DataSegment) error {
 			}
 			copy(mem.Buffer[offset:], d.Init)
 		}
+	}
+	return nil
+}
+
+// export is getExport for a caller that only needs to know whether the export is there. Instantiation looks up
+// each start function this way and most modules export none, so a miss must not cost an error.
+func (m *ModuleInstance) export(name string, et ExternType) *Export {
+	if exp, ok := m.Exports[name]; ok && exp.Type == et {
+		return exp
 	}
 	return nil
 }

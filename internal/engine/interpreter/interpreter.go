@@ -178,7 +178,10 @@ type callEngine struct {
 	// own cache line rather than in a counter every caller shares, so
 	// concurrent calls to one module do not serialize on it. Registered with
 	// the module's memories in newCallEngine; see wasm.CallSlot.
-	slot wasm.CallSlot
+	slot *wasm.CallSlot
+	// ownSlot is the slot when the module registers this callEngine's own; see
+	// wasm.ModuleInstance.CallSlotFor.
+	ownSlot wasm.CallSlot
 
 	// checks counts the loop and entry checks this engine ran. See check.
 	checks uint32
@@ -195,6 +198,13 @@ type callEngine struct {
 	// until the next operation that can append to ce.frames, since that
 	// append may grow and relocate the backing array.
 	frames []callFrame
+
+	// buffers is what stack and frames came from while a call holds pooled
+	// ones, and releases counts the calls that gave them back, up to
+	// buffersReleasesBeforeKeep; from then on a handle keeps its slices
+	// between calls. See acquireBuffers.
+	buffers  *callBuffers
+	releases uint8
 
 	// f is the initial function for this call engine.
 	f *function
@@ -325,8 +335,54 @@ func (e *moduleEngine) newCallEngine(compiled *function) *callEngine {
 	ce := &callEngine{f: compiled}
 	// Make this callEngine's in-flight slot visible to the memories it can run
 	// against, so a close can tell whether it is mid-call. See wasm.CallSlot.
-	compiled.moduleInstance.RegisterCallSlot(&ce.slot)
+	ce.slot = compiled.moduleInstance.CallSlotFor(&ce.ownSlot)
 	return ce
+}
+
+// callBuffers is a callEngine's operand stack and frames, pooled across handles.
+type callBuffers struct {
+	stack  []uint64
+	frames []callFrame
+}
+
+var callBuffersPool = sync.Pool{New: func() any {
+	return &callBuffers{stack: make([]uint64, 0, 64), frames: make([]callFrame, 0, 8)}
+}}
+
+const (
+	// buffersReleasesBeforeKeep matches the native engine's stackReleasesBeforeKeep: a handle is often dropped
+	// after a few calls, mod.ExportedFunction(name).Call(ctx) after one, and one that kept its slices would
+	// leave them to the GC and the next handle to grow its own from nothing.
+	buffersReleasesBeforeKeep = 64
+	// maxPooledFrames bounds the frames a pooled buffer may hold, since giving one back clears all of it so the
+	// pool pins no module's functions.
+	maxPooledFrames = 64
+)
+
+// acquireBuffers gives a call that holds no slices pooled ones, which releaseBuffers gives back when the call
+// returns.
+func (ce *callEngine) acquireBuffers() {
+	b := callBuffersPool.Get().(*callBuffers)
+	ce.buffers, ce.stack, ce.frames = b, b.stack, b.frames
+}
+
+// releaseBuffers is the end of a call that acquireBuffers served: unless this handle has given its slices back
+// often enough to keep them, they go back to the pool.
+func (ce *callEngine) releaseBuffers() {
+	if ce.releases == buffersReleasesBeforeKeep {
+		ce.buffers = nil
+		return
+	}
+	ce.releases++
+	b := ce.buffers
+	stack, frames := ce.stack, ce.frames
+	ce.buffers, ce.stack, ce.frames = nil, nil, nil
+	if b == nil || cap(frames) > maxPooledFrames {
+		return // a snapshot restored its own slices into this call, or the frames grew too far to clear cheaply
+	}
+	clear(frames[:cap(frames)])
+	b.stack, b.frames = stack[:0], frames[:0]
+	callBuffersPool.Put(b)
 }
 
 func (ce *callEngine) pushValue(v uint64) {
@@ -518,6 +574,7 @@ func (s *snapshot) doRestore(_ *callEngine, _ int) {
 
 	ce.stack = s.stack
 	ce.frames = s.frames
+	ce.buffers = nil // the snapshot still holds these slices, so they must not reach the pool
 	ce.frames[len(ce.frames)-1].pc = s.pc
 
 	copy(ce.stack[len(ce.stack)-len(s.ret):], s.ret)
@@ -1304,6 +1361,14 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, ce)
 	}
 
+	// A handle with no slices of its own takes pooled ones for this call. A call that finds some is either one
+	// whose handle keeps them, or a host function's re-entry into the handle's own call, which must not give
+	// them back from under the outer one.
+	if cap(ce.stack) == 0 {
+		ce.acquireBuffers()
+		defer ce.releaseBuffers() // Registered first, so it runs after recoverOnCall is done with the slices.
+	}
+
 	// Before registering, so a collection under way when this call joins sees the parameters.
 	ce.pushValues(params)
 	if ce.f.parent.gcEnabled {
@@ -1330,7 +1395,7 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 	// module was closed, so a concurrent close must not recycle the buffer
 	// until we are done with it. See MemoryInstance.callers.
 	ce.slot.Enter()
-	defer m.ExitCall(&ce.slot)
+	defer m.ExitCall(ce.slot)
 
 	// Refuse a call that arrives after the module closed. Enter above is a
 	// sequentially consistent store and this is the paired load, against a
