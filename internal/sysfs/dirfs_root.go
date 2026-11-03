@@ -61,6 +61,10 @@ func rmdirIn(r *os.Root, name string) sys.Errno {
 	}
 }
 
+func linkIn(r *os.Root, oldName, newName string) sys.Errno {
+	return rootErrno(r.Link(oldName, newName))
+}
+
 func renameIn(r *os.Root, from, to string) sys.Errno {
 	if from == to {
 		return 0

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -316,7 +317,7 @@ func (d *dirFS) Link(oldName, newName string) sys.Errno {
 		}
 		return sys.EEXIST
 	}
-	errno = rootErrno(r.Link(oldName, newName))
+	errno = linkIn(r, oldName, newName)
 	if errno == sys.EINVAL && newName == "." {
 		errno = sys.EEXIST // the directory itself, which Windows reports as EINVAL
 	}
@@ -338,7 +339,10 @@ func (d *dirFS) Symlink(oldName, link string) sys.Errno {
 	// Note: do not resolve `oldName` relative to this dirFS. The link result is always resolved
 	// when dereference the `link` on its usage (e.g. readlink, read, etc).
 	// https://github.com/bytecodealliance/cap-std/blob/v1.0.4/cap-std/src/fs/dir.rs#L404-L409
-	errno = rootErrno(r.Symlink(oldName, link))
+	//
+	// Windows does not read "/" as a separator in a symlink target, and
+	// os.Root before Go 1.27 stores the target as given.
+	errno = rootErrno(r.Symlink(filepath.FromSlash(oldName), link))
 	// Where something already is, Windows reports access denied, or EISDIR
 	// for a directory written with a trailing slash. POSIX reports EEXIST.
 	// Checking only after the failure leaves no window between the check
