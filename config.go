@@ -140,6 +140,23 @@ type RuntimeConfig interface {
 	// WithMemoryCapacityFromMax(true) takes precedence over this setting.
 	WithMemoryCapacityReservePages(memoryCapacityReservePages uint32) RuntimeConfig
 
+	// WithTableLimitElements overrides the maximum entries allowed per table. The
+	// default is 10,000,000, the limit browsers apply, which holds a table to
+	// 80MB of host memory. A table lives outside every linear memory, so
+	// WithMemoryLimitPages does not bound it, and without this limit a single
+	// table.grow could ask for 2^32-1 entries.
+	//
+	// A module declaring a table larger than this, or tables whose declared
+	// sizes add up to more, fails to instantiate. table.grow past it returns -1,
+	// as it does past a table's declared maximum.
+	//
+	// This example limits every table to 65536 entries:
+	//	rConfig = wazy.NewRuntimeConfig().WithTableLimitElements(65536)
+	//
+	// Setting a value larger than this platform can allocate panics: that is
+	// 2^32-2 where int is 64 bits wide, and less where it is 32.
+	WithTableLimitElements(tableLimitElements uint32) RuntimeConfig
+
 	// WithDebugInfoEnabled toggles DWARF based stack traces in the face of
 	// runtime errors. Defaults to true.
 	//
@@ -231,6 +248,7 @@ type runtimeConfig struct {
 	memory64LimitSet           bool
 	memoryCapacityFromMax      bool
 	memoryCapacityReservePages uint32
+	tableLimitElements         uint32
 	engineKind                 engineKind
 	dwarfDisabled              bool // negative as defaults to enabled
 	newEngine                  newEngine
@@ -244,6 +262,7 @@ var engineLessConfig = &runtimeConfig{
 	memoryLimitPages:      wasm.MemoryLimitPages,
 	memory64LimitPages:    uint64(wasm.MemoryLimitPages),
 	memoryCapacityFromMax: false,
+	tableLimitElements:    wasm.TableLimitElements,
 	dwarfDisabled:         false,
 }
 
@@ -353,6 +372,17 @@ func (c *runtimeConfig) WithMemoryCapacityFromMax(memoryCapacityFromMax bool) Ru
 func (c *runtimeConfig) WithMemoryCapacityReservePages(memoryCapacityReservePages uint32) RuntimeConfig {
 	ret := c.clone()
 	ret.memoryCapacityReservePages = memoryCapacityReservePages
+	return ret
+}
+
+// WithTableLimitElements implements RuntimeConfig.WithTableLimitElements.
+func (c *runtimeConfig) WithTableLimitElements(tableLimitElements uint32) RuntimeConfig {
+	ret := c.clone()
+	// This panics instead of returning an error as it is unlikely.
+	if uint64(tableLimitElements) > wasm.MaxTableLimitElements {
+		panic(fmt.Errorf("tableLimitElements invalid: %d > %d", tableLimitElements, wasm.MaxTableLimitElements))
+	}
+	ret.tableLimitElements = tableLimitElements
 	return ret
 }
 

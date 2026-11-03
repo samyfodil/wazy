@@ -959,9 +959,13 @@ func TestModule_buildTables(t *testing.T) {
 				Tables:  append(tc.importedTables, make([]*TableInstance, len(tc.module.TableSection))...),
 				Globals: tc.importedGlobals,
 			}
-			err := m.buildTables(tc.module, false)
+			err := m.buildTables(tc.module, false, TableLimitElements)
 			require.NoError(t, err)
 
+			for _, tbl := range m.Tables[len(tc.importedTables):] {
+				require.Equal(t, uint64(TableLimitElements), tbl.limit)
+				tbl.limit = 0
+			}
 			require.Equal(t, tc.expectedTables, m.Tables)
 		})
 	}
@@ -1045,7 +1049,7 @@ func TestModule_buildTable_Errors(t *testing.T) {
 				Tables:  append(tc.importedTables, make([]*TableInstance, len(tc.module.TableSection))...),
 				Globals: tc.importedGlobals,
 			}
-			err := m.buildTables(tc.module, false)
+			err := m.buildTables(tc.module, false, TableLimitElements)
 			require.EqualError(t, err, tc.expectedErr)
 		})
 	}
@@ -1058,12 +1062,35 @@ func TestTableInstance_Grow(t *testing.T) {
 		name       string
 		currentLen int
 		max        *uint64
+		limit      uint64
 		delta, exp uint32
 	}{
 		{
 			name:       "growing ousside 32-bit range",
 			currentLen: 0x10,
 			delta:      0xffff_fff0,
+			exp:        expOnErr,
+		},
+		{
+			name:       "growing to the limit",
+			currentLen: 3,
+			limit:      5,
+			delta:      2,
+			exp:        3,
+		},
+		{
+			name:       "growing past the limit",
+			currentLen: 3,
+			limit:      5,
+			delta:      3,
+			exp:        expOnErr,
+		},
+		{
+			name:       "the limit applies below the declared max",
+			currentLen: 3,
+			max:        &max10,
+			limit:      5,
+			delta:      3,
 			exp:        expOnErr,
 		},
 		{
@@ -1104,9 +1131,18 @@ func TestTableInstance_Grow(t *testing.T) {
 	for _, tt := range tests {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
-			table := &TableInstance{References: make([]uintptr, tc.currentLen), Max: tc.max}
+			limit := tc.limit
+			if limit == 0 {
+				limit = MaxTableLimitElements
+			}
+			table := &TableInstance{References: make([]uintptr, tc.currentLen), Max: tc.max, limit: limit}
 			actual := table.Grow(tc.delta, 0)
 			require.Equal(t, tc.exp, actual)
+			if actual != expOnErr {
+				require.Equal(t, tc.currentLen+int(tc.delta), len(table.References))
+			} else {
+				require.Equal(t, tc.currentLen, len(table.References))
+			}
 		})
 	}
 }
