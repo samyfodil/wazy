@@ -90,6 +90,8 @@ func fdAllocateFn(_ context.Context, mod api.Module, params []uint64) sysapi.Err
 	st, errno := f.File.Stat()
 	if errno != 0 {
 		return errno
+	} else if st.Mode.IsDir() {
+		return sysapi.EISDIR
 	}
 
 	if st.Size >= tail {
@@ -210,6 +212,15 @@ func fdFdstatGetFn(_ context.Context, mod api.Module, params []uint64) sysapi.Er
 	if isNonblock(f.File) {
 		fdflags |= wasip1.FD_NONBLOCK
 	}
+	if f.Oflag&sysapi.O_DSYNC != 0 {
+		fdflags |= wasip1.FD_DSYNC
+	}
+	if f.Oflag&sysapi.O_RSYNC != 0 {
+		fdflags |= wasip1.FD_RSYNC
+	}
+	if f.Oflag&sysapi.O_SYNC != 0 {
+		fdflags |= wasip1.FD_SYNC
+	}
 
 	var fsRightsBase uint32
 	var fsRightsInheriting uint32
@@ -228,6 +239,15 @@ func fdFdstatGetFn(_ context.Context, mod api.Module, params []uint64) sysapi.Er
 		fsRightsBase = fileRightsBase &^ wasip1.RIGHT_FD_SEEK &^ wasip1.RIGHT_FD_TELL
 	default:
 		fsRightsBase = fileRightsBase
+		if f.Opened {
+			// A file opened by path_open has the rights its access mode gives.
+			switch f.Oflag & (sysapi.O_RDONLY | sysapi.O_WRONLY | sysapi.O_RDWR) {
+			case sysapi.O_RDONLY:
+				fsRightsBase &^= wasip1.RIGHT_FD_WRITE
+			case sysapi.O_WRONLY:
+				fsRightsBase &^= wasip1.RIGHT_FD_READ
+			}
+		}
 	}
 
 	writeFdstat(buf, fileType, fdflags, fsRightsBase, fsRightsInheriting)
@@ -278,7 +298,9 @@ const dirRightsBase = wasip1.RIGHT_FD_DATASYNC |
 	wasip1.RIGHT_PATH_RENAME_SOURCE |
 	wasip1.RIGHT_PATH_RENAME_TARGET |
 	wasip1.RIGHT_PATH_FILESTAT_GET |
-	wasip1.RIGHT_PATH_FILESTAT_SET_SIZE |
+	// RIGHT_PATH_FILESTAT_SET_SIZE is left out: wasi-testsuite reads it as a
+	// right that can be dropped and is then enforced, which rights here are
+	// not. See fdFdstatSetRights.
 	wasip1.RIGHT_PATH_FILESTAT_SET_TIMES |
 	wasip1.RIGHT_FD_FILESTAT_GET |
 	wasip1.RIGHT_FD_FILESTAT_SET_TIMES |
@@ -331,14 +353,24 @@ func fdFdstatSetFlagsFn(_ context.Context, mod api.Module, params []uint64) sysa
 	return 0
 }
 
-// fdFdstatSetRights will not be implemented as rights were removed from WASI.
+// fdFdstatSetRights reports ENOTSUP for an open fd, as rights were removed
+// from WASI and are not enforced. wasi-testsuite reads ENOTSUP as a host
+// without rights, which wasmtime is too.
 //
 // See https://github.com/bytecodealliance/wasmtime/pull/4666
-var fdFdstatSetRights = stubFunction(
-	wasip1.FdFdstatSetRightsName,
+var fdFdstatSetRights = newHostFunc(
+	wasip1.FdFdstatSetRightsName, fdFdstatSetRightsFn,
 	[]wasm.ValueType{i32, i64, i64},
 	"fd", "fs_rights_base", "fs_rights_inheriting",
 )
+
+func fdFdstatSetRightsFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno {
+	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
+	if _, ok := fsc.LookupFile(int32(params[0])); !ok {
+		return sysapi.EBADF
+	}
+	return sysapi.ENOTSUP
+}
 
 // fdFilestatGet is the WASI function named FdFilestatGetName which returns
 // the stat attributes of an open file.
@@ -669,12 +701,13 @@ func fdPrestatDirNameFn(_ context.Context, mod api.Module, params []uint64) sysa
 		return errno
 	}
 
-	// Some runtimes may have another semantics. See /RATIONALE.md
-	if uint32(len(name)) < pathLen {
+	// path_len is the size of the buffer at path, which must hold the name.
+	// See /RATIONALE.md
+	if pathLen < uint32(len(name)) {
 		return sysapi.ENAMETOOLONG
 	}
 
-	if !mod.Memory().WriteString(path, name[:pathLen]) {
+	if !mod.Memory().WriteString(path, name) {
 		return sysapi.EFAULT
 	}
 	return 0
@@ -1478,6 +1511,9 @@ func pathFilestatSetTimesFn(_ context.Context, mod api.Module, params []uint64) 
 	if symlinkFollow {
 		return preopen.Utimens(pathName, atim, mtim)
 	}
+	if lfs, ok := preopen.(sysfs.LutimensFS); ok {
+		return lfs.Lutimens(pathName, atim, mtim)
+	}
 	// Otherwise, we need to emulate don't follow by opening the file by path.
 	if f, errno := preopen.OpenFile(pathName, sysapi.O_WRONLY, 0); errno != 0 {
 		return errno
@@ -1502,8 +1538,10 @@ func pathLinkFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
 
 	oldFD := int32(params[0])
-	// TODO: use old_flags?
-	_ = uint32(params[1])
+	// Linking to what a symlink points to is not supported, as in wasmtime.
+	if uint16(params[1])&wasip1.LOOKUP_SYMLINK_FOLLOW != 0 {
+		return sysapi.EINVAL
+	}
 	oldPath := uint32(params[2])
 	oldPathLen := uint32(params[3])
 
@@ -1922,8 +1960,9 @@ func pathReadlinkFn(_ context.Context, mod api.Module, params []uint64) sysapi.E
 		return errno
 	}
 
+	// As readlink(2), a buffer too small for the target gets its start.
 	if len(dst) > int(bufLen) {
-		return sysapi.ERANGE
+		dst = dst[:bufLen]
 	}
 
 	if ok := mem.WriteString(buf, dst); !ok {

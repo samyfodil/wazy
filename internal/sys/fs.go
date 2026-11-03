@@ -47,6 +47,11 @@ type FileEntry struct {
 	// IsPreopen is a directory that is lazily opened.
 	IsPreopen bool
 
+	// Opened is set on a file opened by path, and Oflag holds how it was
+	// opened. Stdio, preopens and sockets have neither.
+	Opened bool
+	Oflag  sys.Oflag
+
 	// FS is the filesystem associated with the pre-open.
 	FS sys.FS
 
@@ -298,7 +303,7 @@ func (c *FSContext) OpenFileAs(fs sys.FS, path string, mount sys.FS, name string
 	if f, errno := fs.OpenFile(path, flag, perm); errno != 0 {
 		return 0, errno
 	} else {
-		fe := &FileEntry{FS: mount, File: f}
+		fe := &FileEntry{FS: mount, File: f, Opened: true, Oflag: flag}
 		if name == "/" || name == "." {
 			fe.Name = ""
 		} else {
@@ -313,27 +318,10 @@ func (c *FSContext) OpenFileAs(fs sys.FS, path string, mount sys.FS, name string
 }
 
 // Renumber assigns the file pointed by the descriptor `from` to `to`.
-// isDirPreopen reports whether fd is a pre-opened *directory*, the thing
-// Renumber must refuse: removing one breaks path resolution for every relative
-// path underneath it.
-//
-// The stdio slots are registered as preopens too (see stdio.go), but they are
-// streams, not roots, and the WASI spec carves out nothing for them. Refusing
-// them breaks wasi-libc's freopen, which is open-then-dup3 with dup3 backed by
-// fd_renumber: freopen(path, mode, stdin) would fail, and musl's failure path
-// then closes the original stream, leaving the guest with no stdin at all.
-// wasmtime allows renumbering the stdio slots. See
-// https://github.com/tetratelabs/wazero/issues/2518.
-func isDirPreopen(f *FileEntry, fd int32) bool {
-	return f.IsPreopen && fd > FdStderr
-}
-
 func (c *FSContext) Renumber(from, to int32) sys.Errno {
 	fromFile, ok := c.openedFiles.Lookup(from)
 	if !ok || to < 0 {
 		return sys.EBADF
-	} else if isDirPreopen(fromFile, from) {
-		return sys.ENOTSUP
 	}
 
 	// dup2(fd, fd) is a no-op returning fd. Without this the destination close
@@ -343,17 +331,13 @@ func (c *FSContext) Renumber(from, to int32) sys.Errno {
 		return 0
 	}
 
-	// If toFile is already open, we close it to prevent windows lock issues.
-	//
-	// The doc is unclear and other implementations do nothing for already-opened To FDs.
-	// https://github.com/WebAssembly/WASI/blob/snapshot-01/phases/snapshot/docs.md#-fd_renumberfd-fd-to-fd---errno
-	// https://github.com/bytecodealliance/wasmtime/blob/main/crates/wasi-common/src/snapshots/preview_1.rs#L531-L546
-	if toFile, ok := c.openedFiles.Lookup(to); ok {
-		if isDirPreopen(toFile, to) {
-			return sys.ENOTSUP
-		}
-		_ = toFile.File.Close()
+	// The destination must be open, and is closed in place of the source, as
+	// wasmtime has it: fd_renumber is not dup2 onto any number.
+	toFile, ok := c.openedFiles.Lookup(to)
+	if !ok {
+		return sys.EBADF
 	}
+	_ = toFile.File.Close()
 
 	c.openedFiles.Delete(from)
 	if !c.openedFiles.InsertAt(fromFile, to) {

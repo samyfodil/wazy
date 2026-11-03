@@ -20,3 +20,8 @@ func readFd(fd uintptr, buf []byte) (int, sys.Errno) {
 func writeFd(fd uintptr, buf []byte) (int, sys.Errno) {
 	return -1, sys.ENOSYS
 }
+
+// pwriteFd returns ENOSYS on unsupported platforms.
+func pwriteFd(uintptr, []byte, int64) (int, sys.Errno) {
+	return 0, sys.ENOSYS
+}

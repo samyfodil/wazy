@@ -73,6 +73,8 @@ func Test_fdAllocate(t *testing.T) {
 		requireErrnoResult(t, wasip1.ErrnoInval, mod, wasip1.FdAllocateName, uint64(fd), uint64(minusOne), uint64(minusOne))
 		requireErrnoResult(t, wasip1.ErrnoInval, mod, wasip1.FdAllocateName, uint64(fd), 0, uint64(minusOne))
 		requireErrnoResult(t, wasip1.ErrnoInval, mod, wasip1.FdAllocateName, uint64(fd), uint64(minusOne), 0)
+		// A directory has no space to allocate, whatever size it reports.
+		requireErrnoResult(t, wasip1.ErrnoIsdir, mod, wasip1.FdAllocateName, uint64(sys.FdPreopen), 0, 1)
 	})
 
 	t.Run("do not change size", func(t *testing.T) {
@@ -110,6 +112,8 @@ func Test_fdAllocate(t *testing.T) {
 <== errno=EINVAL
 ==> wasi_snapshot_preview1.fd_allocate(fd=4,offset=-1,len=0)
 <== errno=EINVAL
+==> wasi_snapshot_preview1.fd_allocate(fd=3,offset=0,len=1)
+<== errno=EISDIR
 ==> wasi_snapshot_preview1.fd_allocate(fd=4,offset=0,len=10)
 <== errno=ESUCCESS
 ==> wasi_snapshot_preview1.fd_allocate(fd=4,offset=5,len=5)
@@ -233,6 +237,45 @@ func closePipe(r, w *os.File) {
 	w.Close()
 }
 
+// Test_fdFdstatGet_opened checks a file opened by path has the rights its
+// access mode gives, and reports the sync flags it was opened with.
+func Test_fdFdstatGet_opened(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(joinPath(tmpDir, "f"), nil, 0o600))
+	mod, r, _ := requireProxyModule(t, wazy.NewModuleConfig().
+		WithFSConfig(wazy.NewFSConfig().WithDirMount(tmpDir, "/")))
+	defer r.Close(testCtx)
+	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
+	preopen := getPreopen(t, fsc)
+
+	for _, tc := range []struct {
+		name               string
+		flag               sysapi.Oflag
+		read, write, fsync bool
+	}{
+		{name: "read-only", flag: sysapi.O_RDONLY, read: true},
+		{name: "write-only", flag: sysapi.O_WRONLY, write: true},
+		{name: "read-write", flag: sysapi.O_RDWR, read: true, write: true},
+		{name: "sync", flag: sysapi.O_RDWR | sysapi.O_SYNC, read: true, write: true, fsync: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fd, errno := fsc.OpenFile(preopen, "f", tc.flag, 0)
+			require.EqualErrno(t, 0, errno)
+			defer func() { require.EqualErrno(t, 0, fsc.CloseFile(fd)) }()
+
+			const resultFdstat = 0x100
+			requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.FdFdstatGetName, uint64(fd), resultFdstat)
+			fdflags, ok := mod.Memory().ReadUint16Le(resultFdstat + 2)
+			require.True(t, ok)
+			rights, ok := mod.Memory().ReadUint64Le(resultFdstat + 8)
+			require.True(t, ok)
+			require.Equal(t, tc.read, rights&uint64(wasip1.RIGHT_FD_READ) != 0)
+			require.Equal(t, tc.write, rights&uint64(wasip1.RIGHT_FD_WRITE) != 0)
+			require.Equal(t, tc.fsync, fdflags&wasip1.FD_SYNC != 0)
+		})
+	}
+}
+
 func Test_fdFdstatGet(t *testing.T) {
 	file, dir := "animals.txt", "sub"
 	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig().WithFS(fstest.FS))
@@ -316,8 +359,8 @@ func Test_fdFdstatGet(t *testing.T) {
 			expectedMemory: []byte{
 				3, 0, // fs_filetype
 				0, 0, 0, 0, 0, 0, // fs_flags
-				0x19, 0xfe, 0xbf, 0x7, 0x0, 0x0, 0x0, 0x0, // fs_rights_base
-				0xff, 0xff, 0xff, 0xf, 0x0, 0x0, 0x0, 0x0, // fs_rights_inheriting
+				0x19, 0xfe, 0xb7, 0x7, 0x0, 0x0, 0x0, 0x0, // fs_rights_base
+				0xff, 0xff, 0xf7, 0xf, 0x0, 0x0, 0x0, 0x0, // fs_rights_inheriting
 			},
 			expectedLog: `
 ==> wasi_snapshot_preview1.fd_fdstat_get(fd=3)
@@ -344,8 +387,8 @@ func Test_fdFdstatGet(t *testing.T) {
 			expectedMemory: []byte{
 				3, 0, // fs_filetype
 				0, 0, 0, 0, 0, 0, // fs_flags
-				0x19, 0xfe, 0xbf, 0x7, 0x0, 0x0, 0x0, 0x0, // fs_rights_base
-				0xff, 0xff, 0xff, 0xf, 0x0, 0x0, 0x0, 0x0, // fs_rights_inheriting
+				0x19, 0xfe, 0xb7, 0x7, 0x0, 0x0, 0x0, 0x0, // fs_rights_base
+				0xff, 0xff, 0xf7, 0xf, 0x0, 0x0, 0x0, 0x0, // fs_rights_inheriting
 			},
 			expectedLog: `
 ==> wasi_snapshot_preview1.fd_fdstat_get(fd=5)
@@ -650,13 +693,20 @@ func Test_fdFdstatSetFlags(t *testing.T) {
 	})
 }
 
-// Test_fdFdstatSetRights only tests it is stubbed for GrainLang per #271
+// Test_fdFdstatSetRights checks rights are reported unsupported for an open
+// fd, which wasi-testsuite reads as a host without rights.
 func Test_fdFdstatSetRights(t *testing.T) {
-	log := requireErrnoNosys(t, wasip1.FdFdstatSetRightsName, 0, 0, 0)
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
+	defer r.Close(testCtx)
+
+	requireErrnoResult(t, wasip1.ErrnoNotsup, mod, wasip1.FdFdstatSetRightsName, uint64(sys.FdStdout), 0, 0)
+	requireErrnoResult(t, wasip1.ErrnoBadf, mod, wasip1.FdFdstatSetRightsName, 42, 0, 0)
 	require.Equal(t, `
-==> wasi_snapshot_preview1.fd_fdstat_set_rights(fd=0,fs_rights_base=,fs_rights_inheriting=)
-<== errno=ENOSYS
-`, log)
+==> wasi_snapshot_preview1.fd_fdstat_set_rights(fd=1,fs_rights_base=,fs_rights_inheriting=)
+<== errno=ENOTSUP
+==> wasi_snapshot_preview1.fd_fdstat_set_rights(fd=42,fs_rights_base=,fs_rights_inheriting=)
+<== errno=EBADF
+`, "\n"+log.String())
 }
 
 func Test_fdFilestatGet(t *testing.T) {
@@ -1459,9 +1509,9 @@ func Test_fdPrestatDirName(t *testing.T) {
 	defer r.Close(testCtx)
 
 	path := uint32(1)    // arbitrary offset
-	pathLen := uint32(0) // shorter than len("/") to prove truncation is ok
+	pathLen := uint32(2) // longer than len("/"), which leaves the rest alone
 	expectedMemory := []byte{
-		'?', '?', '?', '?',
+		'?', '/', '?', '?',
 	}
 
 	maskMemory(t, mod, len(expectedMemory))
@@ -1469,7 +1519,7 @@ func Test_fdPrestatDirName(t *testing.T) {
 	requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.FdPrestatDirNameName, uint64(sys.FdPreopen), uint64(path), uint64(pathLen))
 	require.Equal(t, `
 ==> wasi_snapshot_preview1.fd_prestat_dir_name(fd=3)
-<== (path=,errno=ESUCCESS)
+<== (path=/?,errno=ESUCCESS)
 `, "\n"+log.String())
 
 	actual, ok := mod.Memory().Read(0, uint32(len(expectedMemory)))
@@ -1518,10 +1568,10 @@ func Test_fdPrestatDirName_Errors(t *testing.T) {
 `,
 		},
 		{
-			name:          "pathLen exceeds the length of the dir name",
+			name:          "pathLen shorter than the dir name",
 			fd:            sys.FdPreopen,
 			path:          validAddress,
-			pathLen:       pathLen + 1,
+			pathLen:       pathLen - 1,
 			expectedErrno: wasip1.ErrnoNametoolong,
 			expectedLog: `
 ==> wasi_snapshot_preview1.fd_prestat_dir_name(fd=3)
@@ -2443,10 +2493,10 @@ func Test_fdRenumber(t *testing.T) {
 			name:          "from=preopen",
 			from:          sys.FdPreopen,
 			to:            dirFD,
-			expectedErrno: wasip1.ErrnoNotsup,
+			expectedErrno: wasip1.ErrnoSuccess,
 			expectedLog: `
 ==> wasi_snapshot_preview1.fd_renumber(fd=3,to=5)
-<== errno=ENOTSUP
+<== errno=ESUCCESS
 `,
 		},
 		{
@@ -2473,10 +2523,10 @@ func Test_fdRenumber(t *testing.T) {
 			name:          "to=preopen",
 			from:          dirFD,
 			to:            sys.FdPreopen,
-			expectedErrno: wasip1.ErrnoNotsup,
+			expectedErrno: wasip1.ErrnoSuccess,
 			expectedLog: `
 ==> wasi_snapshot_preview1.fd_renumber(fd=5,to=3)
-<== errno=ENOTSUP
+<== errno=ESUCCESS
 `,
 		},
 		{
@@ -2566,23 +2616,23 @@ func Test_fdRenumber(t *testing.T) {
 `,
 		},
 		{
-			name:          "dir to any",
+			name:          "dir to unopened",
 			from:          dirFD,
 			to:            12345,
-			expectedErrno: wasip1.ErrnoSuccess,
+			expectedErrno: wasip1.ErrnoBadf,
 			expectedLog: `
 ==> wasi_snapshot_preview1.fd_renumber(fd=5,to=12345)
-<== errno=ESUCCESS
+<== errno=EBADF
 `,
 		},
 		{
-			name:          "file to any",
+			name:          "file to unopened",
 			from:          fileFD,
 			to:            54,
-			expectedErrno: wasip1.ErrnoSuccess,
+			expectedErrno: wasip1.ErrnoBadf,
 			expectedLog: `
 ==> wasi_snapshot_preview1.fd_renumber(fd=4,to=54)
-<== errno=ESUCCESS
+<== errno=EBADF
 `,
 		},
 	}
@@ -4492,6 +4542,22 @@ func Test_pathReadlink(t *testing.T) {
 		}
 	})
 
+	// As readlink(2), a buffer too small for the target gets its start.
+	t.Run("short buffer", func(t *testing.T) {
+		const buf, bufLen, resultBufused = 0x100, 4, 0x200
+		require.True(t, mem.Write(buf, []byte("?????")))
+		requireErrnoResult(t, wasip1.ErrnoSuccess, mod, wasip1.PathReadlinkName,
+			uint64(dirFD), uint64(destinationPath), uint64(len(destinationPathName)),
+			buf, bufLen, resultBufused)
+
+		size, ok := mem.ReadUint32Le(resultBufused)
+		require.True(t, ok)
+		require.Equal(t, uint32(bufLen), size)
+		actual, ok := mem.Read(buf, bufLen+1)
+		require.True(t, ok)
+		require.Equal(t, originalRelativePath[:bufLen]+"?", string(actual))
+	})
+
 	t.Run("errors", func(t *testing.T) {
 		for _, tc := range []struct {
 			name                                      string
@@ -4502,15 +4568,6 @@ func Test_pathReadlink(t *testing.T) {
 			{expectedErrno: wasip1.ErrnoInval},
 			{expectedErrno: wasip1.ErrnoInval, pathLen: 100},
 			{expectedErrno: wasip1.ErrnoInval, bufLen: 100},
-			{
-				name:          "bufLen too short",
-				expectedErrno: wasip1.ErrnoRange,
-				fd:            dirFD,
-				bufLen:        10,
-				path:          destinationPath,
-				pathLen:       uint32(len(destinationPathName)),
-				buf:           0,
-			},
 			{
 				name:          "path past memory",
 				expectedErrno: wasip1.ErrnoFault,
@@ -4692,6 +4749,24 @@ func Test_pathRemoveDirectory_Errors(t *testing.T) {
 			require.Equal(t, tc.expectedLog, "\n"+log.String())
 		})
 	}
+}
+
+// Test_pathLink_symlinkFollow checks linking to what a symlink points to is
+// refused, as in wasmtime and as wasi-testsuite's path_link expects.
+func Test_pathLink_symlinkFollow(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(joinPath(tmpDir, "f"), nil, 0o600))
+	mod, r, _ := requireProxyModule(t, wazy.NewModuleConfig().
+		WithFSConfig(wazy.NewFSConfig().WithDirMount(tmpDir, "/")))
+	defer r.Close(testCtx)
+
+	mem := mod.Memory()
+	require.True(t, mem.Write(0, []byte("f")))
+	require.True(t, mem.Write(8, []byte("link")))
+	requireErrnoResult(t, wasip1.ErrnoInval, mod, wasip1.PathLinkName,
+		uint64(sys.FdPreopen), uint64(wasip1.LOOKUP_SYMLINK_FOLLOW), 0, 1, uint64(sys.FdPreopen), 8, 4)
+	_, err := os.Lstat(joinPath(tmpDir, "link"))
+	require.True(t, os.IsNotExist(err))
 }
 
 func Test_pathSymlink(t *testing.T) {

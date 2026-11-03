@@ -99,6 +99,10 @@ func Test_pollOneoff_NoClockSubscription(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, nsubscriptions, nevents)
 	require.Zero(t, len(slept))
+	// stdout is writable, which wasi-testsuite's poll_oneoff_stdio checks.
+	errno, ok := mod.Memory().ReadUint16Le(out + 8)
+	require.True(t, ok)
+	require.Equal(t, uint16(wasip1.ErrnoSuccess), errno)
 }
 
 func Test_pollOneoff_Errors(t *testing.T) {

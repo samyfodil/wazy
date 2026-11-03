@@ -252,8 +252,10 @@ func TestFSContext_Renumber(t *testing.T) {
 
 	defer fsc.Close()
 
-	for _, toFd := range []int32{10, 100, 100} {
+	for range 3 {
 		fromFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		toFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
 		require.EqualErrno(t, 0, errno)
 
 		prevDirFile, ok := fsc.LookupFile(fromFd)
@@ -272,19 +274,44 @@ func TestFSContext_Renumber(t *testing.T) {
 	}
 
 	t.Run("errors", func(t *testing.T) {
-		// Sanity check for 3 being preopen.
+		// From does not exist.
+		require.Equal(t, sys.EBADF, fsc.Renumber(12345, 3))
+
+		// To is not open: fd_renumber replaces a descriptor, it does not
+		// make one.
+		fromFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, sys.EBADF, fsc.Renumber(fromFd, 12345))
+		_, ok := fsc.LookupFile(fromFd)
+		require.True(t, ok)
+	})
+
+	// A preopen is an ordinary descriptor to fd_renumber, as in wasmtime, and
+	// wasi-testsuite's overwrite_preopen renumbers onto one.
+	t.Run("preopens", func(t *testing.T) {
+		var c Context
+		require.NoError(t, c.InitFSContext(nil, nil, nil, []sys.FS{dirFS}, []string{"/"}, nil))
+		fsc := c.fsc
+		defer fsc.Close()
+
 		preopen, ok := fsc.LookupFile(3)
 		require.True(t, ok)
 		require.True(t, preopen.IsPreopen)
 
-		// From is preopen.
-		require.Equal(t, sys.ENOTSUP, fsc.Renumber(3, 100))
+		fromFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		opened, _ := fsc.LookupFile(fromFd)
+		require.EqualErrno(t, 0, fsc.Renumber(fromFd, 3))
+		replaced, ok := fsc.LookupFile(3)
+		require.True(t, ok)
+		require.Equal(t, opened, replaced)
 
-		// From does not exist.
-		require.Equal(t, sys.EBADF, fsc.Renumber(12345, 3))
-
-		// Both are preopen.
-		require.Equal(t, sys.ENOTSUP, fsc.Renumber(3, 3))
+		toFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		require.EqualErrno(t, 0, fsc.Renumber(3, toFd))
+		moved, ok := fsc.LookupFile(toFd)
+		require.True(t, ok)
+		require.Equal(t, opened, moved)
 	})
 
 	// The stdio slots are registered as preopens, but they are streams, not
@@ -313,7 +340,9 @@ func TestFSContext_Renumber(t *testing.T) {
 			require.False(t, ok)
 
 			// And renumbering it away works too: it is an ordinary stream.
-			require.EqualErrno(t, 0, fsc.Renumber(stdioFd, 200+stdioFd))
+			toFd, errno := fsc.OpenFile(dirFS, dirName, sys.O_RDONLY, 0)
+			require.EqualErrno(t, 0, errno)
+			require.EqualErrno(t, 0, fsc.Renumber(stdioFd, toFd))
 			_, ok = fsc.LookupFile(stdioFd)
 			require.False(t, ok)
 		}

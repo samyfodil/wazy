@@ -304,6 +304,19 @@ func (d *dirFS) Link(oldName, newName string) sys.Errno {
 		return errno
 	}
 	defer d.done(r)
+	// A directory cannot be hard linked, which Windows reports as access
+	// denied.
+	if info, err := r.Lstat(oldName); err == nil && info.IsDir() {
+		return sys.EPERM
+	}
+	// A new name ending in a slash names a directory, which a link never
+	// makes, and Windows drops the slash.
+	if strings.HasSuffix(newName, "/") {
+		if _, err := r.Lstat(newName); err != nil {
+			return rootErrno(err)
+		}
+		return sys.EEXIST
+	}
 	errno = linkIn(r, oldName, newName)
 	if errno == sys.EINVAL && newName == "." {
 		errno = sys.EEXIST // the directory itself, which Windows reports as EINVAL
@@ -330,9 +343,10 @@ func (d *dirFS) Symlink(oldName, link string) sys.Errno {
 	// Windows does not read "/" as a separator in a symlink target, and
 	// os.Root before Go 1.27 stores the target as given.
 	errno = rootErrno(r.Symlink(filepath.FromSlash(oldName), link))
-	// Windows reports access denied, not that it exists, when `link` is
-	// already a symlink, e.g. a dangling one. Checking only after the failure
-	// leaves no window between the check and the create.
+	// Where something already is, Windows reports access denied, or EISDIR
+	// for a directory written with a trailing slash. POSIX reports EEXIST.
+	// Checking only after the failure leaves no window between the check
+	// and the create.
 	if errno != 0 && runtime.GOOS == "windows" {
 		if _, err := r.Lstat(link); err == nil {
 			errno = sys.EEXIST

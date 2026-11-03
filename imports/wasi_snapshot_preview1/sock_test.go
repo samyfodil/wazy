@@ -65,6 +65,17 @@ func Test_sockAccept(t *testing.T) {
 	}
 }
 
+func Test_sockShutdown_notSocket(t *testing.T) {
+	mod, r, log := requireProxyModule(t, wazy.NewModuleConfig())
+	defer r.Close(testCtx)
+
+	requireErrnoResult(t, wasip1.ErrnoNotsock, mod, wasip1.SockShutdownName, uint64(sys.FdStdout), uint64(wasip1.SD_RD))
+	require.Equal(t, `
+==> wasi_snapshot_preview1.sock_shutdown(fd=1,how=RD)
+<== errno=ENOTSOCK
+`, "\n"+log.String())
+}
+
 func Test_sockShutdown(t *testing.T) {
 	tests := []struct {
 		name          string

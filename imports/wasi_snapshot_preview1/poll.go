@@ -161,9 +161,9 @@ func pollOneoffFn(_ context.Context, mod api.Module, params []uint64) sys.Errno 
 			if fd < 0 {
 				return sys.EBADF
 			}
-			if _, ok := fsc.LookupFile(fd); ok {
-				evt.errno = wasip1.ErrnoNotsup
-			} else {
+			// An open fd is reported writable at once, as a file or a
+			// terminal always is.
+			if _, ok := fsc.LookupFile(fd); !ok {
 				evt.errno = wasip1.ErrnoBadf
 			}
 			nevents++
