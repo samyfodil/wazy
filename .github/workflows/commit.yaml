@@ -66,6 +66,9 @@ jobs:
           arch: amd64
         - os: macos-15
           arch: arm64
+        # A 32-bit build, where int is 32 bits wide and a uintptr 4 bytes, on the amd64 runner.
+        - os: ubuntu-24.04
+          arch: "386"
         go-version:
           - "1.26"  # Current Go version
           - "1.25"  # Floor Go version of wazy (current - 1)
@@ -118,16 +121,18 @@ jobs:
 
       # Run -race could be really slow without -short, so run them together on this workflow.
       # Since -short is not added in the scratch tests, all the tests are run in CI in practice.
-      - run: make test go_test_options='-timeout 20m -race -short'
+      # The race detector does not support 386.
+      - run: make test go_test_options='-timeout 20m ${{ matrix.platform.arch != '386' && '-race' || '' }} -short'
         env:
           WAZY_SPECTEST_REQUIRE_CASES: "1"  # the corpus came from the artifact; skipping means it did not
+          GOARCH: ${{ matrix.platform.arch == '386' && '386' || '' }}  # empty builds for the runner's own arch
 
       - name: "Generate coverage report"  # only once (not per OS)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.platform.arch == 'amd64'
         run: make coverage
 
       - name: "Upload coverage report"  # only on main push and only once (not per OS)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && runner.os == 'Linux'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && runner.os == 'Linux' && matrix.platform.arch == 'amd64'
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         run: bash <(curl -s https://codecov.io/bash)

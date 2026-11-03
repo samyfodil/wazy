@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // This file validates the instructions of the GC proposal, the ones prefixed by OpcodeGCPrefix plus ref.eq.
@@ -29,7 +30,7 @@ func isDefaultable(st ValueType) bool {
 
 // gcTypeAt resolves a type index immediate to a defined type of the expected composite kind.
 func (m *Module) gcTypeAt(idx uint32, want CompositeKind, opName string) (*FunctionType, error) {
-	if indexOutOfRange(idx, len(m.TypeSection)) {
+	if u32.OutOfRange(idx, len(m.TypeSection)) {
 		return nil, fmt.Errorf("%s: unknown type %d", opName, idx)
 	}
 	t := &m.TypeSection[idx]
@@ -42,7 +43,7 @@ func (m *Module) gcTypeAt(idx uint32, want CompositeKind, opName string) (*Funct
 
 // fieldAt resolves a field index immediate against a struct type.
 func fieldAt(t *FunctionType, idx uint32, typeIndex uint32, opName string) (FieldType, error) {
-	if indexOutOfRange(idx, len(t.Fields)) {
+	if u32.OutOfRange(idx, len(t.Fields)) {
 		return FieldType{}, fmt.Errorf("%s: unknown field %d in type %d", opName, idx, typeIndex)
 	}
 	return t.Fields[idx], nil
@@ -55,7 +56,7 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 	var read uint64
 	// u32 reads the next u32 immediate, panicking through err on a malformed one.
 	var readErr error
-	u32 := func() uint32 {
+	readU32 := func() uint32 {
 		if readErr != nil {
 			return 0
 		}
@@ -92,7 +93,7 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 
 	switch op {
 	case OpcodeGCStructNew, OpcodeGCStructNewDefault:
-		idx := u32()
+		idx := readU32()
 		if readErr != nil {
 			return read, readErr
 		}
@@ -117,7 +118,7 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 		vs.push(ValueTypeConcreteRef(idx, false))
 
 	case OpcodeGCStructGet, OpcodeGCStructGetS, OpcodeGCStructGetU, OpcodeGCStructSet:
-		typeIdx, fieldIdx := u32(), u32()
+		typeIdx, fieldIdx := readU32(), readU32()
 		if readErr != nil {
 			return read, readErr
 		}
@@ -148,10 +149,10 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 		}
 
 	case OpcodeGCArrayNew, OpcodeGCArrayNewDefault, OpcodeGCArrayNewFixed:
-		idx := u32()
+		idx := readU32()
 		var count uint32
 		if op == OpcodeGCArrayNewFixed {
-			count = u32()
+			count = readU32()
 		}
 		if readErr != nil {
 			return read, readErr
@@ -186,7 +187,7 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 		vs.push(ValueTypeConcreteRef(idx, false))
 
 	case OpcodeGCArrayNewData, OpcodeGCArrayNewElem, OpcodeGCArrayInitData, OpcodeGCArrayInitElem:
-		typeIdx, segIdx := u32(), u32()
+		typeIdx, segIdx := readU32(), readU32()
 		if readErr != nil {
 			return read, readErr
 		}
@@ -207,7 +208,7 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 				return read, fmt.Errorf("%s: unknown data segment %d", name, segIdx)
 			}
 		} else {
-			if indexOutOfRange(segIdx, len(m.ElementSection)) {
+			if u32.OutOfRange(segIdx, len(m.ElementSection)) {
 				return read, fmt.Errorf("%s: unknown element segment %d", name, segIdx)
 			}
 			if !isRefSubtypeOf(m.ElementSection[segIdx].Type, elem, m.TypeSection) {
@@ -237,7 +238,7 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 		}
 
 	case OpcodeGCArrayGet, OpcodeGCArrayGetS, OpcodeGCArrayGetU, OpcodeGCArraySet:
-		idx := u32()
+		idx := readU32()
 		if readErr != nil {
 			return read, readErr
 		}
@@ -274,7 +275,7 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 		vs.push(ValueTypeI32)
 
 	case OpcodeGCArrayFill:
-		idx := u32()
+		idx := readU32()
 		if readErr != nil {
 			return read, readErr
 		}
@@ -299,7 +300,7 @@ func (m *Module) validateGCInstruction(op OpcodeGC, body []byte, vs *valueTypeSt
 		}
 
 	case OpcodeGCArrayCopy:
-		dstIdx, srcIdx := u32(), u32()
+		dstIdx, srcIdx := readU32(), readU32()
 		if readErr != nil {
 			return read, readErr
 		}
@@ -421,7 +422,7 @@ func (m *Module) validateBrOnCast(op OpcodeGC, body []byte, vs *valueTypeStack, 
 	}
 	read += n2
 
-	if indexOutOfRange(label, len(cs.stack)) {
+	if u32.OutOfRange(label, len(cs.stack)) {
 		return read, fmt.Errorf("%s: invalid label index %d", name, label)
 	}
 	if !isRefSubtypeOf(rt2, rt1, m.TypeSection) {

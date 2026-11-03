@@ -3,6 +3,7 @@ package component
 import (
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // TypeTable interns the composite types one host func's signature refers to,
@@ -51,7 +52,7 @@ func (t *TypeTable) Add(td TypeDesc) TypeRef {
 // after the signature is fully built.
 func (t *TypeTable) Resolver() Resolver {
 	return func(idx uint32) binary.TypeDesc {
-		if int(idx) >= len(t.entries) {
+		if u32.OutOfRange(idx, len(t.entries)) {
 			return nil
 		}
 		return t.entries[idx]

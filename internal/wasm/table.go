@@ -8,6 +8,7 @@ import (
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // Table describes the limits of elements and its type in a table.
@@ -238,7 +239,7 @@ type TableInstance struct {
 type ElementInstance = []Reference
 
 // Reference is the runtime representation of RefType which is either RefTypeFuncref or RefTypeExternref.
-type Reference = uintptr
+type Reference = uint64
 
 // TableLimitElements is the default ceiling on how many entries one table may hold. It is the limit V8
 // and SpiderMonkey apply, so no module that runs in a browser is refused, and it holds a table to 80MB
@@ -312,7 +313,7 @@ func (m *Module) validateTable(enabledFeatures api.CoreFeatures, tables []Table,
 		}
 
 		if elem.IsActive() {
-			if indexOutOfRange(elem.TableIndex, len(tables)) {
+			if u32.OutOfRange(elem.TableIndex, len(tables)) {
 				return fmt.Errorf("unknown table %d as active element target", elem.TableIndex)
 			}
 
@@ -472,7 +473,7 @@ func (t *TableInstance) Grow(delta uint32, initialRef Reference) (currentLen uin
 		return 0xffffffff // = -1 in signed 32-bit integer.
 	}
 
-	t.References = append(t.References, make([]uintptr, delta)...)
+	t.References = append(t.References, make([]Reference, delta)...)
 	if initialRef == 0 {
 		return
 	}

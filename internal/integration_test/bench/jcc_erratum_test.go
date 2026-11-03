@@ -1,3 +1,7 @@
+//go:build (amd64 || arm64) && !tinygo
+
+// These tests set platform.CpuFeatures, which is a variable only on amd64 and arm64.
+
 package bench
 
 import (

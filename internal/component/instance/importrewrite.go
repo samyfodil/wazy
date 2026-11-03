@@ -57,7 +57,7 @@ func rewriteEmptyImportModuleName(moduleBytes []byte, newName string) ([]byte, b
 			return nil, false, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: section %d: read size: %w", id, err)
 		}
 		offset += int(n)
-		if offset+int(size) > len(moduleBytes) {
+		if uint64(size) > uint64(len(moduleBytes)-offset) {
 			return nil, false, fmt.Errorf("component/instance: rewriteEmptyImportModuleName: section %d: size %d exceeds remaining bytes", id, size)
 		}
 		body := moduleBytes[offset : offset+int(size)]
@@ -137,7 +137,7 @@ func readCoreWasmName(buf []byte, offset int) (string, int, error) {
 		return "", offset, fmt.Errorf("read length: %w", err)
 	}
 	offset += int(n)
-	if offset+int(length) > len(buf) {
+	if uint64(length) > uint64(len(buf)-offset) {
 		return "", offset, fmt.Errorf("name of length %d exceeds remaining bytes", length)
 	}
 	name := string(buf[offset : offset+int(length)])

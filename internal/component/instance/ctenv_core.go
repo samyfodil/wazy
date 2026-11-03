@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // The core index spaces of a ctEnv: core types, core modules and core
@@ -36,7 +37,7 @@ func (e *ctEnv) spaces() *ctCoreSpaces {
 // an enclosing component's.
 func (e *ctEnv) coreTypeAt(idx uint32) (ctCoreType, error) {
 	c := e.comp
-	if int(idx) >= len(c.CoreTypeSpace) {
+	if u32.OutOfRange(idx, len(c.CoreTypeSpace)) {
 		return ctCoreType{}, fmt.Errorf("unknown core type %d: type index out of bounds", idx)
 	}
 	en := c.CoreTypeSpace[idx]
@@ -64,7 +65,7 @@ func (e *ctEnv) coreTypeAt(idx uint32) (ctCoreType, error) {
 // for.
 func (e *ctEnv) moduleAt(idx uint32) (m *ctModule, err error) {
 	c := e.comp
-	if int(idx) >= len(c.CoreModuleSpace) {
+	if u32.OutOfRange(idx, len(c.CoreModuleSpace)) {
 		return nil, fmt.Errorf("unknown module %d: module index out of bounds", idx)
 	}
 	sp := e.spaces()
@@ -118,7 +119,7 @@ func (e *ctEnv) coreModuleIsDefinition(idx uint32) bool {
 // instantiates exports, or the items it exports inline.
 func (e *ctEnv) coreInstanceAt(k uint32) (in *ctCoreInstance, err error) {
 	c := e.comp
-	if int(k) >= len(c.CoreInstances) {
+	if u32.OutOfRange(k, len(c.CoreInstances)) {
 		return nil, fmt.Errorf("unknown core instance %d: instance index out of bounds", k)
 	}
 	sp := e.spaces()
@@ -155,7 +156,7 @@ func (e *ctEnv) coreItemAt(sort byte, idx uint32) (ctCoreExtern, error) {
 	c := e.comp
 	var al *binary.AliasDef
 	if sort == 0x00 {
-		if int(idx) >= len(c.CoreFuncSpace) {
+		if u32.OutOfRange(idx, len(c.CoreFuncSpace)) {
 			return ctCoreExtern{}, fmt.Errorf("unknown function %d: function index out of bounds", idx)
 		}
 		if en := c.CoreFuncSpace[idx]; en.Kind == binary.CoreFuncFromAlias {

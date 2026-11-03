@@ -8,6 +8,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // This file carries the resource support for internal nested-component
@@ -39,7 +40,7 @@ import (
 func resolveDefinedResourceDtors(comp *binary.Component, coreFuncTarget func(int) (api.Module, string, error)) map[uint32]func() api.Function {
 	var out map[uint32]func() api.Function
 	for idx, entry := range comp.TypeSpace {
-		if entry.Kind != binary.TypeSpaceDef || int(entry.Def) >= len(comp.Types) {
+		if entry.Kind != binary.TypeSpaceDef || u32.OutOfRange(entry.Def, len(comp.Types)) {
 			continue
 		}
 		rd, ok := comp.Types[entry.Def].Descriptor.(binary.ResourceDesc)
@@ -217,11 +218,11 @@ func exportedInstanceResourceDefs(comp *binary.Component, instanceExportName str
 			argByName[arg.Name] = arg
 		}
 		for _, member := range shim.Exports {
-			if member.ExternType != 0x03 || int(member.ExternIndex) >= len(shim.TypeSpace) { // type
+			if member.ExternType != 0x03 || u32.OutOfRange(member.ExternIndex, len(shim.TypeSpace)) { // type
 				continue
 			}
 			e := shim.TypeSpace[member.ExternIndex]
-			if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(shim.Imports) {
+			if e.Kind != binary.TypeSpaceImport || u32.OutOfRange(e.Import, len(shim.Imports)) {
 				continue
 			}
 			arg, ok := argByName[shim.Imports[e.Import].Name]
@@ -304,11 +305,11 @@ func uninstantiatedTypeExport(comp *binary.Component, cfg *config, inst *binary.
 		return 0, false
 	}
 	for _, ex := range shim.Exports {
-		if ex.Name != name || ex.ExternType != ctSortType || int(ex.ExternIndex) >= len(shim.TypeSpace) {
+		if ex.Name != name || ex.ExternType != ctSortType || u32.OutOfRange(ex.ExternIndex, len(shim.TypeSpace)) {
 			continue
 		}
 		e := shim.TypeSpace[ex.ExternIndex]
-		if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(shim.Imports) {
+		if e.Kind != binary.TypeSpaceImport || u32.OutOfRange(e.Import, len(shim.Imports)) {
 			return 0, false
 		}
 		for _, a := range inst.Args {
@@ -328,11 +329,11 @@ func uninstantiatedTypeExport(comp *binary.Component, cfg *config, inst *binary.
 // it. ok is false for a resource comp defines itself.
 func traceResource(comp *binary.Component, cfg *config, byIdx map[int]*Instance, typeIdx uint32) (prov *Instance, idx uint32, ok bool) {
 	for range instanceArgMaxDepth {
-		if int(typeIdx) >= len(comp.TypeSpace) {
+		if u32.OutOfRange(typeIdx, len(comp.TypeSpace)) {
 			break
 		}
 		e := comp.TypeSpace[typeIdx]
-		if e.Kind != binary.TypeSpaceAlias || int(e.Alias) >= len(comp.Aliases) {
+		if e.Kind != binary.TypeSpaceAlias || u32.OutOfRange(e.Alias, len(comp.Aliases)) {
 			break
 		}
 		al := comp.Aliases[e.Alias]
@@ -478,24 +479,24 @@ func resolveInstanceArgTarget(comp *binary.Component, idx uint32) (instanceArgTa
 	}
 	cur := idx
 	for depth := 0; depth < instanceArgMaxDepth; depth++ {
-		if int(cur) >= len(comp.ComponentInstanceSpace) {
+		if u32.OutOfRange(cur, len(comp.ComponentInstanceSpace)) {
 			return instanceArgTarget{}, fmt.Errorf("instance %d is past the end of the %d-entry component instance index space", cur, len(comp.ComponentInstanceSpace))
 		}
 		switch e := comp.ComponentInstanceSpace[cur]; e.Kind {
 		case binary.ComponentInstanceFromDefinition:
 			return instanceArgTarget{spaceIdx: cur, projection: reversed()}, nil
 		case binary.ComponentInstanceFromImport:
-			if int(e.Import) >= len(comp.Imports) {
+			if u32.OutOfRange(e.Import, len(comp.Imports)) {
 				return instanceArgTarget{}, fmt.Errorf("instance %d names import %d, past the end of the %d import(s)", cur, e.Import, len(comp.Imports))
 			}
 			return instanceArgTarget{imported: true, importName: comp.Imports[e.Import].Name, projection: reversed()}, nil
 		case binary.ComponentInstanceFromExport:
-			if int(e.Export) >= len(comp.Exports) {
+			if u32.OutOfRange(e.Export, len(comp.Exports)) {
 				return instanceArgTarget{}, fmt.Errorf("instance %d names export %d, past the end of the %d export(s)", cur, e.Export, len(comp.Exports))
 			}
 			cur = comp.Exports[e.Export].ExternIndex
 		case binary.ComponentInstanceFromAlias:
-			if int(e.Alias) >= len(comp.Aliases) {
+			if u32.OutOfRange(e.Alias, len(comp.Aliases)) {
 				return instanceArgTarget{}, fmt.Errorf("instance %d names alias %d, past the end of the %d alias(es)", cur, e.Alias, len(comp.Aliases))
 			}
 			al := comp.Aliases[e.Alias]
@@ -662,7 +663,7 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 // core func is always ready here (instantiateNestedInstances, this func's
 // only caller, runs after the core-instance loop that builds it).
 func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest *nesting, byIdx map[int]*Instance, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (*hostImport, error) {
-	if int(funcIdx) >= len(comp.ComponentFuncSpace) {
+	if u32.OutOfRange(funcIdx, len(comp.ComponentFuncSpace)) {
 		return nil, fmt.Errorf("func arg index %d out of range of the component func index space", funcIdx)
 	}
 	e := comp.ComponentFuncSpace[funcIdx]
@@ -689,7 +690,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest 
 		hi.lineage = true
 		return hi, nil
 	}
-	if int(e.Alias) >= len(comp.Aliases) {
+	if u32.OutOfRange(e.Alias, len(comp.Aliases)) {
 		return nil, fmt.Errorf("func arg index %d is not an instance-export alias", funcIdx)
 	}
 	al := comp.Aliases[e.Alias]
@@ -757,7 +758,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest 
 func importedTypeIndex(comp *binary.Component, importName string) (uint32, bool) {
 	for idx := range comp.TypeSpace {
 		e := comp.TypeSpace[idx]
-		if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(comp.Imports) {
+		if e.Kind != binary.TypeSpaceImport || u32.OutOfRange(e.Import, len(comp.Imports)) {
 			continue
 		}
 		if im := comp.Imports[e.Import]; im.Name == importName && im.ExternType == 0x03 {

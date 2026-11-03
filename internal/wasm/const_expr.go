@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 type ConstantExpression struct {
@@ -555,7 +556,7 @@ func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]Val
 	// element value rather than a count of them.
 	var elemSlots int
 	if op != OpcodeGCStructNewDefault && op != OpcodeGCStructNew {
-		if int(typeIndex) >= len(env.types) {
+		if u32.OutOfRange(typeIndex, len(env.types)) {
 			return read, 0, fmt.Errorf("%s: unknown type %d", name, typeIndex)
 		}
 		if fields := env.types[typeIndex].Fields; len(fields) > 0 {
@@ -567,7 +568,7 @@ func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]Val
 		mode = GCStructNewDefault
 	case OpcodeGCStructNew:
 		mode = GCStructNew
-		if int(typeIndex) >= len(env.types) {
+		if u32.OutOfRange(typeIndex, len(env.types)) {
 			return read, 0, fmt.Errorf("%s: unknown type %d", name, typeIndex)
 		}
 		operandCount, valueCount = structSlots(&env.types[typeIndex]), len(env.types[typeIndex].Fields)

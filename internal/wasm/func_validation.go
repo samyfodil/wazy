@@ -13,6 +13,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/experimental"
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // The wazy specific limitation described at RATIONALE.md.
@@ -502,7 +503,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			index, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
-			} else if indexOutOfRange(index, len(controlBlockStack.stack)) {
+			} else if u32.OutOfRange(index, len(controlBlockStack.stack)) {
 				return fmt.Errorf("invalid %s operation: index out of range", OpcodeBrName)
 			}
 			pc += num - 1
@@ -524,7 +525,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			index, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
-			} else if indexOutOfRange(index, len(controlBlockStack.stack)) {
+			} else if u32.OutOfRange(index, len(controlBlockStack.stack)) {
 				return fmt.Errorf(
 					"invalid ln param given for %s: index=%d with %d for the current label stack length",
 					OpcodeBrIfName, index, len(controlBlockStack.stack))
@@ -568,7 +569,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			ln, n, err := leb128.DecodeUint32(br)
 			if err != nil {
 				return fmt.Errorf("read immediate: %w", err)
-			} else if indexOutOfRange(ln, len(controlBlockStack.stack)) {
+			} else if u32.OutOfRange(ln, len(controlBlockStack.stack)) {
 				return fmt.Errorf(
 					"invalid ln param given for %s: ln=%d with %d for the current label stack length",
 					OpcodeBrTableName, ln, len(controlBlockStack.stack))
@@ -614,7 +615,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 
 			for _, l := range sts.ls {
-				if indexOutOfRange(l, len(controlBlockStack.stack)) {
+				if u32.OutOfRange(l, len(controlBlockStack.stack)) {
 					return fmt.Errorf("invalid l param given for %s", OpcodeBrTableName)
 				}
 				label := &controlBlockStack.stack[len(controlBlockStack.stack)-1-int(l)]
@@ -708,7 +709,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("read catch label index: %v", err)
 					}
 					pc += labelNum - 1
-					if indexOutOfRange(labelIdx, len(controlBlockStack.stack)) {
+					if u32.OutOfRange(labelIdx, len(controlBlockStack.stack)) {
 						return fmt.Errorf("invalid label index in catch clause: %d", labelIdx)
 					}
 					// Validate that the target label can accept the catch values.
@@ -739,7 +740,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						return fmt.Errorf("read catch_all label index: %v", err)
 					}
 					pc += labelNum - 1
-					if indexOutOfRange(labelIdx, len(controlBlockStack.stack)) {
+					if u32.OutOfRange(labelIdx, len(controlBlockStack.stack)) {
 						return fmt.Errorf("invalid label index in catch_all clause: %d", labelIdx)
 					}
 					target := &controlBlockStack.stack[len(controlBlockStack.stack)-int(labelIdx)-1]
@@ -781,7 +782,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("read immediate: %v", err)
 			}
 			pc += num - 1
-			if indexOutOfRange(index, len(functions)) {
+			if u32.OutOfRange(index, len(functions)) {
 				return fmt.Errorf("invalid function index")
 			}
 			m.mayThrow.call(idx, index)
@@ -822,7 +823,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				opcodeName = OpcodeTailCallReturnCallIndirectName
 			}
 
-			if indexOutOfRange(typeIndex, len(m.TypeSection)) {
+			if u32.OutOfRange(typeIndex, len(m.TypeSection)) {
 				return fmt.Errorf("invalid type index at %s: %d", opcodeName, typeIndex)
 			}
 
@@ -874,7 +875,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				return fmt.Errorf("read immediate: %v", err)
 			}
 			pc += num - 1
-			if indexOutOfRange(typeIndex, len(m.TypeSection)) {
+			if u32.OutOfRange(typeIndex, len(m.TypeSection)) {
 				return fmt.Errorf("invalid type index at %s: %d", instructionNames[op], typeIndex)
 			}
 			// Pop the funcref operand (nullable concrete ref to the type).
@@ -1137,7 +1138,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					if err != nil {
 						return fmt.Errorf("unknown type for ref.null: 0x%x", reftype)
 					}
-					if indexOutOfRange(typeIdx, len(m.TypeSection)) {
+					if u32.OutOfRange(typeIdx, len(m.TypeSection)) {
 						return fmt.Errorf("unknown type for ref.null: type index %d out of range", typeIdx)
 					}
 					pc += uint64(num) - 1
@@ -1190,7 +1191,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			index, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
-			} else if indexOutOfRange(index, len(controlBlockStack.stack)) {
+			} else if u32.OutOfRange(index, len(controlBlockStack.stack)) {
 				return fmt.Errorf("invalid %s operation: index out of range", OpcodeBrOnNullName)
 			}
 			pc += num - 1
@@ -1230,7 +1231,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			index, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
 				return fmt.Errorf("read immediate: %v", err)
-			} else if indexOutOfRange(index, len(controlBlockStack.stack)) {
+			} else if u32.OutOfRange(index, len(controlBlockStack.stack)) {
 				return fmt.Errorf("invalid %s operation: index out of range", OpcodeBrOnNonNullName)
 			}
 			pc += num - 1
@@ -1373,7 +1374,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					if err != nil {
 						return fmt.Errorf("failed to read data segment index for %s: %v", MiscInstructionName(miscOpcode), err)
 					}
-					if indexOutOfRange(index, len(m.DataSection)) {
+					if u32.OutOfRange(index, len(m.DataSection)) {
 						return fmt.Errorf("index %d out of range of data section(len=%d)", index, len(m.DataSection))
 					}
 					pc += num - 1
@@ -1393,7 +1394,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 						if err != nil {
 							return fmt.Errorf("failed to read data segment index for %s: %v", MiscInstructionName(miscOpcode), err)
 						}
-						if indexOutOfRange(index, len(m.DataSection)) {
+						if u32.OutOfRange(index, len(m.DataSection)) {
 							return fmt.Errorf("index %d out of range of data section(len=%d)", index, len(m.DataSection))
 						}
 						pc += num - 1
@@ -1466,7 +1467,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					if err != nil {
 						return fmt.Errorf("failed to read element segment index for %s: %v", MiscInstructionName(miscOpcode), err)
 					}
-					if indexOutOfRange(elementIndex, len(m.ElementSection)) {
+					if u32.OutOfRange(elementIndex, len(m.ElementSection)) {
 						return fmt.Errorf("index %d out of range of element section(len=%d)", elementIndex, len(m.ElementSection))
 					}
 					pc += num
@@ -1499,7 +1500,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 					elementIndex, num, err := leb128.LoadUint32(body[pc:])
 					if err != nil {
 						return fmt.Errorf("failed to read element segment index for %s: %v", MiscInstructionName(miscOpcode), err)
-					} else if indexOutOfRange(elementIndex, len(m.ElementSection)) {
+					} else if u32.OutOfRange(elementIndex, len(m.ElementSection)) {
 						return fmt.Errorf("index %d out of range of element section(len=%d)", elementIndex, len(m.ElementSection))
 					}
 					pc += num - 1
