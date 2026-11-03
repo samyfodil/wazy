@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -89,6 +90,14 @@ func (d *dirFS) String() string {
 	return d.dir
 }
 
+// boundDirFS is a bound DirFS of dir with r, a root already open on it.
+func boundDirFS(r *os.Root, dir string) *dirFS {
+	d := &dirFS{dir: dir, cleanedDir: ensureTrailingPathSeparator(dir), bound: true}
+	d.rootDir.Store(openRootDir(r))
+	d.cached.Store(r)
+	return d
+}
+
 // root returns the root for one operation, which done releases.
 func (d *dirFS) root() (*os.Root, sys.Errno) {
 	if !d.bound {
@@ -127,6 +136,29 @@ func rootName(path string) string {
 	return path
 }
 
+// open returns the root for one operation, which done releases, and path as
+// a name in it.
+func (d *dirFS) open(path string) (*os.Root, string, sys.Errno) {
+	name := rootName(path)
+	if errno := hostName(name); errno != 0 {
+		return nil, "", errno
+	}
+	r, errno := d.root()
+	return r, name, errno
+}
+
+// lastElem is the last element of name. A "." or ".." there names a
+// directory the path already reached rather than an entry in one, which
+// Windows acts on where POSIX refuses, so dirFS refuses first.
+func lastElem(name string) string {
+	return path.Base(name)
+}
+
+func isDotElem(name string) bool {
+	last := lastElem(name)
+	return last == "." || last == ".."
+}
+
 // rootErrno is the errno for an error from os.Root, which reports some
 // conditions with errors of its own rather than an errno. A path that resolves
 // outside the root, through ".." or a symlink, is refused as the WASI layers
@@ -149,12 +181,11 @@ func rootErrno(err error) sys.Errno {
 
 // OpenFile implements the same method as documented on sys.FS
 func (d *dirFS) OpenFile(path string, flag sys.Oflag, perm fs.FileMode) (sys.File, sys.Errno) {
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return nil, errno
 	}
 	defer d.done(r)
-	name := rootName(path)
 	f, errno, ok := openFileBeneath(d.rootDir.Load(), name, flag, perm)
 	if !ok {
 		f, errno = openFileIn(r, name, flag, perm)
@@ -162,17 +193,18 @@ func (d *dirFS) OpenFile(path string, flag sys.Oflag, perm fs.FileMode) (sys.Fil
 	if errno != 0 {
 		return nil, errno
 	}
-	return newOsFile(d.join(path), flag, perm, f), 0
+	file := newOsFile(d.join(path), flag, perm, f)
+	file.(*osFile).underRoot = d.bound
+	return file, 0
 }
 
 // Lstat implements the same method as documented on sys.FS
 func (d *dirFS) Lstat(path string) (sys.Stat_t, sys.Errno) {
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return sys.Stat_t{}, errno
 	}
 	defer d.done(r)
-	name := rootName(path)
 	if st, errno, ok := statBeneath(d.rootDir.Load(), name, false); ok {
 		return st, errno
 	}
@@ -181,12 +213,11 @@ func (d *dirFS) Lstat(path string) (sys.Stat_t, sys.Errno) {
 
 // Stat implements the same method as documented on sys.FS
 func (d *dirFS) Stat(path string) (sys.Stat_t, sys.Errno) {
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return sys.Stat_t{}, errno
 	}
 	defer d.done(r)
-	name := rootName(path)
 	if st, errno, ok := statBeneath(d.rootDir.Load(), name, true); ok {
 		return st, errno
 	}
@@ -195,12 +226,12 @@ func (d *dirFS) Stat(path string) (sys.Stat_t, sys.Errno) {
 
 // Mkdir implements the same method as documented on sys.FS
 func (d *dirFS) Mkdir(path string, perm fs.FileMode) (errno sys.Errno) {
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return errno
 	}
 	defer d.done(r)
-	if errno = rootErrno(r.Mkdir(rootName(path), perm&fs.ModePerm)); errno == sys.ENOTDIR {
+	if errno = rootErrno(r.Mkdir(name, perm&fs.ModePerm)); errno == sys.ENOTDIR {
 		errno = sys.ENOENT
 	}
 	return
@@ -208,53 +239,72 @@ func (d *dirFS) Mkdir(path string, perm fs.FileMode) (errno sys.Errno) {
 
 // Chmod implements the same method as documented on sys.FS
 func (d *dirFS) Chmod(path string, perm fs.FileMode) sys.Errno {
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return errno
 	}
 	defer d.done(r)
-	return rootErrno(r.Chmod(rootName(path), perm))
+	return rootErrno(r.Chmod(name, perm))
 }
 
 // Rename implements the same method as documented on sys.FS
 func (d *dirFS) Rename(from, to string) sys.Errno {
-	r, errno := d.root()
+	to = rootName(to)
+	if errno := hostName(to); errno != 0 {
+		return errno
+	}
+	r, from, errno := d.open(from)
 	if errno != 0 {
 		return errno
 	}
 	defer d.done(r)
-	return renameIn(r, rootName(from), rootName(to))
+	if isDotElem(from) || isDotElem(to) {
+		return sys.EINVAL // as POSIX has it, where Linux reports EBUSY
+	}
+	return renameIn(r, from, to)
 }
 
 // Rmdir implements the same method as documented on sys.FS
 func (d *dirFS) Rmdir(path string) sys.Errno {
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return errno
 	}
 	defer d.done(r)
-	return rmdirIn(r, rootName(path))
+	switch lastElem(name) {
+	case ".":
+		return sys.EINVAL
+	case "..":
+		return sys.ENOTEMPTY
+	}
+	return rmdirIn(r, name)
 }
 
 // Unlink implements the same method as documented on sys.FS
 func (d *dirFS) Unlink(path string) (err sys.Errno) {
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return errno
 	}
 	defer d.done(r)
-	return unlinkIn(r, rootName(path))
+	if isDotElem(name) {
+		return sys.EISDIR
+	}
+	return unlinkIn(r, name)
 }
 
 // Link implements the same method as documented on sys.FS
 func (d *dirFS) Link(oldName, newName string) sys.Errno {
-	r, errno := d.root()
+	newName = rootName(newName)
+	if errno := hostName(newName); errno != 0 {
+		return errno
+	}
+	r, oldName, errno := d.open(oldName)
 	if errno != 0 {
 		return errno
 	}
 	defer d.done(r)
-	newName = rootName(newName)
-	errno = rootErrno(r.Link(rootName(oldName), newName))
+	errno = linkIn(r, oldName, newName)
 	if errno == sys.EINVAL && newName == "." {
 		errno = sys.EEXIST // the directory itself, which Windows reports as EINVAL
 	}
@@ -268,7 +318,7 @@ func (d *dirFS) Symlink(oldName, link string) sys.Errno {
 	if path.IsAbs(oldName) {
 		return sys.EPERM
 	}
-	r, errno := d.root()
+	r, link, errno := d.open(link)
 	if errno != 0 {
 		return errno
 	}
@@ -276,13 +326,15 @@ func (d *dirFS) Symlink(oldName, link string) sys.Errno {
 	// Note: do not resolve `oldName` relative to this dirFS. The link result is always resolved
 	// when dereference the `link` on its usage (e.g. readlink, read, etc).
 	// https://github.com/bytecodealliance/cap-std/blob/v1.0.4/cap-std/src/fs/dir.rs#L404-L409
-	name := rootName(link)
-	errno = rootErrno(r.Symlink(oldName, name))
+	//
+	// Windows does not read "/" as a separator in a symlink target, and
+	// os.Root before Go 1.27 stores the target as given.
+	errno = rootErrno(r.Symlink(filepath.FromSlash(oldName), link))
 	// Windows reports access denied, not that it exists, when `link` is
 	// already a symlink, e.g. a dangling one. Checking only after the failure
 	// leaves no window between the check and the create.
 	if errno != 0 && runtime.GOOS == "windows" {
-		if _, err := r.Lstat(name); err == nil {
+		if _, err := r.Lstat(link); err == nil {
 			errno = sys.EEXIST
 		}
 	}
@@ -291,12 +343,12 @@ func (d *dirFS) Symlink(oldName, link string) sys.Errno {
 
 // Readlink implements the same method as documented on sys.FS
 func (d *dirFS) Readlink(path string) (string, sys.Errno) {
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return "", errno
 	}
 	defer d.done(r)
-	dst, err := r.Readlink(rootName(path))
+	dst, err := r.Readlink(name)
 	if err != nil {
 		return "", rootErrno(err)
 	}
@@ -308,12 +360,12 @@ func (d *dirFS) Utimens(path string, atim, mtim int64) sys.Errno {
 	if atim == sys.UTIME_OMIT && mtim == sys.UTIME_OMIT {
 		return 0
 	}
-	r, errno := d.root()
+	r, name, errno := d.open(path)
 	if errno != 0 {
 		return errno
 	}
 	defer d.done(r)
-	return rootErrno(r.Chtimes(rootName(path), omittableTime(atim), omittableTime(mtim)))
+	return rootErrno(r.Chtimes(name, omittableTime(atim), omittableTime(mtim)))
 }
 
 // omittableTime is the time os.Root.Chtimes takes for nanos: the zero time,

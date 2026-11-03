@@ -12,6 +12,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	socketapi "github.com/samyfodil/wazy/internal/sock"
 	"github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/sysfs"
 	"github.com/samyfodil/wazy/internal/wasip1"
 	"github.com/samyfodil/wazy/internal/wasm"
 	sysapi "github.com/samyfodil/wazy/sys"
@@ -1520,6 +1521,16 @@ func pathLinkFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 		return errno
 	}
 
+	if oldFS != newFS {
+		// Two directories each resolve through themselves; within one mount
+		// both resolve from it.
+		if oldFS, oldName, errno = atMountPath(fsc, mem, oldFD, oldPath, oldPathLen); errno != 0 {
+			return errno
+		}
+		if newFS, newName, errno = atMountPath(fsc, mem, newFD, newPath, newPathLen); errno != 0 {
+			return errno
+		}
+	}
 	if oldFS != newFS { // TODO: handle link across filesystems
 		return sysapi.ENOSYS
 	}
@@ -1607,7 +1618,7 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 	fdflags := uint16(params[7])
 	resultOpenedFD := uint32(params[8])
 
-	preopen, pathName, errno := atPath(fsc, mod.Memory(), preopenFD, path, pathLen)
+	dir, pathName, errno := atDir(fsc, mod.Memory(), preopenFD, path, pathLen)
 	if errno != 0 {
 		return errno
 	}
@@ -1623,7 +1634,11 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 		return sysapi.EINVAL // use pathCreateDirectory!
 	}
 
-	newFD, errno := fsc.OpenFile(preopen, pathName, fileOpenFlags, 0o600)
+	// The entry records the file by its name in the mount, as it outlives the
+	// directory it may have been opened through.
+	fs, name := throughDir(dir, pathName)
+	mount, mountName := atMount(dir, pathName)
+	newFD, errno := fsc.OpenFileAs(fs, name, mount, mountName, fileOpenFlags, 0o600)
 	if errno != 0 {
 		return errno
 	}
@@ -1665,6 +1680,50 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 // See https://github.com/WebAssembly/wasi-libc/blob/659ff414560721b1660a19685110e484a081c3d4/libc-bottom-half/sources/at_fdcwd.c
 // See https://linux.die.net/man/2/openat
 func atPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (sysapi.FS, string, sysapi.Errno) {
+	f, pathName, errno := atDir(fsc, mem, fd, p, pathLen)
+	if errno != 0 {
+		return nil, "", errno
+	}
+	fs, name := throughDir(f, pathName)
+	return fs, name, 0
+}
+
+// atMountPath is atPath resolving from the mount, by the directory's name,
+// for an operation that spans two directories.
+func atMountPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (sysapi.FS, string, sysapi.Errno) {
+	f, pathName, errno := atDir(fsc, mem, fd, p, pathLen)
+	if errno != 0 {
+		return nil, "", errno
+	}
+	fs, name := atMount(f, pathName)
+	return fs, name, 0
+}
+
+// throughDir resolves pathName under the directory f. One the guest opened
+// resolves it through itself, so it still reaches the directory after a
+// rename.
+func throughDir(f *sys.FileEntry, pathName string) (sysapi.FS, string) {
+	if !f.IsPreopen {
+		if h, ok := f.File.(sysfs.DirHandle); ok {
+			if dirFS, errno := h.DirFS(); errno == 0 {
+				return dirFS, pathName
+			}
+		}
+	}
+	return atMount(f, pathName)
+}
+
+// atMount resolves pathName under the directory f from its mount, by name.
+func atMount(f *sys.FileEntry, pathName string) (sysapi.FS, string) {
+	if f.IsPreopen { // don't append the pre-open name
+		return f.FS, pathName
+	}
+	// Join via concat to avoid name conflict on path.Join
+	return f.FS, f.Name + "/" + pathName
+}
+
+// atDir is the directory fd names and path, cleaned and checked, under it.
+func atDir(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (*sys.FileEntry, string, sysapi.Errno) {
 	b, ok := mem.Read(p, pathLen)
 	if !ok {
 		return nil, "", sysapi.EFAULT
@@ -1699,17 +1758,15 @@ func atPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (sy
 		return nil, "", sysapi.ENOTDIR
 	}
 
-	var base string
-	if !f.IsPreopen { // don't prefix the pre-open name
-		// Join via concat to avoid name conflict on path.Join
-		base = f.Name + "/"
-	}
 	if strings.Contains(rawPath, "..") {
-		if errno := dotDotParentsAreDirs(f.FS, base, rawPath); errno != 0 {
+		// throughDir with no path gives the filesystem and the prefix the
+		// path resolves under.
+		fsys, base := throughDir(f, "")
+		if errno := dotDotParentsAreDirs(fsys, base, rawPath); errno != 0 {
 			return nil, "", errno
 		}
 	}
-	return f.FS, base + pathName, 0
+	return f, pathName, 0
 }
 
 // dotDotParentsAreDirs fails where looking p up one component at a time
@@ -1974,6 +2031,16 @@ func pathRenameFn(_ context.Context, mod api.Module, params []uint64) sysapi.Err
 		return errno
 	}
 
+	if oldFS != newFS {
+		// Two directories each resolve through themselves; within one mount
+		// both resolve from it.
+		if oldFS, oldPathName, errno = atMountPath(fsc, mod.Memory(), fd, oldPath, oldPathLen); errno != 0 {
+			return errno
+		}
+		if newFS, newPathName, errno = atMountPath(fsc, mod.Memory(), newFD, newPath, newPathLen); errno != 0 {
+			return errno
+		}
+	}
 	if oldFS != newFS { // TODO: handle renames across filesystems
 		return sysapi.ENOSYS
 	}
@@ -2020,12 +2087,12 @@ func pathSymlinkFn(_ context.Context, mod api.Module, params []uint64) sysapi.Er
 		return sysapi.EFAULT
 	}
 
-	_, newPathName, errno := atPath(fsc, mod.Memory(), fd, newPath, newPathLen)
+	newFS, newPathName, errno := atPath(fsc, mod.Memory(), fd, newPath, newPathLen)
 	if errno != 0 {
 		return errno
 	}
 
-	return dir.FS.Symlink(
+	return newFS.Symlink(
 		// Do not join old path since it's only resolved when dereference the link created here.
 		// And the dereference result depends on the opening directory's file descriptor at that point.
 		unsafe.String(&oldPathBuf[0], int(oldPathLen)),

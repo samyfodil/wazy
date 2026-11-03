@@ -1,8 +1,10 @@
 package sysfs
 
 import (
+	"errors"
 	"io/fs"
 	"os"
+	"path"
 	"strings"
 	"syscall"
 
@@ -30,11 +32,9 @@ func openFileIn(r *os.Root, name string, oflag sys.Oflag, perm fs.FileMode) (*os
 		if strings.HasSuffix(name, "/") {
 			errno = sys.ENOTDIR
 		}
-	// To match expectations of WASI, e.g. TinyGo TestStatBadDir, return
-	// ENOENT, not ENOTDIR.
 	case sys.ENOTDIR:
 		if !strings.HasSuffix(name, "/") {
-			errno = sys.ENOENT
+			errno = pathNotFound(r, name)
 		}
 	case sys.ENOENT:
 		if info, err := r.Lstat(name); err == nil && info.Mode()&fs.ModeSymlink != 0 {
@@ -52,6 +52,22 @@ func openFileIn(r *os.Root, name string, oflag sys.Oflag, perm fs.FileMode) (*os
 	return nil, errno
 }
 
+// pathNotFound is the errno for ERROR_PATH_NOT_FOUND, which Windows reports
+// both when a directory on the way to name is missing and when it is a file.
+// POSIX tells the two apart, as ENOENT and ENOTDIR, and TinyGo's
+// TestStatBadDir and Go's TestOpenError each check one of them.
+func pathNotFound(r *os.Root, name string) sys.Errno {
+	for dir := path.Dir(name); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if info, err := r.Stat(dir); err == nil {
+			if info.IsDir() {
+				return sys.ENOENT
+			}
+			return sys.ENOTDIR
+		}
+	}
+	return sys.ENOENT
+}
+
 // statIn stats name through a handle, as statPath does, which is where the
 // inode comes from on Windows.
 func statIn(r *os.Root, name string, follow bool) (sys.Stat_t, sys.Errno) {
@@ -59,27 +75,26 @@ func statIn(r *os.Root, name string, follow bool) (sys.Stat_t, sys.Errno) {
 	if follow {
 		f, err := r.OpenFile(name, os.O_RDONLY, 0)
 		if err != nil {
-			return sys.Stat_t{}, statErrno(err)
+			return sys.Stat_t{}, statErrno(r, name, err)
 		}
 		defer f.Close()
 		h = syscall.Handle(f.Fd())
 	} else {
 		var err error
 		if h, err = openLinkIn(r, name, fileReadAttributes); err != nil {
-			return sys.Stat_t{}, statErrno(err)
+			return sys.Stat_t{}, statErrno(r, name, err)
 		}
 		defer syscall.CloseHandle(h)
 	}
 	return statHandle(h)
 }
 
-// statErrno is the errno for an error opening a file to stat it. To match
-// expectations of WASI, e.g. TinyGo TestStatBadDir, it is ENOENT, not ENOTDIR.
-func statErrno(err error) sys.Errno {
+// statErrno is the errno for an error opening name to stat it.
+func statErrno(r *os.Root, name string, err error) sys.Errno {
 	if errno := rootErrno(err); errno != sys.ENOTDIR {
 		return errno
 	}
-	return sys.ENOENT
+	return pathNotFound(r, name)
 }
 
 // unlinkIn removes the file or symlink name. os.Root.Remove removes a
@@ -112,6 +127,35 @@ func sameFileIn(r *os.Root, from, to string) bool {
 	}
 	toSt, errno := statIn(r, to, false)
 	return errno == 0 && fromSt.Dev == toSt.Dev && fromSt.Ino == toSt.Ino
+}
+
+// linkIn links newName to oldName. NTFS cannot hard link a directory
+// symlink, and reports access denied, so for one it makes a second symlink
+// with the same target: a symlink never changes, and the two differ only in
+// inode and link count.
+func linkIn(r *os.Root, oldName, newName string) sys.Errno {
+	err := r.Link(oldName, newName)
+	if !errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+		return rootErrno(err)
+	}
+	info, lerr := r.Lstat(oldName)
+	if lerr != nil || info.Mode()&fs.ModeSymlink == 0 {
+		return rootErrno(err)
+	}
+	if attrs, ok := info.Sys().(*syscall.Win32FileAttributeData); !ok || attrs.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return rootErrno(err)
+	}
+	target, lerr := r.Readlink(oldName)
+	if lerr != nil {
+		return rootErrno(lerr)
+	}
+	if lerr = r.Symlink(target, newName); lerr != nil {
+		if _, serr := r.Lstat(newName); serr == nil {
+			return sys.EEXIST
+		}
+		return rootErrno(lerr)
+	}
+	return 0
 }
 
 func renameIn(r *os.Root, from, to string) sys.Errno {
