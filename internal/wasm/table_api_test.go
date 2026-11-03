@@ -30,7 +30,7 @@ func TestModuleInstance_ExportedTable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &ModuleInstance{
 				Source:  &Module{TypeSection: types, TableSection: []Table{{Type: tc.elem}}},
-				Tables:  []*TableInstance{{References: make([]Reference, 1), Type: tc.elem}},
+				Tables:  []*TableInstance{{References: make([]Reference, 1), Type: tc.elem, limit: TableLimitElements}},
 				Exports: map[string]*Export{"t": {Type: ExternTypeTable, Name: "t", Index: 0}},
 			}
 			table := m.ExportedTable("t").(*exportedTable)

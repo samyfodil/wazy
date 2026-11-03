@@ -99,8 +99,17 @@ func (l countedLoop) build() (*builder, BasicBlock, BasicBlock) {
 		q = header.AddParam(b, l.typ)
 	}
 	p := header.AddParam(b, l.typ)
+	// A block branches to a block at most once, so each extra back edge leaves for the rest of the loop in a
+	// block of its own, as the frontend does after a br_if.
+	continueIn := func() {
+		rest := b.AllocateBasicBlock()
+		b.AllocateInstruction().AsJump(ValuesNil, rest).Insert(b)
+		b.Seal(rest)
+		b.SetCurrentBlock(rest)
+	}
 	if l.standStill {
 		b.AllocateInstruction().AsBrnz(iconst(1), ValuesNil.Append(&b.varLengthPool, p), header).Insert(b)
+		continueIn()
 	}
 	var next Value
 	switch {
@@ -116,6 +125,7 @@ func (l countedLoop) build() (*builder, BasicBlock, BasicBlock) {
 		brz := b.AllocateInstruction()
 		brz.AsBrz(other, ValuesNil.Append(&b.varLengthPool, other), header)
 		b.InsertInstruction(brz)
+		continueIn()
 	}
 	args := ValuesNil
 	if l.untested {

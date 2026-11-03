@@ -59,6 +59,9 @@ type Compiler struct {
 	wasmFunctionLocalTypes              []wasm.ValueType
 	wasmFunctionBody                    []byte
 	wasmFunctionBodyOffsetInCodeSection uint64
+	// branchHints are the function's wasm.Code.BranchHints, and branchHintAt how far branchHint has read them.
+	branchHints  []wasm.BranchHint
+	branchHintAt int
 	// memoryBaseVariables, memoryLenVariables, memoryShared, memoryMaxPages, and
 	// memoryMinSizeInBytes are index-correlated with the module's memory index
 	// space (imports first, then module-defined -- see wasm.Module.MemorySection).
@@ -432,6 +435,10 @@ func (c *Compiler) Init(idx, typIndex wasm.Index, typ *wasm.FunctionType, localT
 	c.wasmFunctionLocalTypes = localTypes
 	c.wasmFunctionBody = body
 	c.wasmFunctionBodyOffsetInCodeSection = bodyOffsetInCodeSection
+	c.branchHints, c.branchHintAt = nil, 0
+	if int(idx) < len(c.m.CodeSection) {
+		c.branchHints = c.m.CodeSection[idx].BranchHints
+	}
 	c.needListener = needListener
 	c.pendingEhEntries = c.pendingEhEntries[:0]
 	c.clearSafeBounds()

@@ -1,6 +1,7 @@
 package ssa
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/testing/require"
@@ -280,6 +281,7 @@ func Test_swapInstruction(t *testing.T) {
 // post-order still lists every block after the blocks it goes on to.
 func TestBuilder_BlockIteratorPostOrder(t *testing.T) {
 	b := NewBuilder().(*builder)
+	b.Init(&Signature{}) // a jump to the return block is checked against the signature's results
 	entry, check, slow, cont := b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock()
 	ctx := entry.AddParam(b, TypeI64)
 	b.SetCurrentBlock(entry)
@@ -662,6 +664,156 @@ func TestBuilder_LayoutBlocks(t *testing.T) {
 				actual = append(actual, blk.(*basicBlock).id)
 			}
 			require.Equal(t, tc.exp, actual)
+		})
+	}
+}
+
+// TestBuilder_LayoutBlocks_unlikelyEdges checks that the blocks only unlikely edges reach go after the rest,
+// and that the order is still one the register allocator can walk: every block but the entry comes after one
+// of its predecessors, and every block, split edge trampolines included, is placed exactly once.
+func TestBuilder_LayoutBlocks_unlikelyEdges(t *testing.T) {
+	insertJump := func(b *builder, src, dst *basicBlock) {
+		b.SetCurrentBlock(src)
+		jump := b.AllocateInstruction()
+		jump.AsJump(ValuesNil, dst)
+		b.InsertInstruction(jump)
+	}
+	insertBrz := func(b *builder, src, dst *basicBlock, cond Value) {
+		b.SetCurrentBlock(src)
+		brz := b.AllocateInstruction()
+		brz.AsBrz(cond, ValuesNil, dst)
+		b.InsertInstruction(brz)
+	}
+	cond := func(b *builder, blk *basicBlock) Value {
+		b.SetCurrentBlock(blk)
+		c := b.AllocateInstruction().AsIconst32(0)
+		b.InsertInstruction(c)
+		return c.Return()
+	}
+
+	for _, tc := range []struct {
+		name   string
+		setup  func(b *builder)
+		blocks BasicBlockID
+		cold   []BasicBlockID
+		exp    []BasicBlockID
+	}{
+		{
+			name: "a cold block with critical edges into hot blocks placed before it",
+			// 0 -(unlikely)-> 2 --> 4
+			// |               |     ^
+			// v               v     |
+			// 1 ------------> 3 ----+
+			setup: func(b *builder) {
+				b0, b1, b2, b3, b4 := b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock()
+				c := cond(b, b0)
+				insertBrz(b, b0, b2, c)
+				insertJump(b, b0, b1)
+				b.MarkUnlikelyEdge(b0, b2)
+				insertJump(b, b1, b3)
+				insertBrz(b, b2, b3, c)
+				insertJump(b, b2, b4)
+				insertJump(b, b3, b4)
+				for _, blk := range []*basicBlock{b0, b1, b2, b3, b4} {
+					b.Seal(blk)
+				}
+			},
+			blocks: 5,
+			cold:   []BasicBlockID{2},
+		},
+		{
+			name: "a merge also reached along a hot edge stays hot",
+			// 0 -(unlikely)-> 2
+			// |               ^
+			// v               |
+			// 1 --------------+
+			setup: func(b *builder) {
+				b0, b1, b2 := b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock()
+				c := cond(b, b0)
+				insertBrz(b, b0, b2, c)
+				insertJump(b, b0, b1)
+				b.MarkUnlikelyEdge(b0, b2)
+				insertJump(b, b1, b2)
+				for _, blk := range []*basicBlock{b0, b1, b2} {
+					b.Seal(blk)
+				}
+			},
+			blocks: 3,
+			exp:    []BasicBlockID{0, 1, 3, 2},
+		},
+		{
+			name: "a loop entered only along an unlikely edge",
+			// 0 -(unlikely)-> 1 <-+
+			// |               |   |
+			// |               v   |
+			// |               2 --+
+			// v               |
+			// 3 <-------------+
+			setup: func(b *builder) {
+				b0, b1, b2, b3 := b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock(), b.allocateBasicBlock()
+				c := cond(b, b0)
+				insertBrz(b, b0, b1, c)
+				insertJump(b, b0, b3)
+				b.MarkUnlikelyEdge(b0, b1)
+				insertJump(b, b1, b2)
+				insertBrz(b, b2, b1, c)
+				insertJump(b, b2, b3)
+				for _, blk := range []*basicBlock{b0, b1, b2, b3} {
+					b.Seal(blk)
+				}
+			},
+			blocks: 4,
+			cold:   []BasicBlockID{1, 2},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewBuilder().(*builder)
+			tc.setup(b)
+			b.runPreBlockLayoutPasses()
+			b.runBlockLayoutPass()
+
+			var order []*basicBlock
+			for blk := b.BlockIteratorReversePostOrderBegin(); blk != nil; blk = b.BlockIteratorReversePostOrderNext() {
+				order = append(order, blk.(*basicBlock))
+			}
+			position := map[*basicBlock]int{}
+			for i, blk := range order {
+				_, dup := position[blk]
+				require.False(t, dup, "blk%d placed twice", blk.id)
+				position[blk] = i
+			}
+			for i := 0; i < b.basicBlocksPool.Allocated(); i++ {
+				if blk := b.basicBlocksPool.View(i); blk.Valid() {
+					_, placed := position[blk]
+					require.True(t, placed, "blk%d not placed", blk.id)
+				}
+			}
+			for i, blk := range order[1:] {
+				earlier := false
+				for _, pred := range blk.preds {
+					if p, ok := position[pred.blk]; ok && p <= i {
+						earlier = true
+					}
+				}
+				require.True(t, earlier, "blk%d comes before all of its predecessors", blk.id)
+			}
+			// Every hot block the case built comes before every cold one; split edge trampolines, which the
+			// layout adds, go wherever their edge needs them.
+			for _, c := range tc.cold {
+				for id := BasicBlockID(0); id < tc.blocks; id++ {
+					if !slices.Contains(tc.cold, id) {
+						require.True(t, position[b.basicBlocksPool.View(int(id))] < position[b.basicBlocksPool.View(int(c))],
+							"hot blk%d placed after cold blk%d", id, c)
+					}
+				}
+			}
+			if tc.exp != nil {
+				var ids []BasicBlockID
+				for _, blk := range order {
+					ids = append(ids, blk.id)
+				}
+				require.Equal(t, tc.exp, ids)
+			}
 		})
 	}
 }

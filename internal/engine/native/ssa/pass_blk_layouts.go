@@ -2,6 +2,7 @@ package ssa
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
@@ -20,20 +21,33 @@ import (
 // Currently, we just place blocks using the DFS reverse post-order of the dominator tree with the heuristics:
 //  1. a split edge trampoline towards a loop header will be placed as a fallthrough.
 //  2. we invert the brz and brnz if it makes the fallthrough more likely.
+//  3. the blocks a branch hint says are rarely reached go after all the others (see moveColdBlocksLast).
 //
-// This heuristic is done in maybeInvertBranches function.
+// The second heuristic is done in maybeInvertBranches function.
 func passLayoutBlocks(b *builder) {
 	// We might end up splitting critical edges which adds more basic blocks,
 	// so we store the currently existing basic blocks in nonSplitBlocks temporarily.
 	// That way we can iterate over the original basic blocks while appending new ones into reversePostOrderedBasicBlocks.
 	nonSplitBlocks := b.blkStack[:0]
-	for i, blk := range b.reversePostOrderedBasicBlocks {
-		if !blk.Valid() {
-			continue
+	if b.unlikelyEdges {
+		for _, blk := range b.reversePostOrderedBasicBlocks {
+			if blk.Valid() {
+				nonSplitBlocks = append(nonSplitBlocks, blk)
+			}
 		}
-		nonSplitBlocks = append(nonSplitBlocks, blk)
-		if i != len(b.reversePostOrderedBasicBlocks)-1 {
-			_ = maybeInvertBranches(b, blk, b.reversePostOrderedBasicBlocks[i+1])
+		b.moveColdBlocksLast(nonSplitBlocks)
+		for i := 0; i+1 < len(nonSplitBlocks); i++ {
+			_ = maybeInvertBranches(b, nonSplitBlocks[i], nonSplitBlocks[i+1])
+		}
+	} else {
+		for i, blk := range b.reversePostOrderedBasicBlocks {
+			if !blk.Valid() {
+				continue
+			}
+			nonSplitBlocks = append(nonSplitBlocks, blk)
+			if i != len(b.reversePostOrderedBasicBlocks)-1 {
+				_ = maybeInvertBranches(b, blk, b.reversePostOrderedBasicBlocks[i+1])
+			}
 		}
 	}
 
@@ -44,12 +58,8 @@ func passLayoutBlocks(b *builder) {
 	uninsertedTrampolines := b.blkStack2[:0]
 	for _, blk := range nonSplitBlocks {
 		for i := range blk.preds {
-			pred := blk.preds[i].blk
-			if pred.visited == 1 || !pred.Valid() {
-				continue
-			} else if pred.reversePostOrder < blk.reversePostOrder {
-				// This means the edge is critical, and this pred is the trampoline and yet to be inserted.
-				// Split edge trampolines must come before the destination in reverse post-order.
+			if pred := blk.preds[i].blk; pred.visited == visitedPendingTrampoline {
+				// Split edge trampolines must come before the destination.
 				b.reversePostOrderedBasicBlocks = append(b.reversePostOrderedBasicBlocks, pred)
 				pred.visited = 1 // mark as inserted.
 			}
@@ -116,16 +126,17 @@ func passLayoutBlocks(b *builder) {
 				b.reversePostOrderedBasicBlocks = append(b.reversePostOrderedBasicBlocks, trampoline)
 				trampoline.visited = 1 // mark as inserted.
 			} else {
+				trampoline.visited = visitedPendingTrampoline
 				uninsertedTrampolines = append(uninsertedTrampolines, trampoline)
 			}
 		}
 
 		for _, trampoline := range uninsertedTrampolines {
-			if trampoline.success[0].reversePostOrder <= trampoline.reversePostOrder { // "<=", not "<" because the target might be itself.
-				// This means the critical edge was backward, so we insert after the current block immediately.
+			if target := trampoline.success[0]; target.visited == 1 || target.ReturnBlock() { // the target might be blk itself
+				// The target is already placed, so we insert after the current block immediately.
 				b.reversePostOrderedBasicBlocks = append(b.reversePostOrderedBasicBlocks, trampoline)
 				trampoline.visited = 1 // mark as inserted.
-			} // If the target is forward, we can wait to insert until the target is inserted.
+			} // Otherwise it is placed right before its target, when the target is.
 		}
 		uninsertedTrampolines = uninsertedTrampolines[:0] // Reuse the stack for the next block.
 	}
@@ -151,6 +162,76 @@ func passLayoutBlocks(b *builder) {
 	b.blkStack2 = uninsertedTrampolines[:0]
 }
 
+// visitedPendingTrampoline is basicBlock.visited for a split edge trampoline waiting to be placed before its
+// target. Whether a block is already placed is told by visited alone, not by comparing reverse post-order
+// numbers, because moveColdBlocksLast places blocks out of that order.
+const visitedPendingTrampoline = 3
+
+// moveColdBlocksLast reorders order, the blocks the function keeps, so that the ones the entry can reach only
+// through an edge MarkUnlikelyEdge marked come after all the others.
+//
+// The register allocator needs every block but the entry to come after one of its predecessors. Filtering the
+// reverse post-order would not keep that: passCalculateImmediateDominators marks a block seen when it pushes
+// it, not when it visits it, so a block can finish before a successor it reaches another way, and dropping the
+// cold blocks can drop the only predecessor that came first. So the hot blocks are laid out by a depth-first
+// walk of their own over the likely edges, and then each cold region by one from the unlikely edge into it. A
+// depth-first walk puts every block after the one it was reached from.
+func (b *builder) moveColdBlocksLast(order []*basicBlock) {
+	n := b.basicBlocksPool.Allocated()
+	if cap(b.layoutSeen) < n {
+		b.layoutSeen = make([]bool, n)
+	}
+	seen := b.layoutSeen[:n]
+	clear(seen)
+
+	laidOut := b.blkStack3[:0]
+	entry := b.entryBlk()
+	laidOut = b.layoutDepthFirst(laidOut, entry, seen, true)
+	for i := 0; i < len(laidOut); i++ {
+		if cold := laidOut[i].unlikelySucc; cold != nil && cold.Valid() && !cold.ReturnBlock() && !seen[cold.id] {
+			laidOut = b.layoutDepthFirst(laidOut, cold, seen, false)
+		}
+	}
+	if len(laidOut) == len(order) {
+		copy(order, laidOut)
+	} // else a block only a removed edge reached: keep the plain order, which is always valid.
+	b.blkStack3 = laidOut[:0]
+}
+
+// layoutDepthFirst appends to laidOut, in reverse post-order, the blocks a depth-first walk from root reaches
+// without passing a block already seen, or, when likelyOnly, an unlikely edge. The successors are walked last
+// first so that, as in the reverse post-order passCalculateImmediateDominators builds, a block's first
+// successor comes right after it.
+func (b *builder) layoutDepthFirst(laidOut []*basicBlock, root *basicBlock, seen []bool, likelyOnly bool) []*basicBlock {
+	start := len(laidOut)
+	stack := append(b.layoutStack[:0], layoutFrame{blk: root, next: len(root.success)})
+	seen[root.id] = true
+	for len(stack) > 0 {
+		top := &stack[len(stack)-1]
+		if top.next == 0 {
+			laidOut = append(laidOut, top.blk) // post-order, reversed below
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		top.next--
+		succ := top.blk.success[top.next]
+		if succ.ReturnBlock() || !succ.Valid() || seen[succ.id] || (likelyOnly && succ == top.blk.unlikelySucc) {
+			continue
+		}
+		seen[succ.id] = true
+		stack = append(stack, layoutFrame{blk: succ, next: len(succ.success)})
+	}
+	b.layoutStack = stack[:0]
+	slices.Reverse(laidOut[start:])
+	return laidOut
+}
+
+// layoutFrame is a block on layoutDepthFirst's stack, and how many of its successors are left to walk.
+type layoutFrame struct {
+	blk  *basicBlock
+	next int
+}
+
 // markFallthroughJumps finds the fallthrough jumps and marks them as such.
 func (b *builder) markFallthroughJumps() {
 	l := len(b.reversePostOrderedBasicBlocks) - 1
@@ -170,7 +251,7 @@ func (b *builder) markFallthroughJumps() {
 // Returns true if the branch is inverted for testing purpose.
 func maybeInvertBranches(b *builder, now *basicBlock, nextInRPO *basicBlock) bool {
 	fallthroughBranch := now.currentInstr
-	if fallthroughBranch.opcode == OpcodeBrTable {
+	if fallthroughBranch == nil || fallthroughBranch.opcode == OpcodeBrTable {
 		return false
 	}
 

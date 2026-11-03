@@ -29,6 +29,11 @@ type Builder interface {
 	// EntryBlock returns the entry BasicBlock of the currently-compiled function.
 	EntryBlock() BasicBlock
 
+	// MarkUnlikelyEdge records that blk rarely branches to succ, as a branch hint says, so the block layout
+	// can move what only such edges reach out of the hot path's way. A wrong mark costs speed, never
+	// correctness.
+	MarkUnlikelyEdge(blk, succ BasicBlock)
+
 	// SetCurrentBlock sets the instruction insertion target to the BasicBlock `b`.
 	SetCurrentBlock(b BasicBlock)
 
@@ -195,6 +200,13 @@ type builder struct {
 	currentBB                     *basicBlock
 	returnBlk                     *basicBlock
 
+	// unlikelyEdges is whether MarkUnlikelyEdge marked any edge of the current function. The rest are scratch
+	// for the layout that then follows. See moveColdBlocksLast.
+	unlikelyEdges bool
+	layoutSeen    []bool
+	layoutStack   []layoutFrame
+	blkStack3     []*basicBlock
+
 	// nextValueID is used by builder.AllocateValue.
 	nextValueID ValueID
 	// nextVariable is used by builder.AllocateVariable.
@@ -325,6 +337,7 @@ func (b *builder) Init(s *Signature) {
 	b.varLengthBasicBlockPool.Reset()
 	b.donePreBlockLayoutPasses = false
 	b.doneBlockLayout = false
+	b.unlikelyEdges = false
 	b.donePostBlockLayoutPasses = false
 	if nativeapi.SSALoggingEnabled {
 		// sig.used only feeds Signature-printing in Format() (via usedSignatures), which is
@@ -965,4 +978,10 @@ func (b *builder) InstructionOfValue(v Value) *Instruction {
 		return nil
 	}
 	return b.instructionsPool.View(instrID - 1)
+}
+
+// MarkUnlikelyEdge implements Builder.MarkUnlikelyEdge.
+func (b *builder) MarkUnlikelyEdge(blk, succ BasicBlock) {
+	blk.(*basicBlock).unlikelySucc = succ.(*basicBlock)
+	b.unlikelyEdges = true
 }

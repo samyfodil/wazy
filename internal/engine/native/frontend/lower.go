@@ -1445,6 +1445,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 		}
 	case wasm.OpcodeIf:
+		likely, hinted := c.branchHint(state.pc)
 		bt := c.readBlockType()
 
 		if state.unreachable {
@@ -1473,6 +1474,14 @@ func (c *Compiler) lowerCurrentOpcode() {
 		br := builder.AllocateInstruction()
 		br.AsJump(ssa.ValuesNil, thenBlk)
 		builder.InsertInstruction(br)
+
+		if hinted {
+			if likely {
+				builder.MarkUnlikelyEdge(builder.CurrentBlock(), elseBlk)
+			} else {
+				builder.MarkUnlikelyEdge(builder.CurrentBlock(), thenBlk)
+			}
+		}
 
 		state.ctrlPush(controlFrame{
 			kind:                         controlFrameKindIfWithoutElse,
@@ -1622,6 +1631,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		state.unreachable = true
 
 	case wasm.OpcodeBrIf:
+		likely, hinted := c.branchHint(state.pc)
 		labelIndex := c.readI32u()
 		if state.unreachable {
 			break
@@ -1669,6 +1679,14 @@ func (c *Compiler) lowerCurrentOpcode() {
 		// Insert the unconditional jump to the Else block which corresponds to after br_if.
 		elseBlk := builder.AllocateBasicBlock()
 		c.insertJumpToBlock(ssa.ValuesNil, elseBlk)
+
+		if hinted {
+			if likely {
+				builder.MarkUnlikelyEdge(builder.CurrentBlock(), elseBlk)
+			} else {
+				builder.MarkUnlikelyEdge(builder.CurrentBlock(), targetBlk)
+			}
+		}
 
 		// Now start translating the instructions after br_if.
 		builder.Seal(elseBlk) // Else of br_if has the current block as the only one successor.
@@ -6140,6 +6158,19 @@ func (c *Compiler) readByte() byte {
 	v := c.wasmFunctionBody[c.loweringState.pc+1]
 	c.loweringState.pc++
 	return v
+}
+
+// branchHint returns what the module's branch hint section says about the if or br_if at pc: whether its branch
+// is likely taken, and whether there is a hint at all. Lowering visits pc in increasing order, as the hints are
+// sorted, so this reads them once per function.
+func (c *Compiler) branchHint(pc int) (likely, ok bool) {
+	for c.branchHintAt < len(c.branchHints) && int(c.branchHints[c.branchHintAt].Offset) < pc {
+		c.branchHintAt++
+	}
+	if c.branchHintAt < len(c.branchHints) && int(c.branchHints[c.branchHintAt].Offset) == pc {
+		return c.branchHints[c.branchHintAt].Likely, true
+	}
+	return false, false
 }
 
 func (c *Compiler) readI32u() uint32 {

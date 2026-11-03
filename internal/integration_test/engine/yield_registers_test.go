@@ -314,6 +314,12 @@ func TestYieldDoesNotAllocate(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	f, stack := mod.ExportedFunction("f"), []uint64{0}
+	// A handle's early calls take their stack from a sync.Pool, which drops what it is given at random under
+	// -race, so get past them: this is about the yield path, not stack pooling.
+	for range 100 {
+		stack[0] = 1
+		require.NoError(t, f.CallWithStack(ctx, stack))
+	}
 	allocs := testing.AllocsPerRun(2, func() {
 		stack[0] = 200_000_000
 		require.NoError(t, f.CallWithStack(ctx, stack))
