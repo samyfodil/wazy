@@ -1592,30 +1592,12 @@ func (m *machine) lowerXmmCmovAfterRegAlloc(i *instruction) {
 	jcc.asJmpIf(cond.invert(), newOperandLabel(end))
 }
 
-// zeroExtends32 reports whether instr, producing a 32-bit result, is lowered to an instruction
-// that writes a 32-bit register, which zeroes bits [63:32] of the full register (Intel SDM
-// Vol.1, 3.4.1.1). An unsigned 32->64 extend of such a result is the identity, so
-// aliasZeroExtended32 hands the extend its operand's register and lowerExtend emits nothing.
-func zeroExtends32(instr *ssa.Instruction) bool {
-	if instr == nil {
-		return false
-	}
-	switch instr.Opcode() {
-	case
-		ssa.OpcodeIadd, ssa.OpcodeIsub, ssa.OpcodeImul, ssa.OpcodeLoad,
-		ssa.OpcodeBand, ssa.OpcodeBor, ssa.OpcodeBxor, ssa.OpcodeBnot,
-		ssa.OpcodeIshl, ssa.OpcodeUshr, ssa.OpcodeSshr,
-		ssa.OpcodeRotl, ssa.OpcodeRotr, ssa.OpcodeIreduce,
-		ssa.OpcodeUload8, ssa.OpcodeUload16, ssa.OpcodeUload32:
-		return true
-	default:
-		return false
-	}
-}
-
 // aliasZeroExtended32 points the result of every unsigned 32->64 extend in blk at the virtual
-// register of its operand when that operand's producer already zeroes bits [63:32] (see
-// zeroExtends32), so the extend needs no instruction and the two values no longer interfere.
+// register of its operand, so the extend needs no instruction and the two values no longer
+// interfere. Every i32 in a register already has bits 63:32 zero: each producer writes it as a 32-bit
+// register, which clears them (Intel SDM Vol.1, 3.4.1.1), and TestI32UpperHalf checks them one by
+// one. A constant is the exception, since it has no register of its own: it is materialized where
+// it is used, which lowerExtend does already extended.
 //
 // This runs before any instruction of blk is lowered. Blocks are lowered in reverse post-order and
 // a definition dominates its uses, so every consumer of the extend is lowered after this point.
@@ -1628,16 +1610,26 @@ func (m *machine) aliasZeroExtended32(blk ssa.BasicBlock) {
 		if from, _ := cur.ExtendFromToBits(); from != 32 {
 			continue
 		}
-		if arg := cur.Arg(); zeroExtends32(builder.InstructionOfValue(arg)) {
+		if arg := cur.Arg(); !isConstant(builder.InstructionOfValue(arg)) {
 			m.c.AliasVReg(cur.Return(), arg)
 		}
 	}
 }
 
+func isConstant(instr *ssa.Instruction) bool {
+	return instr != nil && instr.Constant()
+}
+
 func (m *machine) lowerExtend(_arg, ret ssa.Value, from, to byte, signed bool) {
-	if !signed && from == 32 && m.c.VRegOf(ret) == m.c.VRegOf(_arg) {
-		// aliasZeroExtended32 already gave ret the operand's register.
-		return
+	if !signed && from == 32 {
+		if def := m.c.ValueDefinition(_arg); def.IsFromInstr() && def.Instr.Constant() {
+			m.lowerIconst(m.c.VRegOf(ret), uint64(uint32(def.Instr.ConstantVal())), true)
+			return
+		}
+		if m.c.VRegOf(ret) == m.c.VRegOf(_arg) {
+			// aliasZeroExtended32 already gave ret the operand's register.
+			return
+		}
 	}
 	// movsx/movzx are defKindOp2 (the extend itself is a valid single-Def
 	// spill anchor), so we extend straight into the return vreg -- no temp +

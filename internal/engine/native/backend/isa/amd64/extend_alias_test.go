@@ -8,10 +8,8 @@ import (
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
-// Test_aliasZeroExtended32 covers the pass that lets an unsigned 32->64 extend emit nothing when
-// the operand's producer is lowered to an instruction writing a 32-bit register. If zeroExtends32
-// ever claimed an opcode that leaves garbage in the upper half, the cases that keep their movzx
-// below would lose it and the extend would read whatever the producer left there.
+// Test_aliasZeroExtended32 covers the pass that lets an unsigned 32->64 extend emit nothing, since
+// every i32 in a register has its upper half zero (TestI32UpperHalf checks that per producer).
 func Test_aliasZeroExtended32(t *testing.T) {
 	setup := func(producer func(b ssa.Builder, arg ssa.Value) *ssa.Instruction, signed bool, from, to byte) (*mockCompiler, *machine, *ssa.Instruction) {
 		ctx, b, m := newSetupWithMockContext()
@@ -73,12 +71,19 @@ func Test_aliasZeroExtended32(t *testing.T) {
 			require.Equal(t, "nop", formatEmittedInstructionsInCurrentBlock(m))
 		})
 	}
-	t.Run("select is not aliased", func(t *testing.T) {
+	t.Run("select is aliased", func(t *testing.T) {
 		ctx, m, ext := setup(func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
 			return b.AllocateInstruction().AsSelect(arg, arg, arg)
 		}, false, 32, 64)
+		require.Equal(t, rcxVReg, ctx.VRegOf(ext.Return()))
+		require.Equal(t, "nop", formatEmittedInstructionsInCurrentBlock(m))
+	})
+	t.Run("constant is extended where it is used", func(t *testing.T) {
+		ctx, m, ext := setup(func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+			return b.AllocateInstruction().AsIconst32(0xfffffff8)
+		}, false, 32, 64)
 		require.Equal(t, rdxVReg, ctx.VRegOf(ext.Return()))
-		require.Equal(t, "movzx.lq %rcx, %rdx\nnop", formatEmittedInstructionsInCurrentBlock(m))
+		require.Equal(t, "movabsq $4294967288, %rdx\nnop", formatEmittedInstructionsInCurrentBlock(m))
 	})
 	t.Run("signed extend is not aliased", func(t *testing.T) {
 		ctx, m, ext := setup(iadd, true, 32, 64)
@@ -90,10 +95,10 @@ func Test_aliasZeroExtended32(t *testing.T) {
 		require.Equal(t, rdxVReg, ctx.VRegOf(ext.Return()))
 		require.Equal(t, "movzx.wq %rcx, %rdx\nnop", formatEmittedInstructionsInCurrentBlock(m))
 	})
-	t.Run("parameter is not aliased", func(t *testing.T) {
-		// Nothing vouches for the upper half of a value with no defining instruction.
+	t.Run("parameter is aliased", func(t *testing.T) {
+		// Parameters arrive zero-extended too: from Go through movl, from wasm as any other i32.
 		ctx, m, ext := setup(nil, false, 32, 64)
-		require.Equal(t, rdxVReg, ctx.VRegOf(ext.Return()))
-		require.Equal(t, "movzx.lq %rax, %rdx\nnop", formatEmittedInstructionsInCurrentBlock(m))
+		require.Equal(t, raxVReg, ctx.VRegOf(ext.Return()))
+		require.Equal(t, "nop", formatEmittedInstructionsInCurrentBlock(m))
 	})
 }
