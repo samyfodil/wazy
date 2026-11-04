@@ -905,3 +905,17 @@ func TestMachine_LowerInstr_exitIfTrueWithCode_sourceOffset(t *testing.T) {
 		require.True(t, strings.Contains(formatEmittedInstructionsInCurrentBlock(m), "exit_sequence"))
 	})
 }
+
+func TestMachine_lowerUmulhi(t *testing.T) {
+	ctx, b, m := newSetupWithMockContext()
+	x := b.CurrentBlock().AddParam(b, ssa.TypeI64)
+	y := b.CurrentBlock().AddParam(b, ssa.TypeI64)
+	ctx.vRegMap[x], ctx.vRegMap[y] = intToVReg(1), intToVReg(2)
+	ctx.definitions[x], ctx.definitions[y] = backend.SSAValueDefinition{V: x}, backend.SSAValueDefinition{V: y}
+	mul := b.AllocateInstruction().AsUmulhi(x, y)
+	b.InsertInstruction(mul)
+	ctx.vRegMap[mul.Return()] = intToVReg(3)
+
+	m.lowerUmulhi(mul)
+	require.Equal(t, "umulh x3?, x1?, x2?", formatEmittedInstructionsInCurrentBlock(m))
+}

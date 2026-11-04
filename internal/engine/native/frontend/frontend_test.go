@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"unsafe"
 
@@ -37,6 +38,9 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 		// expAfterPasses is not empty when we want to check the result after SSA passes.
 		expAfterPasses string
 		features       api.CoreFeatures
+		// inline lets small callees be lowered in place of their calls, which the other cases keep
+		// as calls so that they pin how a call is lowered.
+		inline bool
 	}{
 		{
 			name: "empty", m: testcases.Empty.Module,
@@ -752,6 +756,16 @@ blk0: (v0:i64, v1:i64)
 `,
 		},
 		{
+			name: "call_inlined", m: testcases.Call.Module, inline: true,
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x28
+	v3:i32 = Iconst_32 0x5
+	v4:i32 = Iadd v2, v3
+	Jump blk_ret, v4, v4
+`,
+		},
+		{
 			name: "call_many_params",
 			m:    testcases.CallManyParams.Module,
 			exp: `
@@ -1351,6 +1365,38 @@ blk3: () <-- (blk1,blk2)
 	v14:i64 = Iadd v13, v9
 	v15:i32 = Load v14, 0x0
 	Jump blk_ret, v15
+`,
+		},
+		{
+			name: "memory_load_after_pure_call", m: testcases.MemoryLoadAfterPureCall.Module,
+			exp: `
+signatures:
+	sig1: i64i64_v
+
+blk0: (v0:i64, v1:i64, v2:i32)
+	v3:i32 = Iconst_32 0x0
+	v4:i32 = Icmp eq, v2, v3
+	Brz v4, blk2
+	Jump blk1
+
+blk1: () <-- (blk0)
+	Call f1:sig1, v0, v1
+	Jump blk3
+
+blk2: () <-- (blk0)
+	Jump blk3
+
+blk3: () <-- (blk1,blk2)
+	v6:i64 = Iconst_64 0x4
+	v7:i64 = UExtend v2, 32->64
+	v8:i64 = Load v1, 0x10
+	v9:i64 = Iadd v7, v6
+	v10:i32 = Icmp lt_u, v8, v9
+	ExitIfTrue v10, v0, memory_out_of_bounds
+	v11:i64 = Load v1, 0x8
+	v12:i64 = Iadd v11, v7
+	v13:i32 = Load v12, 0x0
+	Jump blk_ret, v13
 `,
 		},
 		{
@@ -3034,6 +3080,7 @@ blk13: () <-- (blk6)
 
 			offset := nativeapi.NewModuleContextOffsetData(tc.m, tc.needListener)
 			fc := NewFrontendCompiler(tc.m, b, &offset, tc.needListener, false)
+			fc.SetInlineLeaves(tc.inline)
 			typeIndex := tc.m.FunctionSection[tc.targetIndex]
 			code := &tc.m.CodeSection[tc.targetIndex]
 			fc.Init(tc.targetIndex, typeIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body, tc.needListener, 0)
@@ -3337,6 +3384,30 @@ func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 		require.True(t, kb.valid())
 		require.Equal(t, uint64(666), kb.bound)
 		require.NotEqual(t, ssa.Value(54321), kb.absoluteAddr)
+	})
+	t.Run("one predecessor reaching twice", func(t *testing.T) {
+		// A br_table can name the same target twice; that is still a single predecessor,
+		// including when the epoch that deduplicates them wraps around.
+		for _, epoch := range []uint32{0, math.MaxUint32} {
+			c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
+			c.predSeenEpoch = epoch
+			builder := c.ssaBuilder
+			child := builder.AllocateBasicBlock()
+			parent := builder.AllocateBasicBlock()
+			builder.SetCurrentBlock(parent)
+			c.recordKnownSafeBound(1, 99, 9999)
+			builder.AllocateInstruction().AsJump(ssa.ValuesNil, child).Insert(builder)
+			builder.AllocateInstruction().AsJump(ssa.ValuesNil, child).Insert(builder)
+			c.finalizeKnownSafeBoundsAtTheEndOfBlock(parent.ID())
+
+			builder.Seal(child)
+			builder.SetCurrentBlock(child)
+			c.initializeCurrentBlockKnownBounds()
+			require.Equal(t, []ssa.BasicBlockID{parent.ID()}, c.preds)
+			kb := c.getKnownSafeBound(1)
+			require.True(t, kb.valid())
+			require.Equal(t, ssa.Value(9999), kb.absoluteAddr)
+		}
 	})
 	t.Run("multiple predecessors", func(t *testing.T) {
 		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)

@@ -233,11 +233,13 @@ type builder struct {
 	loopNestingForestRoots []BasicBlock
 
 	// The followings are used for optimization passes/deterministic compilation.
-	licmLoops                 []*basicBlock
-	licmDefs                  []*basicBlock
-	instStack                 []*Instruction
-	blkStack                  []*basicBlock
-	blkStack2                 []*basicBlock
+	licmLoops []*basicBlock
+	licmDefs  []*basicBlock
+	instStack []*Instruction
+	blkStack  []*basicBlock
+	blkStack2 []*basicBlock
+	// predIndex is passLayoutBlocks' index of long predecessor lists; see predInfoOf.
+	predIndex                 map[*basicBlock]map[*basicBlock]int
 	redundantParams           []redundantParam
 	dominatedMemoryBounds     []dominatedMemoryBound
 	dominatedMemoryBoundHeads []int

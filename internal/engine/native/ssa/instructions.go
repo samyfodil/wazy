@@ -473,6 +473,10 @@ const (
 	// OpcodeImul performs an integer multiplication: `v = Imul x, y`.
 	OpcodeImul
 
+	// OpcodeUmulhi is the high 64 bits of the unsigned 128-bit product of two i64 values: `v = Umulhi x, y`.
+	// WebAssembly has no such instruction; the frontend recognizes the 32-bit schoolbook form producers emit.
+	OpcodeUmulhi
+
 	// OpcodeUdiv performs the unsigned integer division `v = Udiv x, y`.
 	OpcodeUdiv
 
@@ -800,6 +804,7 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeCallIndirect:                sideEffectStrict,
 	OpcodeIadd:                        sideEffectNone,
 	OpcodeImul:                        sideEffectNone,
+	OpcodeUmulhi:                      sideEffectNone,
 	OpcodeIsub:                        sideEffectNone,
 	OpcodeIcmp:                        sideEffectNone,
 	OpcodeExtractlane:                 sideEffectNone,
@@ -1028,6 +1033,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeIadd:                        returnTypesFnSingle,
 	OpcodeIsub:                        returnTypesFnSingle,
 	OpcodeImul:                        returnTypesFnSingle,
+	OpcodeUmulhi:                      returnTypesFnSingle,
 	OpcodeIcmp:                        returnTypesFnI32,
 	OpcodeFcmp:                        returnTypesFnI32,
 	OpcodeFadd:                        returnTypesFnSingle,
@@ -1512,6 +1518,15 @@ func (i *Instruction) AsVFdiv(x, y Value, lane VecLane) *Instruction {
 // AsImul initializes this instruction as an integer addition instruction with OpcodeImul.
 func (i *Instruction) AsImul(x, y Value) *Instruction {
 	i.opcode = OpcodeImul
+	i.v = x
+	i.v2 = y
+	i.typ = x.Type()
+	return i
+}
+
+// AsUmulhi initializes this instruction as the high half of an unsigned 64x64->128 multiplication with OpcodeUmulhi.
+func (i *Instruction) AsUmulhi(x, y Value) *Instruction {
+	i.opcode = OpcodeUmulhi
 	i.v = x
 	i.v2 = y
 	i.typ = x.Type()
@@ -2710,7 +2725,7 @@ func (i *Instruction) Format(b Builder) string {
 		instSuffix = fmt.Sprintf(" %s, %s", i.v.Format(b), nativeapi.ExitCode(i.u1))
 	case OpcodeExitIfTrueWithCode:
 		instSuffix = fmt.Sprintf(" %s, %s, %s", i.v2.Format(b), i.v.Format(b), nativeapi.ExitCode(i.u1))
-	case OpcodeIadd, OpcodeIsub, OpcodeImul, OpcodeFadd, OpcodeFsub, OpcodeFmin, OpcodeFmax, OpcodeFdiv, OpcodeFmul:
+	case OpcodeIadd, OpcodeIsub, OpcodeImul, OpcodeUmulhi, OpcodeFadd, OpcodeFsub, OpcodeFmin, OpcodeFmax, OpcodeFdiv, OpcodeFmul:
 		instSuffix = fmt.Sprintf(" %s, %s", i.v.Format(b), i.v2.Format(b))
 	case OpcodeIcmp:
 		instSuffix = fmt.Sprintf(" %s, %s, %s", IntegerCmpCond(i.u1), i.v.Format(b), i.v2.Format(b))
@@ -3014,6 +3029,8 @@ func (o Opcode) String() (ret string) {
 		return "Isub"
 	case OpcodeImul:
 		return "Imul"
+	case OpcodeUmulhi:
+		return "Umulhi"
 	case OpcodeUdiv:
 		return "Udiv"
 	case OpcodeSdiv:

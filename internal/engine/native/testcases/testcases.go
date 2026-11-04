@@ -1574,6 +1574,35 @@ var (
 
 					wasm.OpcodeEnd,
 				}},
+				// The callee may grow the memory, so its callers cannot keep the base and length.
+				{Body: []byte{wasm.OpcodeI32Const, 1, wasm.OpcodeMemoryGrow, 0, wasm.OpcodeDrop, wasm.OpcodeEnd}},
+			},
+			DataSection: []wasm.DataSegment{{OffsetExpression: constExprI32(0), Init: maskedBuf(int(wasm.MemoryPageSize))}},
+		},
+	}
+
+	MemoryLoadAfterPureCall = TestCase{
+		Name: "memory_load_after_pure_call",
+		Module: &wasm.Module{
+			TypeSection:     []wasm.FunctionType{i32_i32, {}},
+			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
+			MemorySection:   []wasm.Memory{{Min: 1}},
+			FunctionSection: []wasm.Index{0, 1},
+			CodeSection: []wasm.Code{
+				{Body: []byte{
+					wasm.OpcodeLocalGet, 0,
+					wasm.OpcodeI32Const, 0,
+					wasm.OpcodeI32Eq,
+					wasm.OpcodeIf, blockSignature_vv,
+					wasm.OpcodeCall, 0x1, // The callee cannot grow the memory, so nothing reloads.
+					wasm.OpcodeElse,
+					wasm.OpcodeEnd,
+
+					wasm.OpcodeLocalGet, 0,
+					wasm.OpcodeI32Load, 0x2, 0x0, // alignment=2 (natural alignment) staticOffset=0
+
+					wasm.OpcodeEnd,
+				}},
 				{Body: []byte{wasm.OpcodeEnd}},
 			},
 			DataSection: []wasm.DataSegment{{OffsetExpression: constExprI32(0), Init: maskedBuf(int(wasm.MemoryPageSize))}},

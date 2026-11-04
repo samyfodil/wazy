@@ -327,6 +327,14 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.foldInlined(op, x, y); ok {
+			state.push(v)
+			break
+		}
+		if v, ok := c.fuseWideMulAdd(x, y); ok {
+			state.push(v)
+			break
+		}
 		iadd := builder.AllocateInstruction()
 		iadd.AsIadd(x, y)
 		builder.InsertInstruction(iadd)
@@ -357,6 +365,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.foldInlined(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		imul := builder.AllocateInstruction()
 		imul.AsImul(x, y)
 		builder.InsertInstruction(imul)
@@ -1025,6 +1037,14 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.foldInlined(op, x, y); ok {
+			state.push(v)
+			break
+		}
+		if v, ok := c.fuseWideMulOr(x, y); ok {
+			state.push(v)
+			break
+		}
 		or := builder.AllocateInstruction()
 		or.AsBor(x, y)
 		builder.InsertInstruction(or)
@@ -1757,6 +1777,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.ctrlPeekAt(0).yielded = true
 		}
 		c.addLoopWork(c.callWork(fnIndex))
+		if c.isInlinableLeaf(fnIndex) {
+			c.inlineLeaf(fnIndex)
+			break
+		}
 		c.lowerCall(fnIndex)
 
 	case wasm.OpcodeDrop:
@@ -4205,7 +4229,25 @@ func (c *Compiler) lowerCall(fnIndex uint32) {
 		state.push(v)
 	}
 
-	c.reloadAfterCall()
+	effects := c.callEffects(fnIndex)
+	if effects&wasm.CallEffectGrowMemory != 0 {
+		c.reloadAllMemories()
+	}
+	if effects&wasm.CallEffectSetGlobal != 0 {
+		for _, index := range c.mutableGlobalVariablesIndexes {
+			_ = c.getWasmGlobalValue(index, true)
+		}
+	}
+}
+
+// callEffects is what a direct call to fnIndex may change of what its caller caches: everything for
+// an import, and for a local function what wasm.Module.FunctionCallEffects worked out.
+func (c *Compiler) callEffects(fnIndex uint32) wasm.CallEffects {
+	effects := c.m.FunctionCallEffects
+	if i := int(fnIndex) - int(c.m.ImportFunctionCount); i >= 0 && i < len(effects) {
+		return effects[i]
+	}
+	return wasm.CallEffectGrowMemory | wasm.CallEffectSetGlobal
 }
 
 func (c *Compiler) prepareCallIndirect(typeIndex, tableIndex uint32) (ssa.Value, *wasm.FunctionType, ssa.Values) {
@@ -4964,6 +5006,12 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 		}
 	}
 
+	if !c.multiMemory {
+		if a, ok := c.derivedSafeAddress(memIndex, baseAddr, ceil); ok {
+			return a
+		}
+	}
+
 	memoryMinSizeInBytes := c.memoryMinSizeInBytes[memIndex]
 
 	// A constant base address whose access end lies within the memory's
@@ -5020,7 +5068,7 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 	cmp.AsIcmp(memLen, baseAddrPlusCeil.Return(), ssa.IntegerCmpCondUnsignedLessThan)
 	builder.InsertInstruction(cmp)
 	exitIfNZ := builder.AllocateInstruction()
-	exitIfNZ.AsExitIfTrueWithCode(c.execCtxPtrValue, cmp.Return(), nativeapi.ExitCodeMemoryOutOfBounds)
+	exitIfNZ.AsExitIfTrueWithCode(c.execCtxPtrValue, cmp.Return(), c.memoryOutOfBoundsCode())
 	builder.InsertInstruction(exitIfNZ)
 
 	// Load the value from memBase + extBaseAddr.
@@ -5054,6 +5102,49 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 // are all keyed on 32-bit address arithmetic. The dominance-based pass in
 // ssa/pass.go likewise only recognizes the 32-bit shape, so a 64-bit memory
 // simply keeps every check.
+// derivedSafeAddress returns the address of an access ceil bytes past baseAddr = x + k, for a constant
+// k, when x is known to be safe for at least k + ceil bytes. Then zext(x) + k + ceil is within the
+// memory, which is at most 2^32 bytes, so the 32-bit add did not wrap and baseAddr is safe for ceil:
+// the access needs no bounds check of its own. C passes the address of a stack slot as such a sum,
+// which inlining turns into accesses through it.
+func (c *Compiler) derivedSafeAddress(memIndex wasm.Index, baseAddr ssa.Value, ceil uint64) (ssa.Value, bool) {
+	x, y, ok := c.addOf(baseAddr)
+	if !ok {
+		return ssa.ValueInvalid, false
+	}
+	k, isConst := c.constOf(y)
+	if !isConst {
+		if k, isConst = c.constOf(x); !isConst {
+			return ssa.ValueInvalid, false
+		}
+		x = y
+	}
+	known := c.getKnownSafeBound(x.ID())
+	if !known.valid() || k+ceil > known.bound {
+		return ssa.ValueInvalid, false
+	}
+	builder := c.ssaBuilder
+	base := known.absoluteAddr
+	if !base.Valid() {
+		memBase := c.getMemoryBaseValue(memIndex, false)
+		ext := builder.AllocateInstruction().AsUExtend(x, 32, 64).Insert(builder).Return()
+		base = builder.AllocateInstruction().AsIadd(memBase, ext).Insert(builder).Return()
+		known.absoluteAddr = base
+	}
+	kv := builder.AllocateInstruction().AsIconst64(k).Insert(builder).Return()
+	address := builder.AllocateInstruction().AsIadd(base, kv).Insert(builder).Return()
+	c.recordKnownSafeBound(baseAddr.ID(), known.bound-k, address)
+	return address, true
+}
+
+// constOf returns v's value, zero-extended, when v is a 32-bit constant.
+func (c *Compiler) constOf(v ssa.Value) (uint64, bool) {
+	if instr := c.defOf(v, ssa.OpcodeIconst); instr != nil && v.Type() == ssa.TypeI32 {
+		return uint64(uint32(instr.ConstantVal())), true
+	}
+	return 0, false
+}
+
 func (c *Compiler) memOpSetup64(memIndex wasm.Index, baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) ssa.Value {
 	builder := c.ssaBuilder
 
@@ -5091,7 +5182,7 @@ func (c *Compiler) memOpSetup64(memIndex wasm.Index, baseAddr ssa.Value, constOf
 		oob = orInstr.Insert(builder).Return()
 	}
 	builder.AllocateInstruction().
-		AsExitIfTrueWithCode(c.execCtxPtrValue, oob, nativeapi.ExitCodeMemoryOutOfBounds).
+		AsExitIfTrueWithCode(c.execCtxPtrValue, oob, c.memoryOutOfBoundsCode()).
 		Insert(builder)
 
 	memBase := c.getMemoryBaseValue(memIndex, false)
@@ -6637,7 +6728,7 @@ func (c *Compiler) boundsCheckInMemory(memLen, offset, size ssa.Value, checkOver
 		cmp = or.Insert(builder).Return()
 	}
 	builder.AllocateInstruction().
-		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, nativeapi.ExitCodeMemoryOutOfBounds).
+		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, c.memoryOutOfBoundsCode()).
 		Insert(builder)
 }
 

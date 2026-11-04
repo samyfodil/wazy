@@ -4,7 +4,6 @@ package frontend
 import (
 	"bytes"
 	"math"
-	"slices"
 	"sync"
 
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
@@ -107,6 +106,18 @@ type Compiler struct {
 	knownSafeBounds    [] /* ssa.ValueID to */ knownSafeBound
 	knownSafeBoundsSet []ssa.ValueID
 
+	// wideMulTerms is scratch for fuseWideMulAdd.
+	wideMulTerms []ssa.Value
+
+	// leafKinds caches isInlinableLeaf per local function, and inlineLocals is inlineLeaf's scratch.
+	leafKinds    []byte
+	inlineLocals []ssa.Variable
+	// inlineLeaves turns isInlinableLeaf on; see SetInlineLeaves.
+	inlineLeaves bool
+	// inlinedCallee is one more than the local index of the function inlineLeaf is lowering, and zero
+	// outside one. See memoryOutOfBoundsCode.
+	inlinedCallee uint32
+
 	knownSafeBoundsAtTheEndOfBlocks   [] /* ssa.BlockID to */ knownSafeBoundsAtTheEndOfBlock
 	varLengthKnownSafeBoundWithIDPool nativeapi.VarLengthPool[knownSafeBoundWithID]
 
@@ -134,6 +145,9 @@ type Compiler struct {
 	pointers []int
 	bounds   [][]knownSafeBoundWithID
 	preds    []ssa.BasicBlockID
+	// predSeen and predSeenEpoch deduplicate preds; see initializeCurrentBlockKnownBounds.
+	predSeen      []uint32
+	predSeenEpoch uint32
 }
 
 type (
@@ -166,6 +180,7 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 		br:                                bytes.NewReader(nil),
 		offset:                            offset,
 		loopYield:                         LoopYield,
+		inlineLeaves:                      true,
 		needSourceOffsetInfo:              sourceInfo,
 		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
@@ -174,6 +189,10 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	c.declareModuleInvariants()
 	return c
 }
+
+// SetInlineLeaves turns off lowering small callees in place of their calls (see isInlinableLeaf), for
+// tests that pin how a call is lowered. It must be called before lowering.
+func (c *Compiler) SetInlineLeaves(on bool) { c.inlineLeaves = on }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {
@@ -759,6 +778,11 @@ func (c *Compiler) finalizeKnownSafeBoundsAtTheEndOfBlock(bID ssa.BasicBlockID) 
 func (c *Compiler) initializeCurrentBlockKnownBounds() {
 	currentBlk := c.ssaBuilder.CurrentBlock()
 	c.preds = c.preds[:0]
+	c.predSeenEpoch++
+	if c.predSeenEpoch == 0 {
+		clear(c.predSeen)
+		c.predSeenEpoch = 1
+	}
 	for i := range currentBlk.Preds() {
 		// A preemption check's slow path only yields to Go, which changes neither the
 		// memory nor its size: it knows what the block it came from knows.
@@ -766,7 +790,13 @@ func (c *Compiler) initializeCurrentBlockKnownBounds() {
 		if root := pred.Root(); root != nil && root.Opcode() == ssa.OpcodeYield && pred.Preds() == 1 {
 			pred = pred.Pred(0)
 		}
-		if !slices.Contains(c.preds, pred.ID()) {
+		// A br_table can give a block thousands of predecessors, so duplicates are found by
+		// stamping block IDs rather than by searching c.preds.
+		if id := int(pred.ID()); id >= len(c.predSeen) {
+			c.predSeen = append(c.predSeen, make([]uint32, id+1-len(c.predSeen))...)
+		}
+		if c.predSeen[pred.ID()] != c.predSeenEpoch {
+			c.predSeen[pred.ID()] = c.predSeenEpoch
 			c.preds = append(c.preds, pred.ID())
 		}
 	}

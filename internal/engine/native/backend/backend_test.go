@@ -1922,9 +1922,7 @@ L0 (SSA Block: blk0):
 	sub $32, %rsp
 	mov.q %rax, (%rsp)
 	mov.q %rax, 16(%rsp)
-	movl $1024, %edx
-	movzx.lq %rdx, %rdx
-	movzx.lq %rcx, %rcx
+	movabsq $1024, %rdx
 	movq 16(%rbx), %rsi
 	lea (%rcx,%rdx,1), %rdi
 	cmpq %rdi, %rsi
@@ -2035,7 +2033,6 @@ L0 (SSA Block: blk0):
 	pushq %rdx
 	sub $16, %rsp
 	mov.q %rax, (%rsp)
-	movzx.lq %rcx, %rcx
 	movq 16(%rbx), %rdx
 	lea 4(%rcx), %rsi
 	cmpq %rsi, %rdx
@@ -2347,16 +2344,14 @@ L0 (SSA Block: blk0):
 	movq 8(%rbx), %rdx
 	lock xadd.b %rcx, (%rdx)
 	movzx.bl %rcx, %rcx
-	movl $8, %ebx
-	movzx.lq %rbx, %rbx
+	movabsq $8, %rbx
 	lea (%rdx,%rbx,1), %rbx
 	testq $1, %rbx
 	jnz L2
 	lock xadd.w %rdi, (%rbx)
 	movzx.wl %rdi, %rdi
 	movq %rdi, %rbx
-	movl $16, %edi
-	movzx.lq %rdi, %rdi
+	movabsq $16, %rdi
 	lea (%rdx,%rdi,1), %rdi
 	testq $3, %rdi
 	jnz L2
@@ -2364,23 +2359,20 @@ L0 (SSA Block: blk0):
 	lock xadd.b %r8, 24(%rdx)
 	movzx.bq %r8, %r8
 	movq %r8, %rdi
-	movl $32, %r8d
-	movzx.lq %r8, %r8
+	movabsq $32, %r8
 	lea (%rdx,%r8,1), %r8
 	testq $1, %r8
 	jnz L2
 	lock xadd.w %r9, (%r8)
 	movzx.wq %r9, %r9
-	movl $40, %r8d
-	movzx.lq %r8, %r8
+	movabsq $40, %r8
 	lea (%rdx,%r8,1), %r8
 	testq $3, %r8
 	jnz L2
 	lock xadd.l %r10, (%r8)
 	movzx.lq %r10, %r10
 	movq %r10, %r8
-	movl $48, %r10d
-	movzx.lq %r10, %r10
+	movabsq $48, %r10
 	lea (%rdx,%r10,1), %rdx
 	testq $7, %rdx
 	jnz L2
@@ -2897,6 +2889,7 @@ L7 (SSA Block: blk7):
 			ssab := ssa.NewBuilder()
 			offset := nativeapi.NewModuleContextOffsetData(tc.m, false)
 			fc := frontend.NewFrontendCompiler(tc.m, ssab, &offset, false, false)
+			fc.SetInlineLeaves(false) // the call cases pin how a call is lowered.
 			machine := newMachine()
 			machine.DisableStackCheck()
 			be := backend.NewCompiler(context.Background(), machine, ssab)
