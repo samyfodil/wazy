@@ -107,6 +107,9 @@ type Compiler struct {
 	knownSafeBounds    [] /* ssa.ValueID to */ knownSafeBound
 	knownSafeBoundsSet []ssa.ValueID
 
+	// wideMulTerms is scratch for fuseWideMulAdd.
+	wideMulTerms []ssa.Value
+
 	knownSafeBoundsAtTheEndOfBlocks   [] /* ssa.BlockID to */ knownSafeBoundsAtTheEndOfBlock
 	varLengthKnownSafeBoundWithIDPool nativeapi.VarLengthPool[knownSafeBoundWithID]
 

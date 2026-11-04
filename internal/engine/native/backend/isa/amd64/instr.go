@@ -365,6 +365,8 @@ func (i *instruction) Defs(regs *[]regalloc.VReg) []regalloc.VReg {
 		} else {
 			*regs = append(*regs, rdxVReg)
 		}
+	case defKindMulHi:
+		*regs = append(*regs, raxVReg, rdxVReg)
 	default:
 		panic(fmt.Sprintf("BUG: invalid defKind \"%s\" for %s", dk, i))
 	}
@@ -439,6 +441,9 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 		execCtx, divisor, tmpGp, _, _, _ := i.idivRemSequenceData()
 		// idiv uses rax and rdx as implicit operands.
 		*regs = append(*regs, raxVReg, rdxVReg, execCtx, divisor, tmpGp)
+	case useKindMulHi:
+		// mul multiplies rax by its operand.
+		*regs = append(*regs, raxVReg, i.op1.reg())
 	case useKindBlendvpd:
 		*regs = append(*regs, xmm0VReg)
 
@@ -601,6 +606,17 @@ func (i *instruction) AssignUse(index int, v regalloc.VReg) {
 			i.op2.setReg(v)
 		case 4:
 			i.u1 = uint64(v)
+		default:
+			panic("BUG")
+		}
+	case useKindMulHi:
+		switch index {
+		case 0:
+			if v != raxVReg {
+				panic("BUG")
+			}
+		case 1:
+			i.op1.setReg(v)
 		default:
 			panic("BUG")
 		}
@@ -2519,6 +2535,7 @@ const (
 	defKindOp2
 	defKindCall
 	defKindDivRem
+	defKindMulHi
 )
 
 var defKinds = [instrMax]defKind{
@@ -2560,6 +2577,7 @@ var defKinds = [instrMax]defKind{
 	fcvtToUintSequence:     defKindNone,
 	xmmCMov:                defKindOp2,
 	idivRemSequence:        defKindDivRem,
+	mulHi:                  defKindMulHi,
 	blendvpd:               defKindNone,
 	mfence:                 defKindNone,
 	xchg:                   defKindNone,
@@ -2589,6 +2607,8 @@ func (d defKind) String() string {
 		return "call"
 	case defKindDivRem:
 		return "divrem"
+	case defKindMulHi:
+		return "mulhi"
 	default:
 		return "invalid"
 	}
@@ -2606,6 +2626,7 @@ const (
 	// useKindRaxOp1RegOp2 is Op1 must be a register, Op2 can be any operand, and RAX is used.
 	useKindRaxOp1RegOp2
 	useKindDivRem
+	useKindMulHi
 	useKindBlendvpd
 	useKindCall
 	useKindCallInd
@@ -2654,6 +2675,7 @@ var useKinds = [instrMax]useKind{
 	fcvtToUintSequence:     useKindFcvtToUintSequence,
 	xmmCMov:                useKindOp1Op2Reg,
 	idivRemSequence:        useKindDivRem,
+	mulHi:                  useKindMulHi,
 	blendvpd:               useKindBlendvpd,
 	mfence:                 useKindNone,
 	xchg:                   useKindOp1RegOp2,
@@ -2690,6 +2712,8 @@ func (u useKind) String() string {
 		return "tailCallInd"
 	case useKindCvtUint64ToFloatSeq:
 		return "cvtUint64ToFloatSeq"
+	case useKindMulHi:
+		return "mulhi"
 	default:
 		return "invalid"
 	}

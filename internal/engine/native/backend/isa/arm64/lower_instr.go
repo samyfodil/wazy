@@ -323,6 +323,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		x, y := instr.Arg2()
 		result := instr.Return()
 		m.lowerImul(x, y, result)
+	case ssa.OpcodeUmulhi:
+		m.lowerUmulhi(instr)
 	case ssa.OpcodeUndefined:
 		undef := m.allocateInstr()
 		undef.asUDF()
@@ -1998,6 +2000,15 @@ func (m *machine) lowerImul(x, y, result ssa.Value) {
 
 	mul := m.allocateInstr()
 	mul.asALURRRR(aluOpMAdd, rd, rn, rm, xzrVReg, x.Type().Bits() == 64)
+	m.insert(mul)
+}
+
+func (m *machine) lowerUmulhi(si *ssa.Instruction) {
+	x, y := si.Arg2()
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
+	rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
+	mul := m.allocateInstr()
+	mul.asALURRRR(aluOpUMulH, m.compiler.VRegOf(si.Return()), rn, rm, xzrVReg, true)
 	m.insert(mul)
 }
 

@@ -647,6 +647,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerAluRmiROp(instr, aluRmiROpcodeSub)
 	case ssa.OpcodeImul:
 		m.lowerAluRmiROp(instr, aluRmiROpcodeMul)
+	case ssa.OpcodeUmulhi:
+		m.lowerUmulhi(instr)
 	case ssa.OpcodeSdiv, ssa.OpcodeUdiv, ssa.OpcodeSrem, ssa.OpcodeUrem:
 		isDiv := op == ssa.OpcodeSdiv || op == ssa.OpcodeUdiv
 		isSigned := op == ssa.OpcodeSdiv || op == ssa.OpcodeSrem
@@ -2853,6 +2855,15 @@ func (m *machine) frameSize() int64 {
 
 func (m *machine) clobberedRegSlotSize() int64 {
 	return int64(len(m.clobberedRegs) * 16)
+}
+
+func (m *machine) lowerUmulhi(si *ssa.Instruction) {
+	x, y := si.Arg2()
+	rx := m.getOperand_Reg(m.c.ValueDefinition(x))
+	ry := m.getOperand_Reg(m.c.ValueDefinition(y))
+	m.copyTo(rx.reg(), raxVReg)
+	m.insert(m.allocateInstr().asMulHi(ry, false, true))
+	m.copyTo(rdxVReg, m.c.VRegOf(si.Return()))
 }
 
 func (m *machine) lowerIDivRem(si *ssa.Instruction, isDiv bool, signed bool) {

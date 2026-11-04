@@ -327,6 +327,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.fuseWideMulAdd(x, y); ok {
+			state.push(v)
+			break
+		}
 		iadd := builder.AllocateInstruction()
 		iadd.AsIadd(x, y)
 		builder.InsertInstruction(iadd)
@@ -1025,6 +1029,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.fuseWideMulOr(x, y); ok {
+			state.push(v)
+			break
+		}
 		or := builder.AllocateInstruction()
 		or.AsBor(x, y)
 		builder.InsertInstruction(or)

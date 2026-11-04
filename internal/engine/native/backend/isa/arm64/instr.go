@@ -1145,6 +1145,11 @@ func (i *instruction) String() (str string) {
 			i.rm.format(size))
 	case aluRRRR:
 		size := is64SizeBitToSize(i.u1 >> 32)
+		if op := aluOp(i.u1); op == aluOpSMulH || op == aluOpUMulH {
+			// These have no addend: their Ra field is fixed (see encodeAluRRRR).
+			str = fmt.Sprintf("%s %s, %s, %s", op.String(), formatVRegSized(i.rd, 64), formatVRegSized(i.rn.nr(), 64), formatVRegSized(i.rm.nr(), 64))
+			break
+		}
 		str = fmt.Sprintf("%s %s, %s, %s, %s", aluOp(i.u1).String(),
 			formatVRegSized(i.rd, size), formatVRegSized(i.rn.nr(), size), formatVRegSized(i.rm.nr(), size), formatVRegSized(regalloc.VReg(i.u2), size))
 	case aluRRImm12:
@@ -2080,9 +2085,9 @@ func (a aluOp) String() string {
 	case aluOpSubS:
 		return "subs"
 	case aluOpSMulH:
-		return "sMulH"
+		return "smulh"
 	case aluOpUMulH:
-		return "uMulH"
+		return "umulh"
 	case aluOpSDiv:
 		return "sdiv"
 	case aluOpUDiv:
