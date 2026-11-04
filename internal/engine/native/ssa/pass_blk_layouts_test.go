@@ -1,6 +1,7 @@
 package ssa
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 
@@ -814,6 +815,29 @@ func TestBuilder_LayoutBlocks_unlikelyEdges(t *testing.T) {
 				}
 				require.Equal(t, tc.exp, ids)
 			}
+		})
+	}
+}
+
+func TestBuilder_predInfoOf(t *testing.T) {
+	for _, preds := range []int{3, 16, 17, 200} {
+		t.Run(fmt.Sprintf("%d preds", preds), func(t *testing.T) {
+			b := NewBuilder().(*builder)
+			succ, stranger := b.allocateBasicBlock(), b.allocateBasicBlock()
+			var blks []*basicBlock
+			for i := 0; i < preds; i++ {
+				pred := b.allocateBasicBlock()
+				jump := b.AllocateInstruction()
+				jump.AsJump(ValuesNil, succ)
+				succ.addPred(pred, jump)
+				blks = append(blks, pred)
+			}
+			for i, pred := range blks {
+				info := b.predInfoOf(succ, pred)
+				require.Equal(t, &succ.preds[i], info)
+				require.Equal(t, pred, info.blk)
+			}
+			require.Nil(t, b.predInfoOf(succ, stranger))
 		})
 	}
 }

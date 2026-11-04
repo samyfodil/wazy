@@ -4,7 +4,6 @@ package frontend
 import (
 	"bytes"
 	"math"
-	"slices"
 	"sync"
 
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
@@ -137,6 +136,9 @@ type Compiler struct {
 	pointers []int
 	bounds   [][]knownSafeBoundWithID
 	preds    []ssa.BasicBlockID
+	// predSeen and predSeenEpoch deduplicate preds; see initializeCurrentBlockKnownBounds.
+	predSeen      []uint32
+	predSeenEpoch uint32
 }
 
 type (
@@ -762,6 +764,11 @@ func (c *Compiler) finalizeKnownSafeBoundsAtTheEndOfBlock(bID ssa.BasicBlockID) 
 func (c *Compiler) initializeCurrentBlockKnownBounds() {
 	currentBlk := c.ssaBuilder.CurrentBlock()
 	c.preds = c.preds[:0]
+	c.predSeenEpoch++
+	if c.predSeenEpoch == 0 {
+		clear(c.predSeen)
+		c.predSeenEpoch = 1
+	}
 	for i := range currentBlk.Preds() {
 		// A preemption check's slow path only yields to Go, which changes neither the
 		// memory nor its size: it knows what the block it came from knows.
@@ -769,7 +776,13 @@ func (c *Compiler) initializeCurrentBlockKnownBounds() {
 		if root := pred.Root(); root != nil && root.Opcode() == ssa.OpcodeYield && pred.Preds() == 1 {
 			pred = pred.Pred(0)
 		}
-		if !slices.Contains(c.preds, pred.ID()) {
+		// A br_table can give a block thousands of predecessors, so duplicates are found by
+		// stamping block IDs rather than by searching c.preds.
+		if id := int(pred.ID()); id >= len(c.predSeen) {
+			c.predSeen = append(c.predSeen, make([]uint32, id+1-len(c.predSeen))...)
+		}
+		if c.predSeen[pred.ID()] != c.predSeenEpoch {
+			c.predSeen[pred.ID()] = c.predSeenEpoch
 			c.preds = append(c.preds, pred.ID())
 		}
 	}

@@ -52,6 +52,7 @@ func passLayoutBlocks(b *builder) {
 	}
 
 	var trampolines []*basicBlock
+	clear(b.predIndex)
 
 	// Reset the order slice since we update on the fly by splitting critical edges.
 	b.reversePostOrderedBasicBlocks = b.reversePostOrderedBasicBlocks[:0]
@@ -87,14 +88,7 @@ func passLayoutBlocks(b *builder) {
 
 			// Otherwise, we are sure this is a critical edge. To modify the CFG, we need to find the predecessor info
 			// from the successor.
-			var predInfo *basicBlockPredecessorInfo
-			for i := range succ.preds { // This linear search should not be a problem since the number of predecessors should almost always small.
-				pred := &succ.preds[i]
-				if pred.blk == blk {
-					predInfo = pred
-					break
-				}
-			}
+			predInfo := b.predInfoOf(succ, blk)
 
 			if predInfo == nil {
 				// This must be a bug in somewhere around branch manipulation.
@@ -416,4 +410,33 @@ func swapInstruction(blk *basicBlock, old, New *Instruction) {
 		}
 	}
 	old.prev, old.next = nil, nil
+}
+
+// predInfoOf returns the entry of succ.preds for the edge from pred. A block can have thousands of
+// predecessors (every bounds check of a function may branch to one shared block), and every one of
+// those edges is looked up here, so long lists are indexed once instead of scanned per edge.
+func (b *builder) predInfoOf(succ, pred *basicBlock) *basicBlockPredecessorInfo {
+	if len(succ.preds) <= 16 {
+		for i := range succ.preds {
+			if succ.preds[i].blk == pred {
+				return &succ.preds[i]
+			}
+		}
+		return nil
+	}
+	idx, ok := b.predIndex[succ]
+	if !ok {
+		if b.predIndex == nil {
+			b.predIndex = make(map[*basicBlock]map[*basicBlock]int)
+		}
+		idx = make(map[*basicBlock]int, len(succ.preds))
+		for i := len(succ.preds) - 1; i >= 0; i-- {
+			idx[succ.preds[i].blk] = i
+		}
+		b.predIndex[succ] = idx
+	}
+	if i, ok := idx[pred]; ok {
+		return &succ.preds[i]
+	}
+	return nil
 }

@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"unsafe"
 
@@ -3337,6 +3338,30 @@ func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 		require.True(t, kb.valid())
 		require.Equal(t, uint64(666), kb.bound)
 		require.NotEqual(t, ssa.Value(54321), kb.absoluteAddr)
+	})
+	t.Run("one predecessor reaching twice", func(t *testing.T) {
+		// A br_table can name the same target twice; that is still a single predecessor,
+		// including when the epoch that deduplicates them wraps around.
+		for _, epoch := range []uint32{0, math.MaxUint32} {
+			c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
+			c.predSeenEpoch = epoch
+			builder := c.ssaBuilder
+			child := builder.AllocateBasicBlock()
+			parent := builder.AllocateBasicBlock()
+			builder.SetCurrentBlock(parent)
+			c.recordKnownSafeBound(1, 99, 9999)
+			builder.AllocateInstruction().AsJump(ssa.ValuesNil, child).Insert(builder)
+			builder.AllocateInstruction().AsJump(ssa.ValuesNil, child).Insert(builder)
+			c.finalizeKnownSafeBoundsAtTheEndOfBlock(parent.ID())
+
+			builder.Seal(child)
+			builder.SetCurrentBlock(child)
+			c.initializeCurrentBlockKnownBounds()
+			require.Equal(t, []ssa.BasicBlockID{parent.ID()}, c.preds)
+			kb := c.getKnownSafeBound(1)
+			require.True(t, kb.valid())
+			require.Equal(t, ssa.Value(9999), kb.absoluteAddr)
+		}
 	})
 	t.Run("multiple predecessors", func(t *testing.T) {
 		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
