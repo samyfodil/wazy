@@ -80,7 +80,7 @@ L1:
 	movdqu 256(%rax), %xmm13
 	movdqu 272(%rax), %xmm14
 	movdqu 288(%rax), %xmm15
-	movq (%rsp), %rax
+	movzx.lq (%rsp), %rax
 	movq %rbp, %rsp
 	popq %rbp
 	ret
@@ -192,7 +192,7 @@ L1:
 	movdqu 256(%rax), %xmm13
 	movdqu 272(%rax), %xmm14
 	movdqu 288(%rax), %xmm15
-	movq (%rsp), %rax
+	movzx.lq (%rsp), %rax
 	movq %rbp, %rsp
 	popq %rbp
 	ret
@@ -307,7 +307,7 @@ L1:
 	movdqu 256(%rax), %xmm13
 	movdqu 272(%rax), %xmm14
 	movdqu 288(%rax), %xmm15
-	movq 24(%rsp), %rax
+	movzx.lq 24(%rsp), %rax
 	movq %rbp, %rsp
 	popq %rbp
 	ret
