@@ -147,3 +147,37 @@ func zeroOf(b ssa.Builder, t ssa.Type) ssa.Value {
 func (c *Compiler) memoryOutOfBoundsCode() nativeapi.ExitCode {
 	return nativeapi.ExitCodeMemoryOutOfBounds | nativeapi.ExitCode(c.inlinedCallee)<<8
 }
+
+// foldInlined simplifies an add, or or mul of a constant 0 or 1 inside a body inlineLeaf is lowering.
+// Producers fold those themselves, so nothing else looks for them, but an inlined body meets its
+// arguments as constants: compiler-rt's __multi3 multiplies by a high word C code passes as 0.
+func (c *Compiler) foldInlined(op wasm.Opcode, x, y ssa.Value) (ssa.Value, bool) {
+	if c.inlinedCallee == 0 {
+		return ssa.ValueInvalid, false
+	}
+	isConst := func(v ssa.Value, k uint64) bool {
+		instr := c.ssaBuilder.InstructionOfValue(v)
+		return instr != nil && instr.Opcode() == ssa.OpcodeIconst && instr.ConstantVal() == k
+	}
+	switch op {
+	case wasm.OpcodeI32Add, wasm.OpcodeI64Add, wasm.OpcodeI32Or, wasm.OpcodeI64Or:
+		if isConst(x, 0) {
+			return y, true
+		}
+		if isConst(y, 0) {
+			return x, true
+		}
+	case wasm.OpcodeI32Mul, wasm.OpcodeI64Mul:
+		switch {
+		case isConst(x, 0):
+			return x, true
+		case isConst(y, 0):
+			return y, true
+		case isConst(x, 1):
+			return y, true
+		case isConst(y, 1):
+			return x, true
+		}
+	}
+	return ssa.ValueInvalid, false
+}

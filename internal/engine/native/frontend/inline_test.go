@@ -64,3 +64,44 @@ func Test_zeroOf(t *testing.T) {
 		}
 	}
 }
+
+func TestCompiler_foldInlined(t *testing.T) {
+	c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
+	b := c.ssaBuilder
+	b.SetCurrentBlock(b.AllocateBasicBlock())
+	x := b.CurrentBlock().AddParam(b, ssa.TypeI64)
+	zero := b.AllocateInstruction().AsIconst64(0).Insert(b).Return()
+	one := b.AllocateInstruction().AsIconst64(1).Insert(b).Return()
+	two := b.AllocateInstruction().AsIconst64(2).Insert(b).Return()
+
+	_, ok := c.foldInlined(wasm.OpcodeI64Add, x, zero)
+	require.False(t, ok, "outside an inlined body nothing folds")
+
+	c.inlinedCallee = 1
+	for _, tc := range []struct {
+		op   wasm.Opcode
+		x, y ssa.Value
+		want ssa.Value
+	}{
+		{wasm.OpcodeI64Add, x, zero, x},
+		{wasm.OpcodeI64Add, zero, x, x},
+		{wasm.OpcodeI64Or, zero, x, x},
+		{wasm.OpcodeI64Or, x, zero, x},
+		{wasm.OpcodeI64Mul, x, zero, zero},
+		{wasm.OpcodeI64Mul, zero, x, zero},
+		{wasm.OpcodeI64Mul, one, x, x},
+		{wasm.OpcodeI64Mul, x, one, x},
+	} {
+		got, ok := c.foldInlined(tc.op, tc.x, tc.y)
+		require.True(t, ok)
+		require.Equal(t, tc.want, got)
+	}
+	for _, tc := range [][2]ssa.Value{{x, two}, {two, x}} {
+		_, ok := c.foldInlined(wasm.OpcodeI64Mul, tc[0], tc[1])
+		require.False(t, ok)
+		_, ok = c.foldInlined(wasm.OpcodeI64Add, tc[0], tc[1])
+		require.False(t, ok)
+	}
+	_, ok = c.foldInlined(wasm.OpcodeI64Sub, x, zero)
+	require.False(t, ok)
+}

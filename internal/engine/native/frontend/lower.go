@@ -327,6 +327,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.foldInlined(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		if v, ok := c.fuseWideMulAdd(x, y); ok {
 			state.push(v)
 			break
@@ -361,6 +365,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.foldInlined(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		imul := builder.AllocateInstruction()
 		imul.AsImul(x, y)
 		builder.InsertInstruction(imul)
@@ -1029,6 +1037,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.foldInlined(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		if v, ok := c.fuseWideMulOr(x, y); ok {
 			state.push(v)
 			break
