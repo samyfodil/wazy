@@ -1765,6 +1765,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.ctrlPeekAt(0).yielded = true
 		}
 		c.addLoopWork(c.callWork(fnIndex))
+		if c.isInlinableLeaf(fnIndex) {
+			c.inlineLeaf(fnIndex)
+			break
+		}
 		c.lowerCall(fnIndex)
 
 	case wasm.OpcodeDrop:
@@ -5046,7 +5050,7 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 	cmp.AsIcmp(memLen, baseAddrPlusCeil.Return(), ssa.IntegerCmpCondUnsignedLessThan)
 	builder.InsertInstruction(cmp)
 	exitIfNZ := builder.AllocateInstruction()
-	exitIfNZ.AsExitIfTrueWithCode(c.execCtxPtrValue, cmp.Return(), nativeapi.ExitCodeMemoryOutOfBounds)
+	exitIfNZ.AsExitIfTrueWithCode(c.execCtxPtrValue, cmp.Return(), c.memoryOutOfBoundsCode())
 	builder.InsertInstruction(exitIfNZ)
 
 	// Load the value from memBase + extBaseAddr.
@@ -5117,7 +5121,7 @@ func (c *Compiler) memOpSetup64(memIndex wasm.Index, baseAddr ssa.Value, constOf
 		oob = orInstr.Insert(builder).Return()
 	}
 	builder.AllocateInstruction().
-		AsExitIfTrueWithCode(c.execCtxPtrValue, oob, nativeapi.ExitCodeMemoryOutOfBounds).
+		AsExitIfTrueWithCode(c.execCtxPtrValue, oob, c.memoryOutOfBoundsCode()).
 		Insert(builder)
 
 	memBase := c.getMemoryBaseValue(memIndex, false)
@@ -6663,7 +6667,7 @@ func (c *Compiler) boundsCheckInMemory(memLen, offset, size ssa.Value, checkOver
 		cmp = or.Insert(builder).Return()
 	}
 	builder.AllocateInstruction().
-		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, nativeapi.ExitCodeMemoryOutOfBounds).
+		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, c.memoryOutOfBoundsCode()).
 		Insert(builder)
 }
 

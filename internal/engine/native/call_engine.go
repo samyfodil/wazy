@@ -320,6 +320,35 @@ func (c *callEngine) Call(ctx context.Context, params ...uint64) ([]uint64, erro
 }
 
 func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def api.FunctionDefinition, listener api.FunctionListener) {
+	if cm := c.compiledModuleOf(addr); cm != nil {
+		index := cm.functionIndexOf(addr)
+		def = cm.module.FunctionDefinition(cm.module.ImportFunctionCount + index)
+		var sources []string
+		if dw := cm.module.DWARFLines; dw != nil {
+			sourceOffset := cm.getSourceOffset(addr)
+			sources = dw.Line(sourceOffset)
+		}
+		builder.AddFrame(def.DebugName(), def.ParamTypes(), def.ResultTypes(), sources)
+		if len(cm.listeners) > 0 {
+			listener = cm.listeners[index]
+		}
+	}
+	return
+}
+
+// addInlinedFrame adds the frame of the local function index, whose body the compiler lowered
+// in place of a call in the function holding addr (see frontend.Compiler.inlineLeaf), so a trap
+// in it shows the frame the call would have had. Such a body is never compiled with listeners or
+// source information.
+func (c *callEngine) addInlinedFrame(builder wasmdebug.ErrorBuilder, addr uintptr, index wasm.Index) {
+	if cm := c.compiledModuleOf(addr); cm != nil {
+		def := cm.module.FunctionDefinition(cm.module.ImportFunctionCount + index)
+		builder.AddFrame(def.DebugName(), def.ParamTypes(), def.ResultTypes(), nil)
+	}
+}
+
+// compiledModuleOf returns the compiled module whose code holds addr, or nil.
+func (c *callEngine) compiledModuleOf(addr uintptr) *compiledModule {
 	eng := c.parent.parent.parent
 	cm := eng.compiledModuleOfAddr(addr)
 	if cm == nil {
@@ -342,20 +371,7 @@ func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def
 		}
 	}
 
-	if cm != nil {
-		index := cm.functionIndexOf(addr)
-		def = cm.module.FunctionDefinition(cm.module.ImportFunctionCount + index)
-		var sources []string
-		if dw := cm.module.DWARFLines; dw != nil {
-			sourceOffset := cm.getSourceOffset(addr)
-			sources = dw.Line(sourceOffset)
-		}
-		builder.AddFrame(def.DebugName(), def.ParamTypes(), def.ResultTypes(), sources)
-		if len(cm.listeners) > 0 {
-			listener = cm.listeners[index]
-		}
-	}
-	return
+	return cm
 }
 
 // yieldToGo is the body of the ExitCodeCheckModuleExitCode arm of the dispatch
@@ -584,6 +600,9 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 			var listeners []listenerForAbort
 			builder := wasmdebug.NewErrorBuilder()
 			if c.execCtx.stackPointerBeforeGoCall != nil {
+				if ec := c.execCtx.exitCode; ec&nativeapi.ExitCodeMask == nativeapi.ExitCodeMemoryOutOfBounds && ec>>8 != 0 {
+					c.addInlinedFrame(builder, uintptr(unsafe.Pointer(c.execCtx.goCallReturnAddress)), wasm.Index(ec>>8-1))
+				}
 				def, lsn := c.addFrame(builder, uintptr(unsafe.Pointer(c.execCtx.goCallReturnAddress)))
 				if lsn != nil {
 					listeners = append(listeners, listenerForAbort{def, lsn})

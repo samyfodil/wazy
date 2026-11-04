@@ -38,6 +38,9 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 		// expAfterPasses is not empty when we want to check the result after SSA passes.
 		expAfterPasses string
 		features       api.CoreFeatures
+		// inline lets small callees be lowered in place of their calls, which the other cases keep
+		// as calls so that they pin how a call is lowered.
+		inline bool
 	}{
 		{
 			name: "empty", m: testcases.Empty.Module,
@@ -750,6 +753,16 @@ blk0: (v0:i64, v1:i64)
 	v4:i32 = Call f2:sig2, v0, v1, v2, v3
 	v5:i32, v6:i32 = Call f3:sig3, v0, v1, v4
 	Jump blk_ret, v5, v6
+`,
+		},
+		{
+			name: "call_inlined", m: testcases.Call.Module, inline: true,
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x28
+	v3:i32 = Iconst_32 0x5
+	v4:i32 = Iadd v2, v3
+	Jump blk_ret, v4, v4
 `,
 		},
 		{
@@ -3067,6 +3080,7 @@ blk13: () <-- (blk6)
 
 			offset := nativeapi.NewModuleContextOffsetData(tc.m, tc.needListener)
 			fc := NewFrontendCompiler(tc.m, b, &offset, tc.needListener, false)
+			fc.SetInlineLeaves(tc.inline)
 			typeIndex := tc.m.FunctionSection[tc.targetIndex]
 			code := &tc.m.CodeSection[tc.targetIndex]
 			fc.Init(tc.targetIndex, typeIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body, tc.needListener, 0)

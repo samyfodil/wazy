@@ -191,8 +191,13 @@ func (m *machine) emitTrapIslands() {
 
 		// Set the exit code in the execution context.
 		movz := m.allocateInstr()
-		movz.asMOVZ(x17VReg, uint64(ti.code), 0, true)
+		movz.asMOVZ(x17VReg, uint64(ti.code)&0xffff, 0, true)
 		cur = linkInstr(cur, movz)
+		if hi := uint64(ti.code) >> 16; hi != 0 { // a payload above the code: see ExitCodeMask.
+			movk := m.allocateInstr()
+			movk.asMOVK(x17VReg, hi, 1, true)
+			cur = linkInstr(cur, movk)
+		}
 
 		setExitCode := m.allocateInstr()
 		mode := m.amodePool.Allocate()

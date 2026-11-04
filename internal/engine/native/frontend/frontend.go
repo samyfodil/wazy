@@ -109,6 +109,15 @@ type Compiler struct {
 	// wideMulTerms is scratch for fuseWideMulAdd.
 	wideMulTerms []ssa.Value
 
+	// leafKinds caches isInlinableLeaf per local function, and inlineLocals is inlineLeaf's scratch.
+	leafKinds    []byte
+	inlineLocals []ssa.Variable
+	// inlineLeaves turns isInlinableLeaf on; see SetInlineLeaves.
+	inlineLeaves bool
+	// inlinedCallee is one more than the local index of the function inlineLeaf is lowering, and zero
+	// outside one. See memoryOutOfBoundsCode.
+	inlinedCallee uint32
+
 	knownSafeBoundsAtTheEndOfBlocks   [] /* ssa.BlockID to */ knownSafeBoundsAtTheEndOfBlock
 	varLengthKnownSafeBoundWithIDPool nativeapi.VarLengthPool[knownSafeBoundWithID]
 
@@ -171,6 +180,7 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 		br:                                bytes.NewReader(nil),
 		offset:                            offset,
 		loopYield:                         LoopYield,
+		inlineLeaves:                      true,
 		needSourceOffsetInfo:              sourceInfo,
 		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
@@ -179,6 +189,10 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	c.declareModuleInvariants()
 	return c
 }
+
+// SetInlineLeaves turns off lowering small callees in place of their calls (see isInlinableLeaf), for
+// tests that pin how a call is lowered. It must be called before lowering.
+func (c *Compiler) SetInlineLeaves(on bool) { c.inlineLeaves = on }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {
