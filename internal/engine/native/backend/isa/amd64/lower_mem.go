@@ -168,6 +168,11 @@ func (m *machine) lowerAddendFromInstr(instr *ssa.Instruction) addend {
 			return addend{regalloc.VRegInvalid, int64(uint32(inputDef.Instr.ConstantVal())), 0} // zero-extend.
 		case constInst && op == ssa.OpcodeSExtend:
 			return addend{regalloc.VRegInvalid, int64(int32(inputDef.Instr.ConstantVal())), 0} // sign-extend.
+		case op == ssa.OpcodeUExtend:
+			// Every i32 in a register has bits 63:32 zero (see lowerExtLoad), so its register is
+			// already the zero-extended value.
+			r := m.getOperand_Reg(inputDef)
+			return addend{r.reg(), 0, 0}
 		default:
 			r := m.getOperand_Reg(inputDef)
 			return addend{r.reg(), 0, 0}

@@ -1201,7 +1201,7 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	case ssa.OpcodeUload8, ssa.OpcodeUload16, ssa.OpcodeUload32, ssa.OpcodeSload8, ssa.OpcodeSload16, ssa.OpcodeSload32:
 		ptr, offset, _ := instr.LoadData()
 		ret := m.c.VRegOf(instr.Return())
-		m.lowerExtLoad(op, ptr, offset, ret)
+		m.lowerExtLoad(op, ptr, offset, ret, instr.Return().Type() == ssa.TypeI64)
 	case ssa.OpcodeVconst:
 		result := m.c.VRegOf(instr.Return())
 		lo, hi := instr.VconstData()
@@ -1792,7 +1792,10 @@ func (m *machine) lowerLoad(ptr ssa.Value, offset uint32, typ ssa.Type, dst rega
 	m.insert(load)
 }
 
-func (m *machine) lowerExtLoad(op ssa.Opcode, ptr ssa.Value, offset uint32, dst regalloc.VReg) {
+// lowerExtLoad lowers a narrow load into an i32 (_64 false) or i64. An i32 is sign-extended within the
+// 32-bit register, whose write zeroes bits 63:32: every i32 in a register has them zero, which
+// lowerAddendFromInstr counts on when it uses a zero-extended address's register as is.
+func (m *machine) lowerExtLoad(op ssa.Opcode, ptr ssa.Value, offset uint32, dst regalloc.VReg, _64 bool) {
 	mem := newOperandMem(m.lowerToAddressMode(ptr, offset))
 	load := m.allocateInstr()
 	switch op {
@@ -1803,9 +1806,17 @@ func (m *machine) lowerExtLoad(op ssa.Opcode, ptr ssa.Value, offset uint32, dst 
 	case ssa.OpcodeUload32:
 		load.asMovzxRmR(extModeLQ, mem, dst)
 	case ssa.OpcodeSload8:
-		load.asMovsxRmR(extModeBQ, mem, dst)
+		if _64 {
+			load.asMovsxRmR(extModeBQ, mem, dst)
+		} else {
+			load.asMovsxRmR(extModeBL, mem, dst)
+		}
 	case ssa.OpcodeSload16:
-		load.asMovsxRmR(extModeWQ, mem, dst)
+		if _64 {
+			load.asMovsxRmR(extModeWQ, mem, dst)
+		} else {
+			load.asMovsxRmR(extModeWL, mem, dst)
+		}
 	case ssa.OpcodeSload32:
 		load.asMovsxRmR(extModeLQ, mem, dst)
 	default:

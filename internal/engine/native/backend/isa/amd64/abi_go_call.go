@@ -204,6 +204,7 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 	// To avoid overwriting with the execution context pointer by the result, we need to track the offset,
 	// and defer the restoration of the result to the end of this function.
 	var argOverlapWithExecCtxOffset int32 = -1
+	var argOverlapWithExecCtxType ssa.Type
 	for i := range abi.Rets {
 		r := &abi.Rets[i]
 		var v regalloc.VReg
@@ -211,7 +212,7 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 		if isRegResult {
 			v = r.Reg
 			if v.RealReg() == execCtrPtr.RealReg() {
-				argOverlapWithExecCtxOffset = offsetInGoSlice
+				argOverlapWithExecCtxOffset, argOverlapWithExecCtxType = offsetInGoSlice, r.Type
 				offsetInGoSlice += 8 // always uint64 rep.
 				continue
 			}
@@ -274,7 +275,13 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 		// At this point execCtt is not used anymore, so we can finally store the
 		// result to the register which overlaps with the execution context pointer.
 		mem := newOperandMem(m.newAmodeImmReg(uint32(argOverlapWithExecCtxOffset), rspVReg))
-		load := m.allocateInstr().asMov64MR(mem, execCtrPtr)
+		load := m.allocateInstr()
+		if argOverlapWithExecCtxType == ssa.TypeI32 {
+			// Like every other i32, with bits 63:32 zero whatever Go left in the slot's upper half.
+			load.asMovzxRmR(extModeLQ, mem, execCtrPtr)
+		} else {
+			load.asMov64MR(mem, execCtrPtr)
+		}
 		cur = linkInstr(cur, load)
 	}
 
