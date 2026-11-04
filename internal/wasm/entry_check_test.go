@@ -1,6 +1,7 @@
 package wasm
 
 import (
+	"math/rand"
 	"testing"
 
 	"github.com/samyfodil/wazy/api"
@@ -283,5 +284,42 @@ func TestModule_foreignFuncRefs(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.foreign, m.foreignFuncRefs(declared, functions, globals, tags))
 		})
+	}
+}
+
+// TestEntryCheckBuilder_deterministic solves random call graphs with indirect calls many times
+// over. The set of referenced functions arrives as a map, whose iteration order changes from one
+// range to the next, and the answer must not follow it: compiled code would differ between two
+// compilations of the same module.
+func TestEntryCheckBuilder_deterministic(t *testing.T) {
+	rnd := rand.New(rand.NewSource(1))
+	for g := 0; g < 200; g++ {
+		n := 2 + rnd.Intn(30)
+		sizes := make([]uint32, n)
+		for i := range sizes {
+			sizes[i] = uint32(rnd.Intn(PreemptBudget / 4))
+		}
+		var calls [][2]uint32
+		for i := rnd.Intn(3 * n); i > 0; i-- {
+			calls = append(calls, [2]uint32{uint32(rnd.Intn(n)), uint32(rnd.Intn(n))})
+		}
+		var indirect, referenced, unbounded []Index
+		for f := 0; f < n; f++ {
+			if rnd.Intn(4) == 0 {
+				indirect = append(indirect, Index(f))
+			}
+			if rnd.Intn(2) == 0 {
+				referenced = append(referenced, Index(f))
+			}
+			if rnd.Intn(8) == 0 {
+				unbounded = append(unbounded, Index(f))
+			}
+		}
+		needs, work := solveCallWork(0, sizes, calls, indirect, referenced, unbounded)
+		for i := 0; i < 20; i++ {
+			n2, w2 := solveCallWork(0, sizes, calls, indirect, referenced, unbounded)
+			require.Equal(t, needs, n2, "graph %d", g)
+			require.Equal(t, work, w2, "graph %d", g)
+		}
 	}
 }

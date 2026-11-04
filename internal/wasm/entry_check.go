@@ -122,8 +122,17 @@ func (b *entryCheckBuilder) solve(referenced map[Index]struct{}) (needs []bool, 
 		referenced = nil // no indirect call reaches them unchecked
 	}
 	n := len(b.size)
-	// Node n stands for "any function an indirect call can reach".
+	// Node n stands for "any function an indirect call can reach". Its successors go in index
+	// order: the order the walk below meets them in decides which functions are checked, and a
+	// map has none, so taking the map's would compile one module differently from run to run.
 	hub := n
+	hubSucc := make([]int32, 0, len(referenced))
+	for idx := range referenced {
+		if idx >= b.imports && int(idx-b.imports) < n {
+			hubSucc = append(hubSucc, int32(idx-b.imports))
+		}
+	}
+	slices.Sort(hubSucc)
 	succStart := make([]uint32, n+2)
 	for i := 0; i < len(b.edges); i += 2 {
 		succStart[b.edges[i]+1]++
@@ -133,11 +142,7 @@ func (b *entryCheckBuilder) solve(referenced map[Index]struct{}) (needs []bool, 
 			succStart[f+1]++
 		}
 	}
-	for idx := range referenced {
-		if idx >= b.imports && int(idx-b.imports) < n {
-			succStart[hub+1]++
-		}
-	}
+	succStart[hub+1] += uint32(len(hubSucc))
 	for i := 0; i <= n; i++ {
 		succStart[i+1] += succStart[i]
 	}
@@ -154,12 +159,7 @@ func (b *entryCheckBuilder) solve(referenced map[Index]struct{}) (needs []bool, 
 			fill[f]++
 		}
 	}
-	for idx := range referenced {
-		if idx >= b.imports && int(idx-b.imports) < n {
-			succ[fill[hub]] = int32(idx - b.imports)
-			fill[hub]++
-		}
-	}
+	copy(succ[fill[hub]:], hubSucc)
 
 	needs = make([]bool, n+1)
 	work = make([]uint32, n)
