@@ -31,6 +31,13 @@ type Module struct {
 	// mayThrow collects FunctionMayThrow's inputs while the functions are validated.
 	mayThrow *mayThrowBuilder
 
+	// FunctionCallEffects is indexed by local function index and holds what a call to the function may
+	// change that its caller has cached, so the native compiler reloads only that after the call. See
+	// callEffectsBuilder.
+	FunctionCallEffects []CallEffects
+	// callEffects collects FunctionCallEffects' inputs while the functions are validated.
+	callEffects *callEffectsBuilder
+
 	// FunctionNeedsEntryCheck is indexed by local function index and true for a function the native
 	// compiler checks for preemption on entry. See entryCheckBuilder.
 	FunctionNeedsEntryCheck []bool
@@ -555,6 +562,8 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 		m.mayThrow = &mayThrowBuilder{direct: make([]bool, len(functions)), imports: m.ImportFunctionCount}
 	}
 	m.FunctionNeedsEntryCheck, m.FunctionCallWork = nil, nil
+	m.FunctionCallEffects = nil
+	m.callEffects = newCallEffectsBuilder(m, uint32(len(functions)-len(m.FunctionSection)))
 	m.ForeignFuncRefs = m.foreignFuncRefs(declaredFuncIndexes, functions, globals, tags)
 	m.entryChecks = newEntryCheckBuilder(m, uint32(len(functions)-len(m.FunctionSection)))
 	for idx, typeIndex := range m.FunctionSection {
@@ -564,15 +573,18 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 		c := &m.CodeSection[idx]
 		if c.GoFunc != nil {
 			m.mayThrow.throws(Index(idx))
+			m.callEffects.mark(Index(idx), callEffectsAll)
 			continue
 		}
 		if err = m.validateFunction(vs, enabledFeatures, Index(idx), functions, globals, memories, tables, tags, declaredFuncIndexes, br); err != nil {
-			m.mayThrow, m.entryChecks = nil, nil
+			m.mayThrow, m.entryChecks, m.callEffects = nil, nil, nil
 			return fmt.Errorf("invalid %s: %w", m.funcDesc(SectionIDFunction, Index(idx)), err)
 		}
 	}
 	m.FunctionNeedsEntryCheck, m.FunctionCallWork = m.entryChecks.solve(declaredFuncIndexes)
 	m.entryChecks = nil
+	m.FunctionCallEffects = m.callEffects.solve()
+	m.callEffects = nil
 	if m.mayThrow != nil {
 		m.FunctionMayThrow = m.mayThrow.solve()
 		m.mayThrow = nil

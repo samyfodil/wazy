@@ -4213,7 +4213,25 @@ func (c *Compiler) lowerCall(fnIndex uint32) {
 		state.push(v)
 	}
 
-	c.reloadAfterCall()
+	effects := c.callEffects(fnIndex)
+	if effects&wasm.CallEffectGrowMemory != 0 {
+		c.reloadAllMemories()
+	}
+	if effects&wasm.CallEffectSetGlobal != 0 {
+		for _, index := range c.mutableGlobalVariablesIndexes {
+			_ = c.getWasmGlobalValue(index, true)
+		}
+	}
+}
+
+// callEffects is what a direct call to fnIndex may change of what its caller caches: everything for
+// an import, and for a local function what wasm.Module.FunctionCallEffects worked out.
+func (c *Compiler) callEffects(fnIndex uint32) wasm.CallEffects {
+	effects := c.m.FunctionCallEffects
+	if i := int(fnIndex) - int(c.m.ImportFunctionCount); i >= 0 && i < len(effects) {
+		return effects[i]
+	}
+	return wasm.CallEffectGrowMemory | wasm.CallEffectSetGlobal
 }
 
 func (c *Compiler) prepareCallIndirect(typeIndex, tableIndex uint32) (ssa.Value, *wasm.FunctionType, ssa.Values) {

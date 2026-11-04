@@ -1355,6 +1355,38 @@ blk3: () <-- (blk1,blk2)
 `,
 		},
 		{
+			name: "memory_load_after_pure_call", m: testcases.MemoryLoadAfterPureCall.Module,
+			exp: `
+signatures:
+	sig1: i64i64_v
+
+blk0: (v0:i64, v1:i64, v2:i32)
+	v3:i32 = Iconst_32 0x0
+	v4:i32 = Icmp eq, v2, v3
+	Brz v4, blk2
+	Jump blk1
+
+blk1: () <-- (blk0)
+	Call f1:sig1, v0, v1
+	Jump blk3
+
+blk2: () <-- (blk0)
+	Jump blk3
+
+blk3: () <-- (blk1,blk2)
+	v6:i64 = Iconst_64 0x4
+	v7:i64 = UExtend v2, 32->64
+	v8:i64 = Load v1, 0x10
+	v9:i64 = Iadd v7, v6
+	v10:i32 = Icmp lt_u, v8, v9
+	ExitIfTrue v10, v0, memory_out_of_bounds
+	v11:i64 = Load v1, 0x8
+	v12:i64 = Iadd v11, v7
+	v13:i32 = Load v12, 0x0
+	Jump blk_ret, v13
+`,
+		},
+		{
 			name: "imported_function_call", m: testcases.ImportedFunctionCall.Module,
 			exp: `
 signatures:

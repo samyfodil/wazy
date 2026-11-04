@@ -396,6 +396,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			indexType := memories[memoryIndex].IndexType()
 			switch Opcode(op) {
 			case OpcodeMemoryGrow:
+				m.callEffects.mark(idx, CallEffectGrowMemory)
 				if err := valueTypeStack.popAndVerifyType(indexType); err != nil {
 					return err
 				}
@@ -489,6 +490,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 				}
 				valueTypeStack.push(globals[index].ValType)
 			case OpcodeGlobalSet:
+				m.callEffects.mark(idx, CallEffectSetGlobal)
 				if index >= uint32(len(globals)) {
 					return fmt.Errorf("invalid global index")
 				} else if !globals[index].Mutable {
@@ -787,6 +789,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 			}
 			m.mayThrow.call(idx, index)
 			m.entryChecks.call(idx, index)
+			m.callEffects.call(idx, index)
 
 			var opcodeName string
 			if op == OpcodeCall {
@@ -809,6 +812,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 		} else if op == OpcodeCallIndirect || op == OpcodeTailCallReturnCallIndirect {
 			m.mayThrow.throws(idx)
 			m.entryChecks.callIndirect(idx)
+			m.callEffects.mark(idx, callEffectsAll)
 			pc++
 			typeIndex, num, err := leb128.LoadUint32(body[pc:])
 			if err != nil {
@@ -866,6 +870,7 @@ func (m *Module) validateFunctionWithMaxStackValues(
 		} else if op == OpcodeCallRef || op == OpcodeReturnCallRef {
 			m.mayThrow.throws(idx)
 			m.entryChecks.callIndirect(idx)
+			m.callEffects.mark(idx, callEffectsAll)
 			if err := enabledFeatures.RequireEnabled(api.CoreFeatureTypedFunctionReferences); err != nil {
 				return fmt.Errorf("%s invalid as %v", instructionNames[op], err)
 			}
