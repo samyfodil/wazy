@@ -518,16 +518,7 @@ func Test_fileCacheKey(t *testing.T) {
 	m := &wasm.Module{}
 	s.Sum(m.ID[:0])
 	original := m.ID
-	result := fileCacheKey(m, false)
+	result := fileCacheKey(m)
 	require.Equal(t, original, m.ID)
 	require.NotEqual(t, original, result)
-}
-
-func Test_fileCacheKey_gcSafepoints(t *testing.T) {
-	m := &wasm.Module{}
-	s := sha256.New()
-	s.Write([]byte("hello world"))
-	s.Sum(m.ID[:0])
-	require.NotEqual(t, fileCacheKey(m, false), fileCacheKey(m, true))
-	require.Equal(t, fileCacheKey(m, true), fileCacheKey(m, true))
 }

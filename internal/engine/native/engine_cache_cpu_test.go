@@ -36,17 +36,13 @@ func Test_fileCacheKey_cpuFeatures(t *testing.T) {
 		platform.CpuFeatureAmd64ABM,
 	} {
 		platform.CpuFeatures = saved &^ flag
-		without := fileCacheKey(m, false)
+		without := fileCacheKey(m)
 		platform.CpuFeatures = saved | flag
-		with := fileCacheKey(m, false)
+		with := fileCacheKey(m)
 		require.NotEqual(t, without, with, "cache key does not depend on CPU feature %#x", uint64(flag))
 
 		// And it is stable: the same flags always give the same key, otherwise
 		// the cache would simply never hit and the check above would be vacuous.
-		require.Equal(t, with, fileCacheKey(m, false))
+		require.Equal(t, with, fileCacheKey(m))
 	}
 }
-
-// Test_fileCacheKey_gcSafepoints: code compiled with the collector's loop-header safepoints and code compiled
-// without them must not share an entry. Without safepoints a loop never parks, so a collection on a runtime
-// that loaded such code would wait on it forever.
