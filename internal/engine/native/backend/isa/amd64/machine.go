@@ -292,6 +292,7 @@ func (m *machine) LinkAdjacentBlocks(prev, next ssa.BasicBlock) {
 
 // StartBlock implements backend.Machine.
 func (m *machine) StartBlock(blk ssa.BasicBlock) {
+	m.aliasZeroExtended32(blk)
 	m.currentLabelPos = m.getOrAllocateSSABlockLabelPosition(blk)
 	labelPos := m.currentLabelPos
 	end := m.allocateNop()
@@ -1591,7 +1592,53 @@ func (m *machine) lowerXmmCmovAfterRegAlloc(i *instruction) {
 	jcc.asJmpIf(cond.invert(), newOperandLabel(end))
 }
 
+// zeroExtends32 reports whether instr, producing a 32-bit result, is lowered to an instruction
+// that writes a 32-bit register, which zeroes bits [63:32] of the full register (Intel SDM
+// Vol.1, 3.4.1.1). An unsigned 32->64 extend of such a result is the identity, so
+// aliasZeroExtended32 hands the extend its operand's register and lowerExtend emits nothing.
+func zeroExtends32(instr *ssa.Instruction) bool {
+	if instr == nil {
+		return false
+	}
+	switch instr.Opcode() {
+	case
+		ssa.OpcodeIadd, ssa.OpcodeIsub, ssa.OpcodeImul, ssa.OpcodeLoad,
+		ssa.OpcodeBand, ssa.OpcodeBor, ssa.OpcodeBxor, ssa.OpcodeBnot,
+		ssa.OpcodeIshl, ssa.OpcodeUshr, ssa.OpcodeSshr,
+		ssa.OpcodeRotl, ssa.OpcodeRotr, ssa.OpcodeIreduce,
+		ssa.OpcodeUload8, ssa.OpcodeUload16, ssa.OpcodeUload32:
+		return true
+	default:
+		return false
+	}
+}
+
+// aliasZeroExtended32 points the result of every unsigned 32->64 extend in blk at the virtual
+// register of its operand when that operand's producer already zeroes bits [63:32] (see
+// zeroExtends32), so the extend needs no instruction and the two values no longer interfere.
+//
+// This runs before any instruction of blk is lowered. Blocks are lowered in reverse post-order and
+// a definition dominates its uses, so every consumer of the extend is lowered after this point.
+func (m *machine) aliasZeroExtended32(blk ssa.BasicBlock) {
+	builder := m.c.SSABuilder()
+	for cur := blk.Root(); cur != nil; cur = cur.Next() {
+		if cur.Opcode() != ssa.OpcodeUExtend {
+			continue
+		}
+		if from, _ := cur.ExtendFromToBits(); from != 32 {
+			continue
+		}
+		if arg := cur.Arg(); zeroExtends32(builder.InstructionOfValue(arg)) {
+			m.c.AliasVReg(cur.Return(), arg)
+		}
+	}
+}
+
 func (m *machine) lowerExtend(_arg, ret ssa.Value, from, to byte, signed bool) {
+	if !signed && from == 32 && m.c.VRegOf(ret) == m.c.VRegOf(_arg) {
+		// aliasZeroExtended32 already gave ret the operand's register.
+		return
+	}
 	// movsx/movzx are defKindOp2 (the extend itself is a valid single-Def
 	// spill anchor), so we extend straight into the return vreg -- no temp +
 	// copy. lowerIcmpToFlag's zero-extend (asMovzxRmR into VRegOf(ret)) does
