@@ -1,0 +1,25 @@
+;; Accesses through x + k after one through x, for TestDerivedAddress. The first access proves x
+;; safe for 24 bytes, which covers x + 8 for 4 but not x + 20 for 8, nor x - 8.
+(module
+  (memory 1)
+  (func (export "within") (param $x i32) (result i32)
+    (drop (i64.load offset=16 (local.get $x)))
+    (i32.load (i32.add (local.get $x) (i32.const 8))))
+  (func (export "past") (param $x i32) (result i64)
+    (drop (i64.load offset=16 (local.get $x)))
+    (i64.load (i32.add (local.get $x) (i32.const 20))))
+  (func (export "below") (param $x i32) (result i64)
+    (drop (i64.load offset=16 (local.get $x)))
+    (i64.load (i32.add (local.get $x) (i32.const -8))))
+  (func (export "store_then_load") (param $x i32) (result i32)
+    (i64.store offset=16 (local.get $x) (i64.const 0x1122334455667788))
+    (i32.store (i32.add (i32.const 4) (local.get $x)) (i32.const 0x0a0b0c0d))
+    (i32.add (i32.load (i32.add (local.get $x) (i32.const 4)))
+             (i32.load (i32.add (local.get $x) (i32.const 20)))))
+  (func $grow (drop (memory.grow (i32.const 0))))
+  ;; The call drops x's cached absolute address, which the access through x + 8 rebuilds.
+  (func (export "after_call") (param $x i32) (result i32)
+    (drop (i64.load offset=16 (local.get $x)))
+    (call $grow)
+    (i32.load (i32.add (local.get $x) (i32.const 8))))
+)

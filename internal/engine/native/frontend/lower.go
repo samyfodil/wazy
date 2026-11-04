@@ -4994,6 +4994,12 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 		}
 	}
 
+	if !c.multiMemory {
+		if a, ok := c.derivedSafeAddress(memIndex, baseAddr, ceil); ok {
+			return a
+		}
+	}
+
 	memoryMinSizeInBytes := c.memoryMinSizeInBytes[memIndex]
 
 	// A constant base address whose access end lies within the memory's
@@ -5084,6 +5090,49 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 // are all keyed on 32-bit address arithmetic. The dominance-based pass in
 // ssa/pass.go likewise only recognizes the 32-bit shape, so a 64-bit memory
 // simply keeps every check.
+// derivedSafeAddress returns the address of an access ceil bytes past baseAddr = x + k, for a constant
+// k, when x is known to be safe for at least k + ceil bytes. Then zext(x) + k + ceil is within the
+// memory, which is at most 2^32 bytes, so the 32-bit add did not wrap and baseAddr is safe for ceil:
+// the access needs no bounds check of its own. C passes the address of a stack slot as such a sum,
+// which inlining turns into accesses through it.
+func (c *Compiler) derivedSafeAddress(memIndex wasm.Index, baseAddr ssa.Value, ceil uint64) (ssa.Value, bool) {
+	x, y, ok := c.addOf(baseAddr)
+	if !ok {
+		return ssa.ValueInvalid, false
+	}
+	k, isConst := c.constOf(y)
+	if !isConst {
+		if k, isConst = c.constOf(x); !isConst {
+			return ssa.ValueInvalid, false
+		}
+		x = y
+	}
+	known := c.getKnownSafeBound(x.ID())
+	if !known.valid() || k+ceil > known.bound {
+		return ssa.ValueInvalid, false
+	}
+	builder := c.ssaBuilder
+	base := known.absoluteAddr
+	if !base.Valid() {
+		memBase := c.getMemoryBaseValue(memIndex, false)
+		ext := builder.AllocateInstruction().AsUExtend(x, 32, 64).Insert(builder).Return()
+		base = builder.AllocateInstruction().AsIadd(memBase, ext).Insert(builder).Return()
+		known.absoluteAddr = base
+	}
+	kv := builder.AllocateInstruction().AsIconst64(k).Insert(builder).Return()
+	address := builder.AllocateInstruction().AsIadd(base, kv).Insert(builder).Return()
+	c.recordKnownSafeBound(baseAddr.ID(), known.bound-k, address)
+	return address, true
+}
+
+// constOf returns v's value, zero-extended, when v is a 32-bit constant.
+func (c *Compiler) constOf(v ssa.Value) (uint64, bool) {
+	if instr := c.defOf(v, ssa.OpcodeIconst); instr != nil && v.Type() == ssa.TypeI32 {
+		return uint64(uint32(instr.ConstantVal())), true
+	}
+	return 0, false
+}
+
 func (c *Compiler) memOpSetup64(memIndex wasm.Index, baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) ssa.Value {
 	builder := c.ssaBuilder
 
