@@ -25,11 +25,7 @@ var crc = crc32.MakeTable(crc32.Castagnoli)
 // fileCacheKey returns a key for the file cache.
 // In order to avoid collisions with the existing compiler, we do not use m.ID directly,
 // but instead we rehash it with magic.
-//
-// gcSafepoints says whether the code polls the collector at its loop headers and spills roots there; see
-// frontend.Compiler.SetGCEnabled. That changes the code but not the module, so it is keyed here: a runtime
-// that collects must never run code compiled for one that does not, whose loops would never park.
-func fileCacheKey(m *wasm.Module, gcSafepoints bool) (ret filecache.Key) {
+func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
 	s := sha256.New()
 	s.Write(m.ID[:])
 	s.Write(magic)
@@ -50,9 +46,6 @@ func fileCacheKey(m *wasm.Module, gcSafepoints bool) (ret filecache.Key) {
 	// Reuse the `ret` buffer to write the first 8 bytes of the CPU features so that we can avoid the allocation.
 	binary.LittleEndian.PutUint64(ret[:8], cpu)
 	s.Write(ret[:8])
-	if gcSafepoints {
-		s.Write([]byte{1})
-	}
 	// Finally, write the hash to the ret buffer.
 	s.Sum(ret[:0])
 	return
@@ -144,7 +137,7 @@ func (e *engine) addCompiledModuleToCache(module *wasm.Module, cm *compiledModul
 	if e.fileCache == nil || module.IsHostModule || filecache.ReadOnly(e.fileCache) {
 		return
 	}
-	err = e.fileCache.Add(fileCacheKey(module, e.gcSafepoints()), serializeCompiledModule(e.wazyVersion, cm))
+	err = e.fileCache.Add(fileCacheKey(module), serializeCompiledModule(e.wazyVersion, cm))
 	return
 }
 
@@ -155,7 +148,7 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 
 	// Check if the entries exist in the external cache.
 	var cached io.ReadCloser
-	cached, hit, err = e.fileCache.Get(fileCacheKey(module, e.gcSafepoints()))
+	cached, hit, err = e.fileCache.Get(fileCacheKey(module))
 	if !hit || err != nil {
 		return
 	}
@@ -175,7 +168,7 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 		if filecache.ReadOnly(e.fileCache) {
 			return nil, false, filecache.ErrStale
 		}
-		return nil, false, e.fileCache.Delete(fileCacheKey(module, e.gcSafepoints()))
+		return nil, false, e.fileCache.Delete(fileCacheKey(module))
 	}
 	return
 }

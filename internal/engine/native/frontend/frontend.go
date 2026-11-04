@@ -43,9 +43,6 @@ type Compiler struct {
 	entryCheck *ssa.Instruction
 	opening    bool
 	tunedWork  uint64
-	// gcEnabled makes loop headers poll the collector's pause flag where no preemption check does; see
-	// emitGCSafepoint.
-	gcEnabled bool
 
 	// Followings are reset by per function, except the module-invariant memory,
 	// table and global tables that declareModuleInvariants fills in once.
@@ -177,10 +174,6 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	c.declareModuleInvariants()
 	return c
 }
-
-// SetGCEnabled makes loop headers poll the collector's pause flag where no preemption check does. It must be
-// called before lowering.
-func (c *Compiler) SetGCEnabled(on bool) { c.gcEnabled = on }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {

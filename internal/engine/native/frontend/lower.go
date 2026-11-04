@@ -1428,12 +1428,6 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 		c.switchTo(originalLen, loopHeader)
 
-		if c.gcEnabled && !c.loopYield {
-			// Without the check below, nothing would ring this loop for a collection (see
-			// callEngine.RequestPark), so it polls the pause flag itself.
-			c.emitGCSafepoint(builder)
-		}
-
 		if c.loopYield {
 			// A loop would never return to Go, so it checks whether the runtime has
 			// asked it to stop.
@@ -7058,28 +7052,4 @@ func (c *Compiler) gcStoreElement(ref, index, v ssa.Value) {
 	lo, hi := c.gcSplitWords(v)
 	c.callGC(wasm.GCArraySet, ref, index, lo)
 	c.callGC(wasm.GCArraySet, ref, index, hi, c.gcConst(2))
-}
-
-// emitGCSafepoint emits a poll of the collector's pause flag, a word in the execution context that the
-// collector writes. Its slow path yields, which saves every register where the collector's scan reads them,
-// and the yield's return to compiled code parks (see callEngine.parkIfPaused).
-func (c *Compiler) emitGCSafepoint(builder ssa.Builder) {
-	pause := builder.AllocateInstruction().
-		AsLoad(c.execCtxPtrValue, nativeapi.ExecutionContextOffsetGCPause.U32(), ssa.TypeI32).
-		Insert(builder).Return()
-	zero := builder.AllocateInstruction().AsIconst32(0).Insert(builder).Return()
-	paused := builder.AllocateInstruction().
-		AsIcmp(pause, zero, ssa.IntegerCmpCondNotEqual).Insert(builder).Return()
-
-	parkBlk := builder.AllocateBasicBlock()
-	afterBlk := builder.AllocateBasicBlock()
-	builder.AllocateInstruction().AsBrnz(paused, ssa.ValuesNil, parkBlk).Insert(builder)
-	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
-
-	builder.SetCurrentBlock(parkBlk)
-	builder.Seal(parkBlk)
-	c.emitCheckModuleExitCodeCall(afterBlk)
-
-	builder.SetCurrentBlock(afterBlk)
-	builder.Seal(afterBlk)
 }

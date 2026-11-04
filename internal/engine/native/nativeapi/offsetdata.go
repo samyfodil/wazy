@@ -21,7 +21,7 @@ const (
 	// ExecutionContextOffsetExitCodeOffset is an offset of `exitCode` field in native.executionContext
 	ExecutionContextOffsetExitCodeOffset Offset = 0
 	// ExecutionContextOffsetGCPause is the flag the collector writes 1 into to stop the world, which a call reads
-	// where it can park (see frontend.Compiler.emitGCSafepoint and callEngine.parkIfPaused). It sits in the padding
+	// where it can park (see callEngine.parkIfPaused). It sits in the padding
 	// after the exit code, so the collector costs this struct nothing at all -- which matters because it is
 	// embedded in the per-call callEngine, close enough to a Go size class boundary that eight bytes would cost
 	// 256 per call.

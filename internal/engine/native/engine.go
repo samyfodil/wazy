@@ -50,8 +50,8 @@ type (
 		// goroutine-safe, so no extra locking is needed here.
 		stackPools [stackPoolNumClasses]sync.Pool
 
-		// enabledFeatures is the runtime's feature set, kept so compilation knows whether to emit the
-		// collector's loop-header safepoint. See frontend.Compiler.SetGCEnabled.
+		// enabledFeatures is the runtime's feature set, kept so calls know whether to register with the
+		// collector. See collectorEnabled.
 		enabledFeatures api.CoreFeatures
 	}
 
@@ -153,9 +153,10 @@ type sourceMap struct {
 
 var _ wasm.Engine = (*engine)(nil)
 
-// gcSafepoints reports whether this engine's code polls the collector at loop headers and spills its roots
-// there, and so whether its calls register with the store's collector.
-func (e *engine) gcSafepoints() bool {
+// collectorEnabled reports whether this engine's calls register with the store's collector. Compiled code
+// does not depend on it: a collection parks a call through the preemption check every loop has (see
+// callEngine.RequestPark).
+func (e *engine) collectorEnabled() bool {
 	return wasm.CollectorEnabled(e.enabledFeatures)
 }
 
@@ -372,7 +373,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
 		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, withListener, needSourceInfo)
-		fe.SetGCEnabled(e.gcSafepoints())
 
 		for i := range module.CodeSection {
 			if nativeapi.DeterministicCompilationVerifierEnabled {
@@ -430,7 +430,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 				fe := frontend.NewFrontendCompiler(
 					module, ssaBuilder, &cm.offsets, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
-				fe.SetGCEnabled(e.gcSafepoints())
 
 				for {
 					if err := ctx.Err(); err != nil {
@@ -997,7 +996,7 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
-	me := &moduleEngine{gcEnabled: e.gcSafepoints()}
+	me := &moduleEngine{gcEnabled: e.collectorEnabled()}
 
 	// Note: imported functions are resolved in moduleEngine.ResolveImportedFunction.
 	me.importedFunctions = make([]importedFunction, m.ImportFunctionCount)
