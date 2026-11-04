@@ -3,6 +3,8 @@ package adhoc
 import (
 	"context"
 	_ "embed"
+	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -15,6 +17,8 @@ import (
 //go:embed testdata/i32_upper_half.wasm
 var i32UpperHalfWasm []byte
 
+const i32UpperHalfChildEnv = "WAZY_I32_UPPER_HALF_CHILD"
+
 // TestI32UpperHalf computes -8 with every kind of i32 producer, a host function's result included, and uses it as an address in the last
 // page of a 4 GiB memory, again after a call. The amd64 backend lets an address's register stand for
 // its zero extension, which holds only while every i32 in a register has bits 63:32 zero; a producer
@@ -22,6 +26,17 @@ var i32UpperHalfWasm []byte
 func TestI32UpperHalf(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
+	}
+	if os.Getenv(i32UpperHalfChildEnv) == "" {
+		// The 4 GiB memory lives in a child process, gone once it exits. Kept by this process, it
+		// would make every later fork, such as TestLoopYield's, reserve another 4 GiB on a system
+		// that does not overcommit.
+		cmd := exec.Command(os.Args[0], "-test.run=^TestI32UpperHalf$", "-test.v")
+		cmd.Env = append(os.Environ(), i32UpperHalfChildEnv+"=1")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		require.Contains(t, string(out), "--- PASS: TestI32UpperHalf")
+		return
 	}
 	ctx := context.Background()
 	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV2|experimental.CoreFeaturesThreads))
