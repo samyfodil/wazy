@@ -4622,8 +4622,16 @@ func (c *Compiler) emitPreemptCheck() (slow ssa.BasicBlock, check *ssa.Instructi
 // rather than given a masked check. The masked test is one fused uop an iteration,
 // a share of the loop that shrinks as the body grows, while the limit a
 // strip-mined loop carries takes a register for the whole loop, which a large
-// body is likelier to be short of.
-const stripMineMaxBody = 64
+// body is likelier to be short of. arm64 has registers to spare, and its masked
+// test is an instruction and a branch of its own.
+var stripMineMaxBody = stripMineLimit()
+
+func stripMineLimit() uint64 {
+	if runtime.GOARCH == "arm64" {
+		return 256
+	}
+	return 64
+}
 
 // preemptBudget is how much wasm code, in bytes, a loop may run between two
 // preemption checks: about as long as a stop-the-world is made to wait.
