@@ -122,11 +122,27 @@ func (in *Instance) Resources() *HandleTable { return in.resources }
 // only re-exposes, one a component it instantiated defines -- the table of
 // that component, whose canonical ABI is the one that reads them. A host that
 // mints the handles it passes to CallExport mints them here.
+//
+// An instance that re-exposes nothing answers inline: wasi:http's server asks
+// once per request.
 func (in *Instance) ResourcesFor(iface string) *HandleTable {
-	if r, ok := in.reexposedInstances[iface]; ok {
-		return r.owner.ResourcesFor(r.name)
+	if len(in.reexposedInstances) == 0 {
+		return in.resources
 	}
-	return in.resources
+	return in.reexposedResources(iface)
+}
+
+// reexposedResources follows iface through the instances re-exposing it to
+// the one defining it. It loops rather than recursing so ResourcesFor stays
+// inlinable.
+func (in *Instance) reexposedResources(iface string) *HandleTable {
+	for {
+		r, ok := in.reexposedInstances[iface]
+		if !ok {
+			return in.resources
+		}
+		in, iface = r.owner, r.name
+	}
 }
 
 // Harness builds a host implementation's registered funcs without
