@@ -1424,6 +1424,11 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 		if (c.vecMap || VecPlanHook != nil) && len(bt.Params) == 0 && len(bt.Results) == 0 && c.vecMapMemory() {
 			plan, why, ok := planVecMap(c.wasmFunctionBody, state.pc+1, c.localTypes())
+			// A top exit leaves the construct around the loop, which must then end right after it, as the
+			// planner checks, and not be a loop: branching to that would go round it instead.
+			if ok && plan.top && state.ctrlPeekAt(0).kind == controlFrameKindLoop {
+				ok, why = false, "top exit to a loop"
+			}
 			if ok && c.vecMap {
 				ok = c.lowerVecMap(plan)
 			}

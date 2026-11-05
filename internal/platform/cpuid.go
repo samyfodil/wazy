@@ -28,6 +28,9 @@ const (
 	// CpuFeatureAmd64AVX is the flag to query CpuFeatureFlags.Has for AVX with the operating system saving
 	// the upper halves of the YMM registers on amd64
 	CpuFeatureAmd64AVX
+	// CpuFeatureAmd64AVX2 is the flag to query CpuFeatureFlags.Has for AVX2, the 256-bit integer
+	// instructions, on amd64
+	CpuFeatureAmd64AVX2
 )
 
 const (

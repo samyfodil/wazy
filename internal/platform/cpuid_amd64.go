@@ -20,6 +20,9 @@ func loadCpuFeatureFlags() (flags CpuFeatureFlags) {
 	if cpu.X86.HasAVX { // x/sys/cpu also checks XCR0, so the OS saves the YMM state.
 		flags |= CpuFeatureAmd64AVX
 	}
+	if cpu.X86.HasAVX2 {
+		flags |= CpuFeatureAmd64AVX2
+	}
 	if cpu.X86.HasBMI1 {
 		flags |= CpuFeatureAmd64BMI1
 	}

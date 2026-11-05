@@ -23,8 +23,7 @@ type instruction struct {
 }
 
 // IsCall implements regalloc.Instr.
-// A vecMap counts as one: its expansion uses the registers a call clobbers.
-func (i *instruction) IsCall() bool { return i.kind == call || i.kind == vecMap }
+func (i *instruction) IsCall() bool { return i.kind == call }
 
 // IsIndirectCall implements regalloc.Instr.
 func (i *instruction) IsIndirectCall() bool {
@@ -372,6 +371,10 @@ func (i *instruction) Defs(regs *[]regalloc.VReg) []regalloc.VReg {
 		}
 	case defKindMulHi:
 		*regs = append(*regs, raxVReg, rdxVReg)
+	case defKindVecMap:
+		if i.vecProg.Reduce != 0 {
+			*regs = append(*regs, rcxVReg)
+		}
 	default:
 		panic(fmt.Sprintf("BUG: invalid defKind \"%s\" for %s", dk, i))
 	}
@@ -2547,6 +2550,7 @@ const (
 	defKindCall
 	defKindDivRem
 	defKindMulHi
+	defKindVecMap
 )
 
 var defKinds = [instrMax]defKind{
@@ -2598,7 +2602,7 @@ var defKinds = [instrMax]defKind{
 	nopUseReg:              defKindNone,
 	preemptCheck:           defKindNone,
 	yield:                  defKindNone,
-	vecMap:                 defKindNone,
+	vecMap:                 defKindVecMap,
 	tailCall:               defKindCall,
 	tailCallIndirect:       defKindCall,
 	xmmLoadConst:           defKindOp2,
@@ -2621,6 +2625,8 @@ func (d defKind) String() string {
 		return "divrem"
 	case defKindMulHi:
 		return "mulhi"
+	case defKindVecMap:
+		return "vecmap"
 	default:
 		return "invalid"
 	}

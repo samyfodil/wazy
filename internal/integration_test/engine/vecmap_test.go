@@ -31,14 +31,22 @@ func TestVecMap(t *testing.T) {
 		t.Skip()
 	}
 	features := platform.CpuFeatures
-	t.Run("avx", func(t *testing.T) {
-		if !features.Has(platform.CpuFeatureAmd64AVX) {
+	t.Run("avx2", func(t *testing.T) {
+		if !features.Has(platform.CpuFeatureAmd64AVX2) {
 			t.Skip()
 		}
 		testVecMap(t)
 	})
+	t.Run("avx", func(t *testing.T) { // 256-bit floats, 128-bit integers
+		if !features.Has(platform.CpuFeatureAmd64AVX) {
+			t.Skip()
+		}
+		platform.CpuFeatures = features &^ platform.CpuFeatureAmd64AVX2
+		defer func() { platform.CpuFeatures = features }()
+		testVecMap(t)
+	})
 	t.Run("sse", func(t *testing.T) {
-		platform.CpuFeatures = features &^ platform.CpuFeatureAmd64AVX
+		platform.CpuFeatures = features &^ (platform.CpuFeatureAmd64AVX | platform.CpuFeatureAmd64AVX2)
 		defer func() { platform.CpuFeatures = features }()
 		testVecMap(t)
 	})
@@ -58,7 +66,7 @@ func testVecMap(t *testing.T) {
 	frontend.VecPlanHook = nil
 	require.NoError(t, err)
 	if runtime.GOARCH == "amd64" {
-		require.Equal(t, 3, vectorized, "every loop of the module should be vectorized")
+		require.Equal(t, 10, vectorized, "every loop of the module but counter's should be vectorized")
 	}
 	interp := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 	defer interp.Close(ctx)
@@ -116,6 +124,34 @@ func testVecMap(t *testing.T) {
 		{"unrolled scale in the output", call{"unrolled", []uint64{0, 16384, 4000, 600}}},
 		{"unrolled scale in the input", call{"unrolled", []uint64{0, 16384, 16384 + 800, 600}}},
 		{"unrolled in place", call{"unrolled", []uint64{16384, 16384, 50000, 600}}},
+		{"isum", call{"isum", []uint64{0, 1000}}},
+		{"isum short", call{"isum", []uint64{8, 3}}},
+		{"isum zero", call{"isum", []uint64{0, 0}}},
+		{"isum negative count", call{"isum", []uint64{0, api.EncodeI32(-5)}}},
+		{"isum chunks", call{"isum", []uint64{0, 16000}}},
+		{"isum runs off the end", call{"isum", []uint64{memSize - 800, 1000}}},
+		{"ixor", call{"ixor", []uint64{4, 3001}}},
+		{"ixor zero", call{"ixor", []uint64{4, 0}}},
+		{"ixor misaligned", call{"ixor", []uint64{3, 777}}},
+		{"ixor runs off the end", call{"ixor", []uint64{memSize - 40, 100}}},
+		{"iand", call{"iand", []uint64{0, 1000}}},
+		{"iand to the end", call{"iand", []uint64{memSize - 4004, 1000}}},
+		{"iand runs off the end", call{"iand", []uint64{memSize - 4000, 1000}}},
+		{"imap32", call{"imap32", []uint64{0, 16384, 32768, 1000, 7}}},
+		{"imap32 in place", call{"imap32", []uint64{16384, 16384, 32768, 1000, 7}}},
+		{"imap32 dst overlaps a", call{"imap32", []uint64{16388, 16384, 32768, 1000, 0}}},
+		{"imap32 dst is b", call{"imap32", []uint64{32768, 16384, 32768, 999, 1}}},
+		{"imap32 runs off the end", call{"imap32", []uint64{memSize - 400, 16384, 32768, 1000, 1}}},
+		{"imap64", call{"imap64", []uint64{0, 16384, 32768, 1000, 0xff00ff00ff00ff}}},
+		{"imap64 in place", call{"imap64", []uint64{16384, 16384, 32768, 1000, ^uint64(0)}}},
+		{"imap64 dst is y", call{"imap64", []uint64{32768, 16384, 32768, 1000, 0x1234}}},
+		{"imap64 dst overlaps x", call{"imap64", []uint64{16376, 16384, 32768, 1000, 3}}},
+		{"wrapped", call{"wrapped", []uint64{0, 1000}}},
+		{"wrapped wraps", call{"wrapped", []uint64{api.EncodeI32(-8), 1000}}},
+		{"wrapped wraps later", call{"wrapped", []uint64{api.EncodeI32(-800), 1000}}},
+		{"unused", call{"unused", []uint64{0, 16384, 32768, 1000}}},
+		{"unused load runs off the end", call{"unused", []uint64{0, 16384, memSize - 80, 1000}}},
+		{"counter", call{"counter", []uint64{0, 1000, 1000}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

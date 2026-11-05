@@ -1122,7 +1122,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeFence:                       returnTypesFnNoReturns,
 	OpcodePreemptRequested:            returnTypesFnI32,
 	OpcodeYield:                       returnTypesFnNoReturns,
-	OpcodeVecMap:                      returnTypesFnNoReturns,
+	OpcodeVecMap:                      returnTypesFnSingle,
 	OpcodeTailCallReturnCallIndirect:  returnTypesFnCallIndirect,
 	OpcodeTailCallReturnCall:          returnTypesFnCall,
 	OpcodeWideningPairwiseDotProductS: returnTypesFnV128,
@@ -3279,40 +3279,14 @@ func (o Opcode) String() (ret string) {
 	panic(fmt.Sprintf("unknown opcode %d", o))
 }
 
-// VecProgram is the per-element computation of an OpcodeVecMap. Ops run in order, each producing one
-// vector of lanes: an op's A and B name earlier ops. The last op is the value stored through pointer
-// Store. Every pointer advances one element per element, and each load reads the element its pointer is at.
-type VecProgram struct {
-	F64        bool
-	Ptrs, Invs int
-	Store      int
-	Ops        []VecOp
-}
-
-// VecOp kinds.
-const (
-	VecOpLoad = iota + 1 // Arg: pointer index
-	VecOpInv             // Arg: invariant index, broadcast to every lane
-	VecOpAdd
-	VecOpSub
-	VecOpMul
-	VecOpDiv
-	VecOpXor // A ^ invariant Arg: a sign flip, with the sign mask as the invariant
-	VecOpAnd // A & invariant Arg: an absolute value, with the magnitude mask as the invariant
-	VecOpSqrt
-)
-
-// VecOp is one step of a VecProgram.
-type VecOp struct {
-	Kind, A, B, Arg uint8
-}
-
 // AsVecMap initializes this instruction as an OpcodeVecMap running program number prog over args: the
-// pointers, the element count and the invariants, in that order.
-func (i *Instruction) AsVecMap(prog int, args Values) *Instruction {
+// pointers, the element count and the invariants, in that order. A program that reduces returns the
+// reduction of its elements, of type result; result is TypeInvalid otherwise.
+func (i *Instruction) AsVecMap(prog int, args Values, result Type) *Instruction {
 	i.opcode = OpcodeVecMap
 	i.u1 = uint64(prog)
 	i.vs = args
+	i.typ = result
 	return i
 }
 

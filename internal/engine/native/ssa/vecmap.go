@@ -1,14 +1,92 @@
 package ssa
 
-// VecMapRegs is how many vector registers a VecProgram's expansion has: its invariants and the
-// temporaries live across its ops.
+// TypeInvalid is the result type of an OpcodeVecMap that does not reduce: it returns nothing.
+const TypeInvalid = typeInvalid
+
+// VecProgram is the per-element computation of an OpcodeVecMap, on lanes of type Elem. Ops run in order,
+// each producing one vector of lanes, an op's A and B naming earlier ops. The last op is the element's
+// value: stored through pointer Store, unless Store is negative, or folded into the returned total with
+// Reduce, an integer VecOpAdd, VecOpBand, VecOpBor or VecOpBxor, when that is not zero. Every pointer
+// advances one element per element, and each load reads the element its pointer is at.
+type VecProgram struct {
+	Elem       Type
+	Ptrs, Invs int
+	Store      int
+	Reduce     uint8
+	Ops        []VecOp
+}
+
+// VecOp kinds.
+const (
+	VecOpLoad = iota + 1 // Arg: pointer index
+	VecOpInv             // Arg: invariant index, broadcast to every lane
+	VecOpAdd
+	VecOpSub
+	VecOpMul
+	VecOpDiv
+	VecOpXor  // A ^ invariant Arg: a float sign flip, with the sign mask as the invariant
+	VecOpAnd  // A & invariant Arg: a float absolute value, with the magnitude mask as the invariant
+	VecOpSqrt // float
+	VecOpBand // integer A & B
+	VecOpBor  // integer A | B
+	VecOpBxor // integer A ^ B
+	VecOpShl  // integer A << Arg
+	VecOpShrU // integer A >> Arg, unsigned
+	VecOpShrS // integer A >> Arg, signed
+)
+
+// VecOp is one step of a VecProgram.
+type VecOp struct {
+	Kind, A, B, Arg uint8
+}
+
+// Binary reports whether op reads both A and B.
+func (op VecOp) Binary() bool {
+	switch op.Kind {
+	case VecOpAdd, VecOpSub, VecOpMul, VecOpDiv, VecOpBand, VecOpBor, VecOpBxor:
+		return true
+	}
+	return false
+}
+
+// VecMapRegs is how many vector registers a VecProgram's expansion has: its invariants, its accumulator
+// when it reduces, and the temporaries live across its ops.
 const VecMapRegs = 8
+
+// Folded reports whether op i is a load the op using it reads from memory instead: a load used once, as
+// the second operand of a binary op. Only a backend that folds such loads asks.
+func (p *VecProgram) Folded(i int) bool {
+	if p.Ops[i].Kind != VecOpLoad || i == len(p.Ops)-1 {
+		return false
+	}
+	uses, asB := 0, false
+	for _, op := range p.Ops[i+1:] {
+		switch {
+		case op.Binary():
+			if int(op.A) == i {
+				uses++
+			}
+			if int(op.B) == i {
+				uses++
+				asB = true
+			}
+		case op.Kind != VecOpLoad && op.Kind != VecOpInv && int(op.A) == i:
+			uses++
+		}
+	}
+	return uses == 1 && asB
+}
 
 // Assign gives each op of p a vector register in [0, VecMapRegs): an invariant the register it arrives
 // in, numbered as the invariant is, and every other op one free when it runs, the register of an operand
-// whose last use it is first. It reports false when the program needs more registers than that.
-func (p *VecProgram) Assign() ([]uint8, bool) {
-	if p.Invs > VecMapRegs {
+// whose last use it is first. With fold, a load Folded reports gets none. A reducing program's
+// accumulator takes register Invs. It reports false when the program needs more registers than there are.
+func (p *VecProgram) Assign(fold bool) ([]uint8, bool) {
+	fixed := p.Invs
+	if p.Reduce != 0 {
+		fixed++
+	}
+	if fixed > VecMapRegs {
 		return nil, false
 	}
 	last := make([]int, len(p.Ops))
@@ -16,9 +94,9 @@ func (p *VecProgram) Assign() ([]uint8, bool) {
 		last[i] = -1
 	}
 	for i, op := range p.Ops {
-		switch op.Kind {
-		case VecOpLoad, VecOpInv:
-		case VecOpAdd, VecOpSub, VecOpMul, VecOpDiv:
+		switch {
+		case op.Kind == VecOpLoad, op.Kind == VecOpInv:
+		case op.Binary():
 			last[op.A], last[op.B] = i, i
 		default:
 			last[op.A] = i
@@ -26,17 +104,15 @@ func (p *VecProgram) Assign() ([]uint8, bool) {
 	}
 	regs := make([]uint8, len(p.Ops))
 	var used [VecMapRegs]bool
-	for r := 0; r < p.Invs; r++ {
+	for r := 0; r < fixed; r++ {
 		used[r] = true
-	}
-	free := func(op uint8, i int) {
-		if p.Ops[op].Kind != VecOpInv && last[op] == i {
-			used[regs[op]] = false
-		}
 	}
 	for i, op := range p.Ops {
 		if op.Kind == VecOpInv {
 			regs[i] = op.Arg
+			continue
+		}
+		if fold && p.Folded(i) {
 			continue
 		}
 		// The result may take the register of operand A when this is A's last use, which is what a
@@ -46,7 +122,7 @@ func (p *VecProgram) Assign() ([]uint8, bool) {
 			r = int(regs[op.A])
 		}
 		if r < 0 {
-			for k := p.Invs; k < VecMapRegs; k++ {
+			for k := fixed; k < VecMapRegs; k++ {
 				if !used[k] {
 					r = k
 					break
@@ -56,10 +132,8 @@ func (p *VecProgram) Assign() ([]uint8, bool) {
 				return nil, false
 			}
 		}
-		switch op.Kind {
-		case VecOpLoad:
-		case VecOpAdd, VecOpSub, VecOpMul, VecOpDiv:
-			free(op.B, i)
+		if op.Binary() && p.Ops[op.B].Kind != VecOpInv && last[op.B] == i && !(fold && p.Folded(int(op.B))) {
+			used[regs[op.B]] = false
 		}
 		used[r] = true
 		regs[i] = uint8(r)
