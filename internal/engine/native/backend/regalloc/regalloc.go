@@ -97,6 +97,7 @@ type (
 		// that use vrState scratch. See computeNextUseDistances.
 		firstUseBuf []int32
 		distBuf     []int32
+		nextUseWork []B
 		stamp       int32
 		// outStamp and blockLen are, for the block being allocated, the stamp of its live-outs' distances
 		// and how many instructions it has. See evictionCost.
@@ -148,6 +149,8 @@ type (
 		// distBegin indexes Allocator.distBuf: from there, one next-use distance for each of the block's
 		// live-ins and then each of its loop live-ins. See computeNextUseDistances.
 		distBegin int32
+		// queued is whether computeNextUseDistances has the block to visit again.
+		queued bool
 		// instrCount is how many instructions the block has.
 		instrCount int32
 		// seen is true if the block is visited during the liveness analysis.
@@ -1687,10 +1690,18 @@ func (a *Allocator[I, B, F]) computeNextUseDistances(f F) {
 		}
 	}
 	a.distBuf = dist
-	for changed := true; changed; {
-		changed = false
-		for blk := f.PostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.PostOrderBlockIteratorNext() {
+	// A block is visited again only where a successor's distances went down since it last was.
+	work := a.nextUseWork[:0]
+	for blk := f.PostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.PostOrderBlockIteratorNext() {
+		work = append(work, blk)
+		a.getOrAllocateBlockState(blk.ID()).queued = true
+	}
+	for head := 0; head < len(work); head++ {
+		blk := work[head]
+		{
 			info := a.getOrAllocateBlockState(blk.ID())
+			info.queued = false
+			changed := false
 			a.stamp++
 			a.nearestAfter(f, blk)
 			// A loop live-in the block also has among its own live-ins is used where that one says.
@@ -1719,8 +1730,17 @@ func (a *Allocator[I, B, F]) computeNextUseDistances(f F) {
 					changed = true
 				}
 			}
+			if changed {
+				for i, n := 0, blk.Preds(); i < n; i++ {
+					if p := a.getOrAllocateBlockState(f.Pred(blk, i).ID()); !p.queued {
+						p.queued = true
+						work = append(work, f.Pred(blk, i))
+					}
+				}
+			}
 		}
 	}
+	a.nextUseWork = work[:0]
 }
 
 // nearestAfter leaves, in each value live into a successor of blk, dist with its distance from blk's

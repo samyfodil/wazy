@@ -218,6 +218,9 @@ type builder struct {
 
 	// nextValueID is used by builder.AllocateValue.
 	nextValueID ValueID
+	// cloneMark, cloneStamp and cloneBlockStamp are passCloneSharedComparesOpt's scratch.
+	cloneMark                   []cloneMark
+	cloneStamp, cloneBlockStamp int32
 	// nextVariable is used by builder.AllocateVariable.
 	nextVariable Variable
 

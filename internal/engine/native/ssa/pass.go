@@ -112,18 +112,44 @@ func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID
 // comparison only one instruction uses becomes the flags that instruction reads, rather than a 0 or 1 in a
 // register that it tests again. The original goes where nothing else uses it.
 func passCloneSharedComparesOpt(b *builder) {
-	uses := make(map[ValueID]int)
-	blockOf := make(map[*Instruction]*basicBlock)
+	// The comparisons of interest, those a select or a branch of their block takes, are marked by value
+	// ID with this pass's stamp, and only their uses counted. A use through an alias is not, which at
+	// worst leaves one comparison shared: a copy is never wrong, only sometimes not needed.
+	b.cloneStamp++
+	stamp := b.cloneStamp
+	if n := int(b.nextValueID); len(b.cloneMark) < n {
+		b.cloneMark = append(b.cloneMark, make([]cloneMark, n-len(b.cloneMark))...)
+	}
+	mark := b.cloneMark
+	blockStamp := b.cloneBlockStamp
+	any := false
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		blockStamp++
+		for cur := blk.rootInstr; cur != nil; cur = cur.next {
+			switch cur.opcode {
+			case OpcodeIcmp:
+				mark[cur.rValue.ID()] = cloneMark{stamp: stamp, block: blockStamp}
+			case OpcodeSelect, OpcodeBrz, OpcodeBrnz:
+				c := b.resolveAlias(cur.v)
+				if m := &mark[c.ID()]; m.stamp == stamp && m.block == blockStamp {
+					m.candidate, any = true, true
+				}
+			}
+		}
+	}
+	if !any {
+		b.cloneBlockStamp = blockStamp
+		return
+	}
 	count := func(v Value) {
 		if v.Valid() {
-			uses[b.resolveAlias(v).ID()]++
+			if m := &mark[v.ID()]; m.stamp == stamp && m.candidate {
+				m.uses++
+			}
 		}
 	}
 	for _, blk := range b.reversePostOrderedBasicBlocks {
 		for cur := blk.rootInstr; cur != nil; cur = cur.next {
-			if cur.opcode == OpcodeIcmp {
-				blockOf[cur] = blk
-			}
 			v1, v2, v3, vs := cur.Args()
 			count(v1)
 			count(v2)
@@ -141,15 +167,23 @@ func passCloneSharedComparesOpt(b *builder) {
 				continue
 			}
 			c := b.resolveAlias(cur.v)
-			cmp := b.InstructionOfValue(c)
-			if cmp == nil || cmp.opcode != OpcodeIcmp || uses[c.ID()] < 2 || blockOf[cmp] != blk {
+			m := &mark[c.ID()]
+			if m.stamp != stamp || !m.candidate || m.uses < 2 {
 				continue
 			}
-			x, y, cond := cmp.IcmpData()
+			x, y, cond := b.InstructionOfValue(c).IcmpData()
 			cur.v = b.insertBefore(blk, cur, b.AllocateInstruction().AsIcmp(x, y, cond))
-			uses[c.ID()]--
+			m.uses--
 		}
 	}
+	b.cloneBlockStamp = blockStamp
+}
+
+// cloneMark is passCloneSharedComparesOpt's per value scratch: a comparison's stamp, its block's, whether
+// a select or a branch of the block takes it, and how many instructions do.
+type cloneMark struct {
+	stamp, block, uses int32
+	candidate          bool
 }
 
 // passWidenMemoryBoundsOpt merges a bounds check into an earlier one in its block of the same address and

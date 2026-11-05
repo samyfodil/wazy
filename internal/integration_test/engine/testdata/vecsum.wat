@@ -1,4 +1,5 @@
-;; Straight-line i32 sums whose terms come in fours over consecutive elements: see vecsum_test.go.
+;; Straight-line i32 sums whose terms come in fours over consecutive elements, in loops, outside which the
+;; compiler leaves them: see vecsum_test.go.
 ;; Generated: each term is written out the way LLVM unrolls one, temporaries in locals included.
 (module
   (memory 2)
@@ -11,16 +12,22 @@
     (i32.add (i32.add (local.get $acc) (i32.mul (local.get $t) (i32.const 31)))
              (i32.xor (local.get $p) (i32.shl (local.get $q) (i32.const 7)))))
   (func (export "sum4") (param $a i32) (result i32)
-    (i32.add (i32.add (i32.load offset=8 (local.get $a)) (i32.load offset=12 (local.get $a)))
-             (i32.add (i32.load offset=16 (local.get $a)) (i32.load offset=20 (local.get $a)))))
+    (loop (result i32)
+      (i32.add (i32.add (i32.load offset=8 (local.get $a)) (i32.load offset=12 (local.get $a)))
+               (i32.add (i32.load offset=16 (local.get $a)) (i32.load offset=20 (local.get $a))))))
   (func (export "dot8") (param $a i32) (param $b i32) (param $sh i32) (param $m i32) (result i32)
-    (i32.add (i32.mul (i32.load offset=0 (local.get $a)) (i32.load offset=0 (local.get $b))) (i32.add (i32.mul (i32.load offset=4 (local.get $a)) (i32.load offset=4 (local.get $b))) (i32.add (i32.mul (i32.load offset=8 (local.get $a)) (i32.load offset=8 (local.get $b))) (i32.add (i32.mul (i32.load offset=12 (local.get $a)) (i32.load offset=12 (local.get $b))) (i32.add (i32.mul (i32.load offset=16 (local.get $a)) (i32.load offset=16 (local.get $b))) (i32.add (i32.mul (i32.load offset=20 (local.get $a)) (i32.load offset=20 (local.get $b))) (i32.add (i32.mul (i32.load offset=24 (local.get $a)) (i32.load offset=24 (local.get $b))) (i32.add (i32.mul (i32.load offset=28 (local.get $a)) (i32.load offset=28 (local.get $b))) (i32.add (i32.and (i32.shr_u (i32.load offset=0 (local.get $a)) (local.get $sh)) (local.get $m)) (i32.add (i32.and (i32.shr_u (i32.load offset=4 (local.get $a)) (local.get $sh)) (local.get $m)) (i32.add (i32.and (i32.shr_u (i32.load offset=8 (local.get $a)) (local.get $sh)) (local.get $m)) (i32.add (i32.and (i32.shr_u (i32.load offset=12 (local.get $a)) (local.get $sh)) (local.get $m)) (i32.add (i32.xor (i32.shl (i32.load offset=64 (local.get $b)) (local.get $sh)) (i32.or (local.get $m) (i32.const 3))) (i32.add (i32.xor (i32.shl (i32.load offset=68 (local.get $b)) (local.get $sh)) (i32.or (local.get $m) (i32.const 3))) (i32.add (i32.xor (i32.shl (i32.load offset=72 (local.get $b)) (local.get $sh)) (i32.or (local.get $m) (i32.const 3))) (i32.xor (i32.shl (i32.load offset=76 (local.get $b)) (local.get $sh)) (i32.or (local.get $m) (i32.const 3)))))))))))))))))))
+    (loop (result i32)
+      (i32.add (i32.mul (i32.load offset=0 (local.get $a)) (i32.load offset=0 (local.get $b))) (i32.add (i32.mul (i32.load offset=4 (local.get $a)) (i32.load offset=4 (local.get $b))) (i32.add (i32.mul (i32.load offset=8 (local.get $a)) (i32.load offset=8 (local.get $b))) (i32.add (i32.mul (i32.load offset=12 (local.get $a)) (i32.load offset=12 (local.get $b))) (i32.add (i32.mul (i32.load offset=16 (local.get $a)) (i32.load offset=16 (local.get $b))) (i32.add (i32.mul (i32.load offset=20 (local.get $a)) (i32.load offset=20 (local.get $b))) (i32.add (i32.mul (i32.load offset=24 (local.get $a)) (i32.load offset=24 (local.get $b))) (i32.add (i32.mul (i32.load offset=28 (local.get $a)) (i32.load offset=28 (local.get $b))) (i32.add (i32.and (i32.shr_u (i32.load offset=0 (local.get $a)) (local.get $sh)) (local.get $m)) (i32.add (i32.and (i32.shr_u (i32.load offset=4 (local.get $a)) (local.get $sh)) (local.get $m)) (i32.add (i32.and (i32.shr_u (i32.load offset=8 (local.get $a)) (local.get $sh)) (local.get $m)) (i32.add (i32.and (i32.shr_u (i32.load offset=12 (local.get $a)) (local.get $sh)) (local.get $m)) (i32.add (i32.xor (i32.shl (i32.load offset=64 (local.get $b)) (local.get $sh)) (i32.or (local.get $m) (i32.const 3))) (i32.add (i32.xor (i32.shl (i32.load offset=68 (local.get $b)) (local.get $sh)) (i32.or (local.get $m) (i32.const 3))) (i32.add (i32.xor (i32.shl (i32.load offset=72 (local.get $b)) (local.get $sh)) (i32.or (local.get $m) (i32.const 3))) (i32.xor (i32.shl (i32.load offset=76 (local.get $b)) (local.get $sh)) (i32.or (local.get $m) (i32.const 3))))))))))))))))))))
   (func (export "dup") (param $a i32) (result i32)
-    (i32.add (i32.shr_s (i32.mul (i32.load offset=0 (local.get $a)) (i32.load offset=0 (local.get $a))) (i32.const 3)) (i32.add (i32.shr_s (i32.mul (i32.load offset=4 (local.get $a)) (i32.load offset=4 (local.get $a))) (i32.const 3)) (i32.add (i32.shr_s (i32.mul (i32.load offset=8 (local.get $a)) (i32.load offset=8 (local.get $a))) (i32.const 3)) (i32.shr_s (i32.mul (i32.load offset=12 (local.get $a)) (i32.load offset=12 (local.get $a))) (i32.const 3))))))
+    (loop (result i32)
+      (i32.add (i32.shr_s (i32.mul (i32.load offset=0 (local.get $a)) (i32.load offset=0 (local.get $a))) (i32.const 3)) (i32.add (i32.shr_s (i32.mul (i32.load offset=4 (local.get $a)) (i32.load offset=4 (local.get $a))) (i32.const 3)) (i32.add (i32.shr_s (i32.mul (i32.load offset=8 (local.get $a)) (i32.load offset=8 (local.get $a))) (i32.const 3)) (i32.shr_s (i32.mul (i32.load offset=12 (local.get $a)) (i32.load offset=12 (local.get $a))) (i32.const 3)))))))
   (func (export "six") (param $a i32) (result i32)
-    (i32.add (i32.load offset=0 (local.get $a)) (i32.add (i32.load offset=4 (local.get $a)) (i32.add (i32.load offset=8 (local.get $a)) (i32.add (i32.load offset=12 (local.get $a)) (i32.add (i32.load offset=16 (local.get $a)) (i32.load offset=20 (local.get $a))))))))
+    (loop (result i32)
+      (i32.add (i32.load offset=0 (local.get $a)) (i32.add (i32.load offset=4 (local.get $a)) (i32.add (i32.load offset=8 (local.get $a)) (i32.add (i32.load offset=12 (local.get $a)) (i32.add (i32.load offset=16 (local.get $a)) (i32.load offset=20 (local.get $a)))))))))
   (func (export "kmul") (param $a i32) (result i32)
-    (i32.add (i32.mul (i32.load offset=0 (local.get $a)) (i32.const 1)) (i32.add (i32.mul (i32.load offset=4 (local.get $a)) (i32.const 2)) (i32.add (i32.mul (i32.load offset=8 (local.get $a)) (i32.const 3)) (i32.mul (i32.load offset=12 (local.get $a)) (i32.const 4))))))
+    (loop (result i32)
+      (i32.add (i32.mul (i32.load offset=0 (local.get $a)) (i32.const 1)) (i32.add (i32.mul (i32.load offset=4 (local.get $a)) (i32.const 2)) (i32.add (i32.mul (i32.load offset=8 (local.get $a)) (i32.const 3)) (i32.mul (i32.load offset=12 (local.get $a)) (i32.const 4)))))))
   (func (export "extra") (param $a i32) (param $b i32) (result i32)
-    (i32.add (i32.load offset=0 (local.get $a)) (i32.add (i32.load offset=4 (local.get $a)) (i32.add (i32.load offset=8 (local.get $a)) (i32.add (i32.load offset=12 (local.get $a)) (i32.load (local.get $b)))))))
+    (loop (result i32)
+      (i32.add (i32.load offset=0 (local.get $a)) (i32.add (i32.load offset=4 (local.get $a)) (i32.add (i32.load offset=8 (local.get $a)) (i32.add (i32.load offset=12 (local.get $a)) (i32.load (local.get $b))))))))
 )

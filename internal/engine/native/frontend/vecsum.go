@@ -62,6 +62,14 @@ func newVsSim() *vsSim {
 	return &vsSim{ids: map[vsNode]int32{}, locals: map[uint32]int32{}}
 }
 
+// reset empties s for another run, keeping its memory.
+func (s *vsSim) reset() *vsSim {
+	s.nodes, s.stack, s.loads = s.nodes[:0], s.stack[:0], s.loads[:0]
+	clear(s.ids)
+	clear(s.locals)
+	return s
+}
+
 func (s *vsSim) intern(n vsNode) int32 {
 	if id, ok := s.ids[n]; ok {
 		return id
@@ -257,7 +265,14 @@ func (s *vsSim) plan(root int32, loads []int32) *vsPlan {
 		terms = append(terms, id)
 	}
 	flatten(root)
-	if len(terms) < 4 {
+	// Four terms at least that load, or there is no four to make.
+	loading := 0
+	for _, t := range terms {
+		if s.hasLoad(t) {
+			loading++
+		}
+	}
+	if loading < 4 {
 		return nil
 	}
 
@@ -438,6 +453,7 @@ func (s *vsSim) lanesOK(l [4]int32, lane map[int32]bool) bool {
 type vecSum struct {
 	scanned int
 	cands   []vsCand
+	sim     *vsSim
 	join    ssa.BasicBlock
 	end     int
 }
@@ -448,7 +464,10 @@ type vsCand struct{ start, end int }
 func (c *Compiler) scanVecSums(pc int) {
 	vs := &c.vecSum
 	body := c.wasmFunctionBody
-	s := newVsSim()
+	if vs.sim == nil {
+		vs.sim = newVsSim()
+	}
+	s := vs.sim.reset()
 	var cands []vsCand
 	at := pc
 	for ops := 0; at < len(body) && ops < vecSumMaxOps; ops++ {
@@ -456,7 +475,7 @@ func (c *Compiler) scanVecSums(pc int) {
 		if !ok {
 			break
 		}
-		if body[at] == wasm.OpcodeI32Add && (next >= len(body) || body[next] != wasm.OpcodeI32Add) {
+		if body[at] == wasm.OpcodeI32Add && (next >= len(body) || body[next] != wasm.OpcodeI32Add) && len(s.loads) >= 4 {
 			top := s.stack[len(s.stack)-1]
 			if s.plan(top.id, s.loadsUnder(top.id)) != nil {
 				cands = append(cands, vsCand{start: top.start, end: next})
@@ -495,6 +514,10 @@ func (c *Compiler) lowerVecSums() {
 		return
 	}
 	if pc >= vs.scanned {
+		// A sum outside any loop runs once, which vectors do not pay for.
+		if state.loops == 0 {
+			return
+		}
 		c.scanVecSums(pc)
 	}
 	for len(vs.cands) > 0 && vs.cands[0].start < pc {

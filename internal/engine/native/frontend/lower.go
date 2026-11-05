@@ -19,8 +19,10 @@ type (
 	// loweringState is used to keep the state of lowering.
 	loweringState struct {
 		// values holds the values on the Wasm stack.
-		values           []ssa.Value
-		controlFrames    []controlFrame
+		values        []ssa.Value
+		controlFrames []controlFrame
+		// loops is how many of controlFrames are loops.
+		loops            int
 		unreachable      bool
 		unreachableDepth int
 		tmpForBrTable    []uint32
@@ -159,6 +161,7 @@ func (ctrl *controlFrame) isTryCatch() bool {
 func (l *loweringState) reset() {
 	l.values = l.values[:0]
 	l.controlFrames = l.controlFrames[:0]
+	l.loops = 0
 	l.pc = 0
 	l.unreachable = false
 	l.unreachableDepth = 0
@@ -198,11 +201,17 @@ func (l *loweringState) ctrlPop() (ret controlFrame) {
 	tail := len(l.controlFrames) - 1
 	ret = l.controlFrames[tail]
 	l.controlFrames = l.controlFrames[:tail]
+	if ret.isLoop() {
+		l.loops--
+	}
 	return
 }
 
 func (l *loweringState) ctrlPush(ret controlFrame) {
 	l.controlFrames = append(l.controlFrames, ret)
+	if ret.isLoop() {
+		l.loops++
+	}
 }
 
 func (l *loweringState) ctrlPeekAt(n int) (ret *controlFrame) {
@@ -236,7 +245,7 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 		followingBlock: c.ssaBuilder.ReturnBlock(),
 	})
 
-	c.vecSum = vecSum{cands: c.vecSum.cands[:0]}
+	c.vecSum = vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim}
 	for c.loweringState.pc < len(c.wasmFunctionBody) {
 		c.lowerVecSums()
 		blkBeforeLowering := c.ssaBuilder.CurrentBlock()
