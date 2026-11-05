@@ -3902,6 +3902,47 @@ func (m *machine) lowerSplat(x, ret ssa.Value, lane ssa.VecLane) {
 }
 
 func (m *machine) lowerShuffle(x, y ssa.Value, lo, hi uint64, ret ssa.Value) {
+	var lanes [16]byte
+	for i := 0; i < 8; i++ {
+		lanes[i], lanes[8+i] = byte(lo>>(i*8)), byte(hi>>(i*8))
+	}
+	// Sixteen bytes in a row of x followed by y, a window sliding over the two, is one palignr.
+	window := true
+	for i, l := range lanes {
+		window = window && l == lanes[0]+byte(i)
+	}
+	if window && lanes[0] > 0 && lanes[0] < 16 {
+		xx := m.getOperand_Reg(m.c.ValueDefinition(x))
+		yy := m.getOperand_Reg(m.c.ValueDefinition(y))
+		tmp := m.copyToTmp(yy.reg())
+		m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePalignr, lanes[0], xx, tmp))
+		m.copyTo(tmp, m.c.VRegOf(ret))
+		return
+	}
+	// Every lane from one of the two is one pshufb.
+	fromX, fromY := true, true
+	for _, l := range lanes {
+		fromX, fromY = fromX && l < 16, fromY && l >= 16
+	}
+	if fromX || fromY {
+		src := x
+		var mask [2]uint64
+		for i, l := range lanes {
+			if fromY {
+				l -= 16
+			}
+			mask[i/8] |= uint64(l) << (i % 8 * 8)
+		}
+		if fromY {
+			src = y
+		}
+		ss := m.getOperand_Reg(m.c.ValueDefinition(src))
+		tmp := m.copyToTmp(ss.reg())
+		m.insert(m.allocateInstr().asXmmRmR(sseOpcodePshufb, newOperandReg(m.loadV128Const(mask[0], mask[1])), tmp))
+		m.copyTo(tmp, m.c.VRegOf(ret))
+		return
+	}
+
 	var xMask, yMask [2]uint64
 	for i := 0; i < 8; i++ {
 		loLane := byte(lo >> (i * 8))
@@ -3945,6 +3986,16 @@ func (m *machine) lowerShuffle(x, y ssa.Value, lo, hi uint64, ret ssa.Value) {
 	m.insert(m.allocateInstr().asXmmRmR(sseOpcodeOrps, newOperandReg(tmpX), tmpY))
 
 	m.copyTo(tmpY, m.c.VRegOf(ret))
+}
+
+// loadV128Const loads a 16-byte constant from the constant pool into a new register: the pool is not
+// aligned, which a legacy SSE memory operand would need to be.
+func (m *machine) loadV128Const(lo, hi uint64) regalloc.VReg {
+	l, pos := m.allocateLabel()
+	m.consts = append(m.consts, _const{lo: lo, hi: hi, label: l, labelPos: pos})
+	tmp := m.c.AllocateVReg(ssa.TypeV128)
+	m.insert(m.allocateInstr().asXmmUnaryRmR(sseOpcodeMovdqu, newOperandMem(m.newAmodeRipRel(l)), tmp))
+	return tmp
 }
 
 func (m *machine) lowerVbBinOpUnaligned(op sseOpcode, x, y, ret ssa.Value) {
