@@ -2127,6 +2127,10 @@ func (a aluOp) String() string {
 		return "ands"
 	case aluOpBic:
 		return "bic"
+	case aluOpBics:
+		return "bics"
+	case aluOpEon:
+		return "eon"
 	case aluOpEor:
 		return "eor"
 	case aluOpAddS:
@@ -2198,6 +2202,11 @@ const (
 	// MAdd and MSub are only applicable for aluRRRR.
 	aluOpMAdd
 	aluOpMSub
+
+	// 32/64-bit Bitwise AND NOT, setting flags.
+	aluOpBics
+	// 32/64-bit Bitwise XOR NOT.
+	aluOpEon
 )
 
 // vecOp determines the type of vector operation. Instructions whose kind is one of

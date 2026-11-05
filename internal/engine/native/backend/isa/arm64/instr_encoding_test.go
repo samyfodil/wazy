@@ -1599,6 +1599,19 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "03103f1e", setup: func(i *instruction) { i.asLoadFpuConst32(v3VReg, uint64(math.Float32bits(-1.5))) }},
 		{want: "07f0671e", setup: func(i *instruction) { i.asLoadFpuConst64(v7VReg, math.Float64bits(31)) }},
 		{want: "0710681e", setup: func(i *instruction) { i.asLoadFpuConst64(v7VReg, math.Float64bits(0.125)) }},
+		// bic w1, w2, w3; bics wzr, w2, w3; eon x1, x2, x3; mvn w1, w2
+		{want: "4100230a", setup: func(i *instruction) {
+			i.asALU(aluOpBic, x1VReg, operandNR(x2VReg), operandNR(x3VReg), false)
+		}},
+		{want: "5f00236a", setup: func(i *instruction) {
+			i.asALU(aluOpBics, xzrVReg, operandNR(x2VReg), operandNR(x3VReg), false)
+		}},
+		{want: "410023ca", setup: func(i *instruction) {
+			i.asALU(aluOpEon, x1VReg, operandNR(x2VReg), operandNR(x3VReg), true)
+		}},
+		{want: "e103222a", setup: func(i *instruction) {
+			i.asALU(aluOpOrn, x1VReg, operandNR(xzrVReg), operandNR(x2VReg), false)
+		}},
 		// cmp sp, x11
 		{want: "ff632beb", setup: func(i *instruction) {
 			i.asALU(aluOpSubS, xzrVReg, operandNR(spVReg), operandNR(x11VReg), true)

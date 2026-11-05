@@ -2047,6 +2047,21 @@ func (m *machine) lowerBitwiseAluOp(si *ssa.Instruction, op aluOp, ignoreResult 
 
 	_64 := x.Type().Bits() == 64
 	alu := m.allocateInstr()
+	// x ^ ~0 is ~x: orn rd, zr, x.
+	if op == aluOpEor && allOnes(yDef, _64) {
+		yDef.Instr.MarkLowered()
+		alu.asALU(aluOpOrn, rd, operandNR(xzrVReg), rn, _64)
+		m.insert(alu)
+		return
+	}
+	// An operand that is ~z, used only here, is z under the instruction that inverts it itself.
+	if notOp, ok := map[aluOp]aluOp{aluOpAnd: aluOpBic, aluOpAnds: aluOpBics, aluOpOrr: aluOpOrn, aluOpEor: aluOpEon}[op]; ok {
+		if z, ok := m.notOf(yDef, _64); ok {
+			alu.asALU(notOp, rd, rn, m.getOperand_NR(m.compiler.ValueDefinition(z), extModeNone), _64)
+			m.insert(alu)
+			return
+		}
+	}
 	if instr := yDef.Instr; instr != nil && instr.Constant() {
 		c := instr.ConstantVal()
 		if isBitMaskImmediate(c, _64) {
@@ -2060,6 +2075,41 @@ func (m *machine) lowerBitwiseAluOp(si *ssa.Instruction, op aluOp, ignoreResult 
 	rm := m.getOperand_SR_NR(yDef, extModeNone)
 	alu.asALU(op, rd, rn, rm, _64)
 	m.insert(alu)
+}
+
+// allOnes reports whether def is the constant with every bit of its width set.
+func allOnes(def backend.SSAValueDefinition, _64 bool) bool {
+	if !def.IsFromInstr() || !def.Instr.Constant() {
+		return false
+	}
+	c := def.Instr.ConstantVal()
+	if !_64 {
+		return uint32(c) == ^uint32(0)
+	}
+	return c == ^uint64(0)
+}
+
+// notOf returns z where def is ~z, a not or an xor with all ones, that nothing else uses, and marks it
+// lowered.
+func (m *machine) notOf(def backend.SSAValueDefinition, _64 bool) (ssa.Value, bool) {
+	switch {
+	case m.compiler.MatchInstr(def, ssa.OpcodeBnot):
+		def.Instr.MarkLowered()
+		return def.Instr.Arg(), true
+	case m.compiler.MatchInstr(def, ssa.OpcodeBxor):
+		a, b := def.Instr.Arg2()
+		if bd := m.compiler.ValueDefinition(b); allOnes(bd, _64) {
+			def.Instr.MarkLowered()
+			bd.Instr.MarkLowered()
+			return a, true
+		}
+		if ad := m.compiler.ValueDefinition(a); allOnes(ad, _64) {
+			def.Instr.MarkLowered()
+			ad.Instr.MarkLowered()
+			return b, true
+		}
+	}
+	return ssa.ValueInvalid, false
 }
 
 // lowerBitwiseNot lowers `rd = ^rn` for OpcodeBnot.
