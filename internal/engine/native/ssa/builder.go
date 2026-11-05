@@ -64,6 +64,10 @@ type Builder interface {
 	// If it cannot find the definition, or it's not sealed yet, it returns ValueInvalid.
 	FindValueInLinearPath(variable Variable) Value
 
+	// MoveToCurrentBlock takes instr, a pure instruction of the block from, out of it and appends it to the
+	// current block.
+	MoveToCurrentBlock(instr *Instruction, from BasicBlock)
+
 	// Seal declares that we've known all the predecessors to this block and were added via AddPred.
 	// After calling this, AddPred will be forbidden.
 	Seal(blk BasicBlock)
@@ -462,6 +466,13 @@ func (b *builder) allocateBasicBlock() *basicBlock {
 // Idom implements Builder.Idom.
 func (b *builder) Idom(blk BasicBlock) BasicBlock {
 	return b.dominators[blk.ID()]
+}
+
+// MoveToCurrentBlock implements Builder.MoveToCurrentBlock.
+func (b *builder) MoveToCurrentBlock(instr *Instruction, from BasicBlock) {
+	from.(*basicBlock).removeInstruction(instr)
+	instr.prev, instr.next = nil, nil
+	b.currentBB.insertInstruction(b, instr)
 }
 
 // InsertInstruction implements Builder.InsertInstruction.

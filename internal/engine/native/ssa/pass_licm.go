@@ -453,22 +453,12 @@ var hoistIntConsts = runtime.GOARCH == "arm64"
 func (b *builder) everyIteration(blk, header *basicBlock) bool {
 	for _, p := range header.preds {
 		pred := p.blk
-		if !b.isDominatedBy(pred, header) || b.isDominatedBy(pred, blk) || yields(pred) {
+		if !b.isDominatedBy(pred, header) || b.isDominatedBy(pred, blk) || pred.yields() {
 			continue
 		}
 		return false
 	}
 	return true
-}
-
-// yields reports whether blk yields to the runtime: the slow path of a loop's preemption check.
-func yields(blk *basicBlock) bool {
-	for cur := blk.rootInstr; cur != nil; cur = cur.next {
-		if cur.opcode == OpcodeYield {
-			return true
-		}
-	}
-	return false
 }
 
 // multiInstructionConst reports whether the integer constant instr takes more than one instruction to

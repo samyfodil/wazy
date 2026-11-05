@@ -1217,6 +1217,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 		v2 := state.pop()
 		v1 := state.pop()
 
+		if sl, ok := c.sinkSelect(cond, v1, v2); ok {
+			state.push(sl)
+			break
+		}
 		sl := builder.AllocateInstruction().
 			AsSelect(cond, v1, v2).
 			Insert(builder).
