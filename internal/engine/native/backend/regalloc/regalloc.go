@@ -79,6 +79,19 @@ type (
 		curPC   programCounter
 		// loopDepth is indexed by block ID: how many loops each block is nested in. See computeLoopDepths.
 		loopDepth []uint8
+		// forestParent and inLoop are computeLoopDepths' scratch: each block's parent in the loop nesting
+		// forest, and which loop it last found the block in, numbered from one.
+		forestParent []int32
+		inLoop       []int32
+		// firstUseBuf is parallel to liveInsBuf: where a live-in is first used in its block, from the
+		// block's start, or -1. distBuf holds the blocks' next-use distances, and stamp numbers the passes
+		// that use vrState scratch. See computeNextUseDistances.
+		firstUseBuf []int32
+		distBuf     []int32
+		stamp       int32
+		// outStamp and blockLen are, for the block being allocated, the stamp of its live-outs' distances
+		// and how many instructions it has. See evictionCost.
+		outStamp, blockLen int32
 		// nextUseAfter is parallel to useBuf: for each use, the program counter of the same value's next
 		// use in the block, programCounterLiveOut if it has none but stays live, or -1 if it dies there.
 		nextUseAfter []programCounter
@@ -123,6 +136,11 @@ type (
 		// loop nesting forest. Every child of a loop gets the very same set, so they all point at one
 		// range instead of each holding a copy. Empty until loopTreeDFS runs.
 		loopLiveInsBegin, loopLiveInsEnd int32
+		// distBegin indexes Allocator.distBuf: from there, one next-use distance for each of the block's
+		// live-ins and then each of its loop live-ins. See computeNextUseDistances.
+		distBegin int32
+		// instrCount is how many instructions the block has.
+		instrCount int32
 		// seen is true if the block is visited during the liveness analysis.
 		seen bool
 		// visited is true if the block is visited during the allocation phase.
@@ -154,6 +172,13 @@ type (
 		nextUseBlockID int32
 		// useDepth is the deepest loop nesting of any block using this value.
 		useDepth uint8
+		// firstUse is, while firstUseBlk is that block's ID, where livenessAnalysis found this value first
+		// used in a block, counting instructions from the end.
+		firstUse, firstUseBlk int32
+		// dist is the distance from the end of a block to this value's next use, valid while distStamp
+		// is the stamp nearestAfter ran with; own/ownStamp is computeNextUseDistances' scratch.
+		dist, distStamp int32
+		own, ownStamp   int32
 		// feeds and feeds2 are values this one is copied into, if any; see homeOf. A loop variable
 		// typically feeds two: its loop header's parameter and a parameter of the block after the loop.
 		feeds, feeds2 *vrState[I, B, f]
@@ -254,6 +279,7 @@ func resetVrState[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) {
 	vs.lastUseUpdatedAtBlockID = -1
 	vs.nextUseBlockID = -1
 	vs.useDepth = 0
+	vs.firstUseBlk, vs.distStamp, vs.ownStamp = -1, -1, -1
 	vs.homeReg = RealRegInvalid
 	vs.feedsReg = RealRegInvalid
 	if vs.feeds != nil {
@@ -443,6 +469,7 @@ func resetBlockState[I Instr, B Block[I], F Function[I, B]](b *blockState[I, B, 
 	b.startFromPredIndex = -1
 	b.liveInsBegin, b.liveInsEnd = 0, 0
 	b.loopLiveInsBegin, b.loopLiveInsEnd = 0, 0
+	b.distBegin, b.instrCount = 0, 0
 }
 
 // liveIns returns the block's own live-in set.
@@ -467,6 +494,7 @@ func (b *blockState[I, B, F]) dump(a *RegisterInfo) {
 func (a *Allocator[I, B, F]) DoAllocation(f F) {
 	a.computeLoopDepths(f)
 	a.livenessAnalysis(f)
+	a.computeNextUseDistances(f)
 	a.alloc(f)
 	a.determineCalleeSavedRealRegs(f)
 }
@@ -505,6 +533,7 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 	s := &a.state
 
 	a.liveInsBuf = a.liveInsBuf[:0]
+	a.firstUseBuf = a.firstUseBuf[:0]
 
 	for i := range s.realRegStates {
 		vs := &s.realRegStates[i]
@@ -553,7 +582,9 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 			}
 		}
 
+		var n int32
 		for instr := blk.InstrRevIteratorBegin(); instr != nilInstr; instr = blk.InstrRevIteratorNext() {
+			n++
 			if instr.IsCopy() {
 				a.recordFeed(instr)
 			}
@@ -574,6 +605,7 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 					if d := a.depthOf(blkID); d > st.useDepth {
 						st.useDepth = d
 					}
+					st.firstUse, st.firstUseBlk = n, int32(blkID)
 					// Note: We use .spilled field to store the flag.
 					if st.spilled != flagLive { //nolint:gosimple
 						st.spilled = flagLive
@@ -590,11 +622,17 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 			}
 		}
 
+		info.instrCount = n
 		info.liveInsBegin = int32(len(a.liveInsBuf))
 		for _, st := range a.ss {
 			// We use .spilled field to store the flag.
 			if st.spilled == flagLive { //nolint:gosimple
 				a.liveInsBuf = append(a.liveInsBuf, st)
+				first := int32(-1)
+				if st.firstUseBlk == int32(blkID) {
+					first = n - st.firstUse
+				}
+				a.firstUseBuf = append(a.firstUseBuf, first)
 				st.spilled = false
 			}
 		}
@@ -654,6 +692,7 @@ func (a *Allocator[I, B, F]) loopTreeDFS(f F, entry B) {
 						st.spilled = flagDone
 						// TODO: deduplicate, though I don't think it has much impact.
 						a.liveInsBuf = append(a.liveInsBuf, st)
+						a.firstUseBuf = append(a.firstUseBuf, -1)
 					}
 				}
 				end = int32(len(a.liveInsBuf))
@@ -763,7 +802,7 @@ func (a *Allocator[I, B, F]) finalizeStartReg(f F, blk B) {
 		}
 		s.resetAt(predState)
 		if blk.LoopHeader() {
-			a.preloadLoopLiveIns(f, f.Pred(blk, currentBlkState.startFromPredIndex), currentBlkState)
+			a.preloadLoopLiveIns(f, f.Pred(blk, currentBlkState.startFromPredIndex), currentBlkState, a.depthOf(bID))
 		}
 	}
 
@@ -812,7 +851,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 		for _, use := range uses {
 			useState = s.getVRegState(use.ID())
 			if !use.IsRealReg() {
-				useState.lastUse = pc
+				useState.lastUse, useState.lastUseUpdatedAtBlockID = pc, bID
 			}
 		}
 
@@ -829,6 +868,10 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 		}
 		pc++
 	}
+	a.blockLen = int32(pc)
+	a.stamp++
+	a.nearestAfter(f, blk)
+	a.outStamp = a.stamp
 
 	// Mark all live-out values by checking live-in of the successors.
 	// While doing so, we also update the desired register values.
@@ -842,14 +885,16 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 
 		succID := succ.ID()
 		succState := a.getOrAllocateBlockState(succID)
+		// A value succ starts with lives out of this block, whether it came in or was defined here. So
+		// does a phi of succ this block neither receives nor reads: the copy feeding it defines it here.
 		for _, st := range a.liveIns(succState) {
-			if st.phiBlk() != succ {
-				st.lastUse = programCounterLiveOut
+			if st.phiBlk() != succ || st.lastUseUpdatedAtBlockID != bID {
+				st.lastUse, st.lastUseUpdatedAtBlockID = programCounterLiveOut, bID
 			}
 		}
 		for _, st := range a.loopLiveIns(succState) {
-			if st.phiBlk() != succ {
-				st.lastUse = programCounterLiveOut
+			if st.phiBlk() != succ || st.lastUseUpdatedAtBlockID != bID {
+				st.lastUse, st.lastUseUpdatedAtBlockID = programCounterLiveOut, bID
 			}
 		}
 
@@ -1423,20 +1468,34 @@ func (a *Allocator[I, B, F]) computeNextUses(bID int32) {
 }
 
 // preloadLoopLiveIns gives the values live into a loop header that are only on the stack when the
-// loop is entered the registers still free there, reloading them once on the entry edge. Left on the
-// stack, each iteration reloads them where it uses them and drops them again at the back edge, since
-// the back edge has to deliver the state the header starts with. A value the loop does not use soon is
-// what an eviction inside the loop picks first, so a preload costs at most the reload it adds.
-func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState[I, B, F]) {
+// loop is entered registers, reloading them once on the entry edge: a free one, or one holding a value
+// the loop does not use, which goes to the stack instead. Left on the stack, each iteration reloads them
+// where it uses them and drops them again at the back edge, since the back edge has to deliver the state
+// the header starts with; and a value the loop does not use, left in a register, is what the loop evicts
+// first and the back edge then reloads on every iteration. A value the loop does not use soon is what an
+// eviction inside the loop picks first, so a preload costs at most the reload it adds. depth is the
+// header's loop depth.
+func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState[I, B, F], depth uint8) {
 	s := &a.state
 	for _, vs := range a.liveIns(header) {
 		if vs.isPhi || vs.v.IsRealReg() || (vs.r != RealRegInvalid && s.regsInUse.get(vs.r) == vs) {
 			continue
 		}
-		if vs.useDepth < a.depthOf(s.currentBlockID) {
+		if vs.useDepth < depth {
 			continue // Nothing in the loop uses it.
 		}
-		r := s.findAllocatable(a.regInfo.AllocatableRegisters[vs.v.RegType()], 0)
+		regs := a.regInfo.AllocatableRegisters[vs.v.RegType()]
+		r := s.findAllocatable(regs, 0)
+		if r == RealRegInvalid {
+			for _, cand := range regs {
+				occ := s.regsInUse.get(cand)
+				if occ != nil && !occ.isPhi && !occ.v.IsRealReg() && occ.useDepth < depth {
+					s.releaseRealReg(cand)
+					r = cand
+					break
+				}
+			}
+		}
 		if r == RealRegInvalid {
 			continue
 		}
@@ -1444,7 +1503,29 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState
 		f.ReloadRegisterBefore(vs.v.SetRealReg(r), entry.LastInstrForInsertion())
 		s.useRealReg(r, vs)
 	}
+	// The loop needs registers for its own temporaries. Taking one from a value it does not use, which
+	// the header starts with, has the back edge reload that value on every iteration; leaving the value
+	// on the stack instead reloads it once, after the loop.
+	for typ := RegType(0); typ < NumRegType; typ++ {
+		regs := a.regInfo.AllocatableRegisters[typ]
+		free := 0
+		for _, r := range regs {
+			if !s.regsInUse.has(r) {
+				free++
+			}
+		}
+		for i := len(regs) - 1; i >= 0 && free < loopFreeRegs; i-- {
+			occ := s.regsInUse.get(regs[i])
+			if occ != nil && !occ.isPhi && !occ.v.IsRealReg() && occ.useDepth < depth {
+				s.releaseRealReg(regs[i])
+				free++
+			}
+		}
+	}
 }
+
+// loopFreeRegs is how many registers of each type preloadLoopLiveIns leaves a loop for temporaries.
+const loopFreeRegs = 2
 
 // moveAsideOccupant moves the value in r to a free register, ahead of instr taking r over for a value
 // that has to be there, such as a loop's carried value that its header expects in r. Dropping it
@@ -1466,13 +1547,11 @@ func (a *Allocator[I, B, F]) moveAsideOccupant(f F, instr I, r RealReg, pc progr
 	s.useRealReg(free, occ)
 }
 
-// evictionCost ranks vs as a value to evict; the highest goes first. A dead value costs nothing. One
-// used only after the block costs a reload somewhere later, and if no block at this loop depth uses
-// it, that reload is outside the loop rather than on every iteration. Otherwise, the later its next
-// use in the block, the cheaper.
-//
-// A value in a caller-saved register that a call comes before its next use costs nothing either: the
-// call takes the register from it anyway.
+// evictionCost ranks vs as a value to evict; the highest goes first, as the one whose next use is
+// farthest away. A dead value costs nothing, and so does one in a caller-saved register that a call
+// comes before its next use: the call takes the register from it anyway. Otherwise the cost is the
+// distance to the next use, in the block or, past its end, as computeNextUseDistances found it, and a
+// little more for a value already on the stack, which evicting does not add a spill for.
 func (a *Allocator[I, B, F]) evictionCost(vs *vrState[I, B, F], r RealReg) int64 {
 	s := &a.state
 	next := s.nextUseOf(vs)
@@ -1487,50 +1566,194 @@ func (a *Allocator[I, B, F]) evictionCost(vs *vrState[I, B, F], r RealReg) int64
 	case -1:
 		return 3 << 32
 	case programCounterLiveOut:
-		if vs.useDepth < a.depthOf(s.currentBlockID) {
-			return 2 << 32
+		if vs.distStamp == a.outStamp {
+			return int64(a.blockLen) - int64(a.curPC) + int64(vs.dist) + spilledBias(vs)
 		}
-		return 1 << 32
+		return noNextUse
 	default:
-		return int64(next)
+		return int64(next) - int64(a.curPC) + spilledBias(vs)
 	}
 }
 
-// computeLoopDepths fills loopDepth from the loop nesting forest: a loop header and the blocks of its
-// loop sit one level deeper than the loop around it.
-func (a *Allocator[I, B, F]) computeLoopDepths(f F) {
-	depths := a.loopDepth[:0]
+// spilledBias is what being on the stack already adds to a value's eviction cost, in instructions of
+// next-use distance.
+func spilledBias[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) int64 {
+	if vs.spilled {
+		return 8
+	}
+	return 0
+}
+
+// noNextUse is the distance to a next use there is none of, or that is too far to tell apart.
+const noNextUse = 1 << 30
+
+// loopExitDistance is what leaving a loop adds to a next-use distance, so that a value the loop uses
+// is always nearer than one used only after it, which is the one to evict.
+const loopExitDistance = 1 << 20
+
+// computeNextUseDistances gives every live-in of every block its distance, in instructions, from the
+// block's start to its next use: where the block uses it, or past the block's end, the nearest of
+// what its successors' distances are, plus loopExitDistance for each loop the edge leaves. It iterates
+// over the blocks until no distance shrinks, which takes one pass more than the loops are deep.
+func (a *Allocator[I, B, F]) computeNextUseDistances(f F) {
 	var nilBlk B
-	for blk := f.ReversePostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.ReversePostOrderBlockIteratorNext() {
-		if id := int(blk.ID()); id >= len(depths) {
-			depths = append(depths, make([]uint8, id+1-len(depths))...)
+	dist := a.distBuf[:0]
+	for blk := f.PostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.PostOrderBlockIteratorNext() {
+		info := a.getOrAllocateBlockState(blk.ID())
+		info.distBegin = int32(len(dist))
+		for i := info.liveInsBegin; i < info.liveInsEnd; i++ {
+			d := a.firstUseBuf[i]
+			if d < 0 {
+				d = noNextUse
+			}
+			dist = append(dist, d)
+		}
+		for i := info.loopLiveInsBegin; i < info.loopLiveInsEnd; i++ {
+			dist = append(dist, noNextUse)
 		}
 	}
-	clear(depths)
-	a.loopDepth = depths
+	a.distBuf = dist
+	for changed := true; changed; {
+		changed = false
+		for blk := f.PostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.PostOrderBlockIteratorNext() {
+			info := a.getOrAllocateBlockState(blk.ID())
+			a.stamp++
+			a.nearestAfter(f, blk)
+			// A loop live-in the block also has among its own live-ins is used where that one says.
+			for k, st := range a.liveIns(info) {
+				if d := a.firstUseBuf[info.liveInsBegin+int32(k)]; d >= 0 {
+					st.own, st.ownStamp = d, a.stamp
+				}
+			}
+			live, loop := a.liveIns(info), a.loopLiveIns(info)
+			for k := range len(live) + len(loop) {
+				var st *vrState[I, B, F]
+				if k < len(live) {
+					st = live[k]
+				} else {
+					st = loop[k-len(live)]
+				}
+				d := int32(noNextUse)
+				switch {
+				case st.ownStamp == a.stamp:
+					d = st.own
+				case st.distStamp == a.stamp:
+					d = min(info.instrCount+st.dist, noNextUse)
+				}
+				if i := info.distBegin + int32(k); d < a.distBuf[i] {
+					a.distBuf[i] = d
+					changed = true
+				}
+			}
+		}
+	}
+}
+
+// nearestAfter leaves, in each value live into a successor of blk, dist with its distance from blk's
+// end to its next use, valid while distStamp is a.stamp.
+func (a *Allocator[I, B, F]) nearestAfter(f F, blk B) {
+	var nilBlk B
+	depth := a.depthOf(blk.ID())
+	for i, ns := 0, blk.Succs(); i < ns; i++ {
+		succ := f.Succ(blk, i)
+		if succ == nilBlk {
+			continue
+		}
+		info := a.getOrAllocateBlockState(succ.ID())
+		var extra int32
+		if d := a.depthOf(succ.ID()); d < depth {
+			extra = int32(depth-d) * loopExitDistance
+		}
+		n := len(a.liveIns(info))
+		for k, st := range a.liveIns(info) {
+			a.offerDistance(st, a.distBuf[info.distBegin+int32(k)]+extra)
+		}
+		for k, st := range a.loopLiveIns(info) {
+			a.offerDistance(st, a.distBuf[info.distBegin+int32(n+k)]+extra)
+		}
+	}
+}
+
+func (a *Allocator[I, B, F]) offerDistance(st *vrState[I, B, F], d int32) {
+	d = min(d, noNextUse)
+	if st.distStamp != a.stamp || d < st.dist {
+		st.dist, st.distStamp = d, a.stamp
+	}
+}
+
+// computeLoopDepths fills loopDepth with how many loops each block is in. A loop is a header and the
+// blocks that reach one of its back edges without going through it: not every block the header
+// dominates, which is what the loop nesting forest takes, since code after a loop that only the loop
+// leads to is not in it. Eviction asks whether a value is used in the loop at hand, and a value used
+// only after an inner loop is not.
+func (a *Allocator[I, B, F]) computeLoopDepths(f F) {
+	var nilBlk B
+	n := 0
+	for blk := f.ReversePostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.ReversePostOrderBlockIteratorNext() {
+		n = max(n, int(blk.ID())+1)
+	}
+	depths := append(a.loopDepth[:0], make([]uint8, n)...)
+	// A block's parent in the forest is the nearest loop header that dominates it, so a header dominates
+	// a block exactly when it is among the block's forest ancestors.
+	parent := append(a.forestParent[:0], make([]int32, n)...)
+	inLoop := append(a.inLoop[:0], make([]int32, n)...)
+	for i := range parent {
+		parent[i] = -1
+	}
 	blks := a.blks[:0]
 	for i := 0; i < f.LoopNestingForestRoots(); i++ {
-		root := f.LoopNestingForestRoot(i)
-		if root.LoopHeader() {
-			depths[root.ID()] = 1
+		if root := f.LoopNestingForestRoot(i); root.LoopHeader() {
 			blks = append(blks, root)
 		}
 	}
 	for len(blks) > 0 {
 		header := blks[len(blks)-1]
 		blks = blks[:len(blks)-1]
-		d := depths[header.ID()]
 		for i := 0; i < header.LoopNestingForestChildren(); i++ {
-			child := f.LoopNestingForestChild(header, i)
-			if child.LoopHeader() && child != header {
-				depths[child.ID()] = min(d+1, 255)
-				blks = append(blks, child)
-			} else {
-				depths[child.ID()] = d
+			if child := f.LoopNestingForestChild(header, i); child != header {
+				parent[child.ID()] = header.ID()
+				if child.LoopHeader() {
+					blks = append(blks, child)
+				}
 			}
 		}
 	}
-	a.blks = blks
+	dominates := func(h, b int32) bool {
+		for ; b >= 0; b = parent[b] {
+			if b == h {
+				return true
+			}
+		}
+		return false
+	}
+	var loop int32
+	for blk := f.ReversePostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.ReversePostOrderBlockIteratorNext() {
+		if !blk.LoopHeader() {
+			continue
+		}
+		h := blk.ID()
+		loop++
+		inLoop[h] = loop
+		depths[h] = min(depths[h]+1, 255)
+		for i := 0; i < blk.Preds(); i++ {
+			if p := f.Pred(blk, i); p.ID() != h && dominates(h, p.ID()) {
+				blks = append(blks, p)
+			}
+		}
+		for len(blks) > 0 {
+			b := blks[len(blks)-1]
+			blks = blks[:len(blks)-1]
+			if inLoop[b.ID()] == loop {
+				continue
+			}
+			inLoop[b.ID()] = loop
+			depths[b.ID()] = min(depths[b.ID()]+1, 255)
+			for i := 0; i < b.Preds(); i++ {
+				blks = append(blks, f.Pred(b, i))
+			}
+		}
+	}
+	a.loopDepth, a.forestParent, a.inLoop, a.blks = depths, parent, inLoop, blks
 }
 
 // depthOf returns the loop depth of the block with the given ID, 0 for one computeLoopDepths did not see.

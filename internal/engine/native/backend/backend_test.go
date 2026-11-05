@@ -803,21 +803,20 @@ L0 (SSA Block: blk0):
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
 	ldr x8, [x21]
-	tbnz x8, #63, #0x20 (L3)
+	tbnz x8, #63, #0x1c (L3)
 L7 (SSA Block: blk7):
 L4 (SSA Block: blk4):
 	cbz w2, #0x8 L6
 L8 (SSA Block: blk8):
 	b #-0xc (L1)
 L6 (SSA Block: blk6):
-	mov x8, xzr
-	mov x0, x8
+	mov x0, xzr
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
 L3 (SSA Block: blk3):
 	yield x0
-	b #-0x2c (L4)
+	b #-0x28 (L4)
 `,
 		},
 		{
