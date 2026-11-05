@@ -73,6 +73,9 @@ type (
 		// so the second walk replays this instead of decoding Uses out of the encoding again.
 		useBuf  []VReg
 		useEnds []int32
+		// nextUseAfter is parallel to useBuf: for each use, the program counter of the same value's next
+		// use in the block, programCounterLiveOut if it has none but stays live, or -1 if it dies there.
+		nextUseAfter []programCounter
 		// spills collects the vrStates that recordReload marked spilled, so that scheduleSpills does not
 		// have to rescan every VRegID the function allocated to find the few percent that were.
 		spills []*vrState[I, B, F]
@@ -139,6 +142,10 @@ type (
 		// should not be used across the blocks as it becomes invalid. To check the validity, use lastUseUpdatedAtBlockID.
 		lastUse                 programCounter
 		lastUseUpdatedAtBlockID int32
+		// nextUse is the program counter of this value's next use in the block being allocated, valid
+		// while nextUseBlockID is that block's ID. See state.nextUseOf.
+		nextUse        programCounter
+		nextUseBlockID int32
 		// spilled is true if this value is spilled i.e. the value is reload from the stack somewhere in the program.
 		//
 		// Note that this field is used during liveness analysis for different purpose. This is used to determine the
@@ -228,6 +235,7 @@ func resetVrState[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) {
 	vs.spilled = false
 	vs.lastUse = -1
 	vs.lastUseUpdatedAtBlockID = -1
+	vs.nextUseBlockID = -1
 	vs.isPhi = false
 	vs.desiredLoc = desiredLocUnspecified
 	// The pointer fields are only set for VRegs the function actually defines, so on the states reused
@@ -306,13 +314,21 @@ func (a *Allocator[I, B, F]) recordReload(f F, vs *vrState[I, B, F], blk B) {
 }
 
 func (a *Allocator[I, B, F]) findOrSpillAllocatable(s *state[I, B, F], allocatable []RealReg, forbiddenMask RegSet, preferred RealReg) (r RealReg) {
-	r = RealRegInvalid
 	// First, check if the preferredMask has any allocatable register.
 	if preferred != RealRegInvalid && !forbiddenMask.has(preferred) && !s.regsInUse.has(preferred) {
 		return preferred
 	}
 
-	var lastUseAt programCounter
+	// Evicting a value costs a spill and a reload, so a free register always wins, even over an occupied
+	// preferred one.
+	if r = s.findAllocatable(allocatable, forbiddenMask); r != RealRegInvalid {
+		return r
+	}
+
+	// Evict the value needed furthest away: a dead one first, then one only live out of the block, then
+	// the one whose next use in it is latest. The preferred register only breaks a tie: evicting a value
+	// the block is about to use, to honor a preference, costs a reload a moment later.
+	var bestCost programCounter
 	var spillVReg VReg
 	for _, candidateReal := range allocatable {
 		if forbiddenMask.has(candidateReal) {
@@ -333,16 +349,14 @@ func (a *Allocator[I, B, F]) findOrSpillAllocatable(s *state[I, B, F], allocatab
 			continue
 		}
 
-		isPreferred := candidateReal == preferred
-
-		// last == -1 means the value won't be used anymore.
-		if last := using.lastUse; r == RealRegInvalid || isPreferred || last == -1 || (lastUseAt != -1 && last > lastUseAt) {
-			lastUseAt = last
+		cost := s.nextUseOf(using)
+		if cost == -1 {
+			cost = programCounterLiveOut // Dead: as good as it gets, ranked with values used only later.
+		}
+		if r == RealRegInvalid || cost > bestCost || (cost == bestCost && candidateReal == preferred) {
+			bestCost = cost
 			r = candidateReal
 			spillVReg = using.v
-			if isPreferred {
-				break
-			}
 		}
 	}
 
@@ -351,10 +365,22 @@ func (a *Allocator[I, B, F]) findOrSpillAllocatable(s *state[I, B, F], allocatab
 	}
 
 	if nativeapi.RegAllocLoggingEnabled {
-		fmt.Printf("\tspilling v%d when lastUseAt=%d and regsInUse=%s\n", spillVReg.ID(), lastUseAt, s.regsInUse.format(a.regInfo))
+		fmt.Printf("\tspilling v%d when nextUse=%d and regsInUse=%s\n", spillVReg.ID(), bestCost, s.regsInUse.format(a.regInfo))
 	}
 	s.releaseRealReg(r)
 	return r
+}
+
+// nextUseOf returns where vs is next used in the block being allocated: a program counter in it,
+// programCounterLiveOut when it is only used after the block, or -1 when it is not used again.
+func (s *state[I, B, F]) nextUseOf(vs *vrState[I, B, F]) programCounter {
+	if vs.nextUseBlockID == s.currentBlockID {
+		return vs.nextUse
+	}
+	if vs.lastUseUpdatedAtBlockID == s.currentBlockID && vs.lastUse == programCounterLiveOut {
+		return programCounterLiveOut
+	}
+	return -1
 }
 
 func (s *state[I, B, F]) findAllocatable(allocatable []RealReg, forbiddenMask RegSet) RealReg {
@@ -696,6 +722,9 @@ func (a *Allocator[I, B, F]) finalizeStartReg(f F, blk B) {
 				bID, f.Pred(blk, currentBlkState.startFromPredIndex).ID(), currentBlkState.startFromPredIndex)
 		}
 		s.resetAt(predState)
+		if blk.LoopHeader() {
+			a.preloadLoopLiveIns(f, f.Pred(blk, currentBlkState.startFromPredIndex), currentBlkState)
+		}
 	}
 
 	s.regsInUse.range_(func(allocated RealReg, v *vrState[I, B, F]) {
@@ -795,6 +824,8 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 		}
 	}
 
+	a.computeNextUses(bID)
+
 	// Propagate the desired register values from the end of the block to the beginning.
 	for _, instr := range a.copies {
 		defState := s.getVRegState(instr.dstID)
@@ -860,6 +891,12 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 					}
 					killSet = append(killSet, r)
 				}
+			}
+		}
+
+		for j, use := range uses {
+			if !use.IsRealReg() {
+				s.getVRegState(use.ID()).nextUse = a.nextUseAfter[useBegin-int32(len(uses))+int32(j)]
 			}
 		}
 
@@ -931,6 +968,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 								s.releaseRealReg(r)
 							}
 							r = desired
+							a.moveAsideOccupant(f, instr, desired, pc, currentUsedSet)
 							s.releaseRealReg(r)
 							s.useRealReg(r, vState)
 						}
@@ -1282,4 +1320,85 @@ func (a *Allocator[I, B, F]) Reset() {
 	a.blockStates.Reset()
 	a.phiDefInstListPool.Reset()
 	a.vs = a.vs[:0]
+}
+
+// computeNextUses fills nextUseAfter for the block being allocated, and leaves each value it uses
+// with nextUse at its first use there. It runs once the block's live-out values are marked, which is
+// what tells a last use in the block that dies from one that stays live.
+func (a *Allocator[I, B, F]) computeNextUses(bID int32) {
+	s := &a.state
+	next := a.nextUseAfter
+	if cap(next) < len(a.useBuf) {
+		next = make([]programCounter, len(a.useBuf))
+	} else {
+		next = next[:len(a.useBuf)]
+	}
+	a.nextUseAfter = next
+	for i := len(a.useEnds) - 1; i >= 0; i-- {
+		begin := int32(0)
+		if i > 0 {
+			begin = a.useEnds[i-1]
+		}
+		end := a.useEnds[i]
+		for k := begin; k < end; k++ {
+			if use := a.useBuf[k]; !use.IsRealReg() {
+				vs := s.getVRegState(use.ID())
+				switch {
+				case vs.nextUseBlockID == bID:
+					next[k] = vs.nextUse
+				case vs.lastUse == programCounterLiveOut:
+					next[k] = programCounterLiveOut
+				default:
+					next[k] = -1
+				}
+			}
+		}
+		for k := begin; k < end; k++ {
+			if use := a.useBuf[k]; !use.IsRealReg() {
+				vs := s.getVRegState(use.ID())
+				vs.nextUse, vs.nextUseBlockID = programCounter(i), bID
+			}
+		}
+	}
+}
+
+// preloadLoopLiveIns gives the values live into a loop header that are only on the stack when the
+// loop is entered the registers still free there, reloading them once on the entry edge. Left on the
+// stack, each iteration reloads them where it uses them and drops them again at the back edge, since
+// the back edge has to deliver the state the header starts with. A value the loop does not use soon is
+// what an eviction inside the loop picks first, so a preload costs at most the reload it adds.
+func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState[I, B, F]) {
+	s := &a.state
+	for _, vs := range a.liveIns(header) {
+		if vs.isPhi || vs.v.IsRealReg() || (vs.r != RealRegInvalid && s.regsInUse.get(vs.r) == vs) {
+			continue
+		}
+		r := s.findAllocatable(a.regInfo.AllocatableRegisters[vs.v.RegType()], 0)
+		if r == RealRegInvalid {
+			continue
+		}
+		a.recordReload(f, vs, entry)
+		f.ReloadRegisterBefore(vs.v.SetRealReg(r), entry.LastInstrForInsertion())
+		s.useRealReg(r, vs)
+	}
+}
+
+// moveAsideOccupant moves the value in r to a free register, ahead of instr taking r over for a value
+// that has to be there, such as a loop's carried value that its header expects in r. Dropping it
+// instead would spill it at its definition and reload it at its next use: two memory accesses where
+// one register move does, and on a back edge, on every iteration.
+func (a *Allocator[I, B, F]) moveAsideOccupant(f F, instr I, r RealReg, pc programCounter, inUse RegSet) {
+	s := &a.state
+	occ := s.regsInUse.get(r)
+	if occ == nil || occ.v.IsRealReg() || occ.lastUse == pc || s.nextUseOf(occ) == -1 {
+		return
+	}
+	typ := occ.v.RegType()
+	free := s.findAllocatable(a.regInfo.AllocatableRegisters[typ], inUse.add(r))
+	if free == RealRegInvalid {
+		return
+	}
+	f.InsertMoveBefore(FromRealReg(free, typ), occ.v.SetRealReg(r), instr)
+	s.releaseRealReg(r)
+	s.useRealReg(free, occ)
 }
