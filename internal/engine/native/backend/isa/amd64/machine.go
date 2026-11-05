@@ -555,6 +555,17 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 		return
 	}
 
+	if m.c.MatchInstr(cvalDef, ssa.OpcodeVanyTrue) {
+		m.insertAnyTrueTest(cvalDef.Instr.Arg())
+		cc := condNZ
+		if b.Opcode() == ssa.OpcodeBrz {
+			cc = condZ
+		}
+		m.insert(m.allocateInstr().asJmpIf(cc, newOperandLabel(target)))
+		cvalDef.Instr.MarkLowered()
+		return
+	}
+
 	switch m.c.MatchInstrOneOf(cvalDef, condBranchMatches[:]) {
 	case ssa.OpcodeIcmp:
 		cvalInstr := cvalDef.Instr
@@ -3672,15 +3683,11 @@ func (m *machine) lowerFcvtFromUint(rn, rd operand, src64, dst64 bool) {
 }
 
 func (m *machine) lowerVanyTrue(instr *ssa.Instruction) {
-	x := instr.Arg()
-	rm := m.getOperand_Reg(m.c.ValueDefinition(x))
 	rd := m.c.VRegOf(instr.Return())
 
 	tmp := m.c.AllocateVReg(ssa.TypeI32)
 
-	cmp := m.allocateInstr()
-	cmp.asXmmCmpRmR(sseOpcodePtest, rm, rm.reg())
-	m.insert(cmp)
+	m.insertAnyTrueTest(instr.Arg())
 
 	setcc := m.allocateInstr()
 	setcc.asSetcc(condNZ, tmp)
@@ -3692,6 +3699,25 @@ func (m *machine) lowerVanyTrue(instr *ssa.Instruction) {
 	m.insert(and)
 
 	m.copyTo(tmp, rd)
+}
+
+// insertAnyTrueTest sets ZF exactly when no bit of the vector x is set. ptest ANDs its operands, so
+// for x = a & b, used nowhere else, it tests a and b without computing x.
+func (m *machine) insertAnyTrueTest(x ssa.Value) {
+	def := m.c.ValueDefinition(x)
+	a, b := x, x
+	if m.c.MatchInstr(def, ssa.OpcodeVband) {
+		a, b = def.Instr.Arg2()
+		def.Instr.MarkLowered()
+	}
+	rm := m.getOperand_Reg(m.c.ValueDefinition(a))
+	rb := rm
+	if b != a {
+		rb = m.getOperand_Reg(m.c.ValueDefinition(b))
+	}
+	cmp := m.allocateInstr()
+	cmp.asXmmCmpRmR(sseOpcodePtest, rb, rm.reg())
+	m.insert(cmp)
 }
 
 func (m *machine) lowerVallTrue(instr *ssa.Instruction) {
