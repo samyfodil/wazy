@@ -34,6 +34,11 @@ func (m *machine) lowerVecMap(instr *ssa.Instruction) {
 	if prog.Ptrs > len(vecMapPtrRegs) || prog.Invs > ssa.VecMapRegs || prog.Ptrs+len(prog.Reduces)-1 > len(vecMapPtrRegs) {
 		panic("BUG: vector map program does not fit its registers")
 	}
+	for _, red := range prog.Reduces {
+		if red.Widen {
+			panic("BUG: a widening total is for arm64's uadalp only")
+		}
+	}
 	var mask uint64
 	for i := 0; i < prog.Ptrs; i++ {
 		r := vecMapPtrRegs[i]

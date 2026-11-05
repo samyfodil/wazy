@@ -2389,6 +2389,10 @@ func encodeAdvancedSIMDTwoMisc(op vecOp, rd, rn uint32, arr vecArrangement) uint
 		u = 0b0
 		opcode = 0b10010
 		size, q = arrToSizeQEncoded(arr)
+	case vecOpUadalp:
+		u = 0b1
+		opcode = 0b00110
+		size, q = arrToSizeQEncoded(arr)
 	case vecOpShll:
 		u = 0b1
 		opcode = 0b10011

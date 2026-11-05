@@ -1593,6 +1593,10 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "e11f084e", setup: func(i *instruction) {
 			i.asMovToVec(v1VReg, operandNR(xzrVReg), vecArrangementD, vecIndex(0))
 		}},
+		// uadalp v1.2d, v2.4s
+		{want: "4168a06e", setup: func(i *instruction) {
+			i.asVecMisc(vecOpUadalp, v1VReg, operandNR(v2VReg), vecArrangement4S)
+		}},
 		// xtn v1.2s, v2.2d
 		{want: "4128a10e", setup: func(i *instruction) {
 			i.asVecMisc(vecOpXtn, v1VReg, operandNR(v2VReg), vecArrangement2S)

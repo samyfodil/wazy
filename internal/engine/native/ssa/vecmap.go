@@ -22,14 +22,16 @@ type VecProgram struct {
 }
 
 // VecReduce is one total of a VecProgram: op Root's values folded with Op, an integer VecOpAdd, VecOpBand,
-// VecOpBor or VecOpBxor, which give the same bits in any order.
+// VecOpBor or VecOpBxor, which give the same bits in any order. A Widen total is an i64 sum of Root's
+// i32 lanes, each zero-extended.
 type VecReduce struct {
 	Op, Root uint8
+	Widen    bool
 }
 
 // ReduceType returns the type of total k.
 func (p *VecProgram) ReduceType(k int) Type {
-	if p.Ops[p.Reduces[k].Root].W == 4 {
+	if p.Ops[p.Reduces[k].Root].W == 4 && !p.Reduces[k].Widen {
 		return TypeI32
 	}
 	return TypeI64

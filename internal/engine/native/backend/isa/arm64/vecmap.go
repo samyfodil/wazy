@@ -285,6 +285,13 @@ func (m *machine) expandVecMap(vm *instruction) *instruction {
 		}
 		for k, red := range p.Reduces {
 			acc := vreg(uint8(p.Invs + k))
+			if red.Widen {
+				// uadalp: each pair of 32-bit lanes, zero-extended and added, onto a 64-bit lane.
+				i := m.allocateInstr()
+				i.asVecMisc(vecOpUadalp, acc, operandNR(vreg(regs[red.Root])), vecArrangement4S)
+				add(i)
+				continue
+			}
 			rrr(vecMapBinaryOp(red.Op, true), acc, acc, vreg(regs[red.Root]), vecMapBinaryArrangement(red.Op, vecArrangementOf(p.Ops[red.Root].W)))
 		}
 		for _, op := range p.Ops {
@@ -305,7 +312,11 @@ func (m *machine) expandVecMap(vm *instruction) *instruction {
 	ptrs := int(uint8(vm.u1 >> 40))
 	for k, red := range p.Reduces {
 		acc := vreg(uint8(p.Invs + k))
-		op, opArr := vecMapBinaryOp(red.Op, true), vecMapBinaryArrangement(red.Op, vecArrangementOf(p.Ops[red.Root].W))
+		w := p.Ops[red.Root].W
+		if red.Widen {
+			w = 8
+		}
+		op, opArr := vecMapBinaryOp(red.Op, true), vecMapBinaryArrangement(red.Op, vecArrangementOf(w))
 		fold := func(dupArr vecArrangement, index vecIndex) {
 			dup := m.allocateInstr()
 			dup.asVecDupElement(scratch, operandNR(acc), dupArr, index)
@@ -313,7 +324,7 @@ func (m *machine) expandVecMap(vm *instruction) *instruction {
 			rrr(op, acc, acc, scratch, opArr)
 		}
 		fold(vecArrangementD, 1)
-		if e == 4 {
+		if e == 4 && !red.Widen {
 			fold(vecArrangementS, 1)
 		}
 		resArr := vecArrangementS

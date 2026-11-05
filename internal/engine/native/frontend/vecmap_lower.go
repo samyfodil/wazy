@@ -637,7 +637,7 @@ func vecRoots(p *vecPlan) []uint8 {
 // its constant: an iota that differs from another by a constant is that one plus the constant.
 func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream, []vecAffine) {
 	streams := vecStreamsOf(p)
-	prog := &ssa.VecProgram{Elem: vecSSAType(p.elem), Spaced: p.spaced, Ptrs: len(streams), Store: -1}
+	prog := &ssa.VecProgram{Elem: vecSSAType(p.elem), Spaced: p.spaced && !p.narrow, Ptrs: len(streams), Store: -1}
 	if len(p.reduces) == 0 {
 		prog.Store = 0
 	}
@@ -669,7 +669,7 @@ func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream, []v
 		}
 		nd := p.nodes[n]
 		w := uint8(4)
-		if nd.typ == wasm.ValueTypeI64 || nd.typ == wasm.ValueTypeF64 {
+		if (nd.typ == wasm.ValueTypeI64 || nd.typ == wasm.ValueTypeF64) && !p.narrow {
 			w = 8
 		}
 		var op ssa.VecOp
@@ -697,6 +697,11 @@ func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream, []v
 			op = ssa.VecOp{Kind: ssa.VecOpAdd, A: iotaOps[k], B: addInv(vecInvSource{kind: vecInvConst, bits: uint64(konst)})}
 			op.B = push(ssa.VecOp{Kind: ssa.VecOpInv, Arg: op.B, W: 4})
 		case vecOpZext:
+			if p.narrow { // An i32 lane holds all of the value.
+				o := emit(nd.a)
+				opOf[n] = int(o)
+				return o
+			}
 			// An and with an invariant, zero-extended into its lane, already is.
 			if a := p.nodes[nd.a]; a.op == vecOpBand && (vecInvariant(p.nodes[a.a].op) || vecInvariant(p.nodes[a.b].op)) {
 				o := emit(nd.a)
@@ -714,6 +719,9 @@ func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream, []v
 				return emit(m)
 			}
 			op = ssa.VecOp{Kind: ssa.VecOpMulU, A: factor(nd.a), B: factor(nd.b)}
+			if p.narrow { // The product is below 2^32: the low halves' is all of it.
+				op.Kind = ssa.VecOpMul
+			}
 		case vecOpLoad:
 			if acc := p.loads[nd.arg]; p.stride(acc.addr) == 0 {
 				op = ssa.VecOp{Kind: ssa.VecOpInv, Arg: addInv(vecInvSource{kind: vecInvLoad, arg: nd.arg})}
@@ -762,8 +770,9 @@ func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream, []v
 	}
 	for _, r := range p.reduces {
 		prog.Reduces = append(prog.Reduces, ssa.VecReduce{
-			Op:   map[uint8]uint8{vecOpAdd: ssa.VecOpAdd, vecOpBand: ssa.VecOpBand, vecOpBor: ssa.VecOpBor, vecOpBxor: ssa.VecOpBxor}[r.op],
-			Root: emit(r.node),
+			Op:    map[uint8]uint8{vecOpAdd: ssa.VecOpAdd, vecOpBand: ssa.VecOpBand, vecOpBor: ssa.VecOpBor, vecOpBxor: ssa.VecOpBxor}[r.op],
+			Root:  emit(r.node),
+			Widen: p.narrow && p.nodes[r.node].typ == wasm.ValueTypeI64,
 		})
 	}
 	if len(p.reduces) == 0 {

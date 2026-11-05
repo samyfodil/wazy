@@ -1,6 +1,8 @@
 package frontend
 
 import (
+	"runtime"
+
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
@@ -147,7 +149,10 @@ type vecPlan struct {
 	elem     wasm.ValueType
 	elemSize uint32
 	spaced   bool
-	types    [4]bool
+	// narrow is set on a spaced loop whose i64 values all stay below 2^32 and fold into sums only: its
+	// elements are then computed in i32 lanes, four to a vector, the sums widening as they add up.
+	narrow bool
+	types  [4]bool
 
 	slotLocal [vecMaxLocals]wasm.Index
 	slotType  [vecMaxLocals]wasm.ValueType
@@ -871,6 +876,9 @@ func (pl *vecPlanner) finish() bool {
 				return false
 			}
 		}
+		if p.spaced && vecNarrowSums && pl.narrowable() {
+			p.narrow, p.elem, p.elemSize = true, wasm.ValueTypeI32, 4
+		}
 		return true
 	}
 	if len(p.stores) == 0 {
@@ -1083,6 +1091,101 @@ func (pl *vecPlanner) lanesOK() bool {
 		}
 	}
 	return true
+}
+
+// vecNarrowSums is whether a spaced loop may be computed in i32 lanes with widening sums: arm64 widens
+// four lanes onto an accumulator in one instruction, uadalp, which amd64 has no counterpart of.
+var vecNarrowSums = runtime.GOARCH == "arm64"
+
+// narrowable reports whether every i64 value an element computes is below 2^32, so its low half is all of
+// it, and is a zero-extension, an and, an or, an xor, a shift right, a sum or a product, which the low
+// halves give exactly then, and every i64 total is a sum.
+func (pl *vecPlanner) narrowable() bool {
+	p := &pl.p
+	const inf = ^uint64(0)
+	add := func(a, b uint64) uint64 {
+		if a > inf-b {
+			return inf
+		}
+		return a + b
+	}
+	mul := func(a, b uint64) uint64 {
+		if a != 0 && b > inf/a {
+			return inf
+		}
+		return a * b
+	}
+	mask := func(a uint64) uint64 { // the least all-ones value at or above a
+		m := uint64(0)
+		for m < a {
+			m = m<<1 | 1
+		}
+		return m
+	}
+	ub := make([]uint64, len(p.nodes))
+	for i, nd := range p.nodes {
+		top := uint64(1<<32 - 1)
+		if nd.typ == wasm.ValueTypeI64 {
+			top = inf
+		}
+		u := top
+		switch nd.op {
+		case vecOpConst:
+			u = nd.bits
+			if nd.typ == wasm.ValueTypeI32 {
+				u = uint64(uint32(u))
+			}
+		case vecOpZext:
+			u = ub[nd.a]
+		case vecOpBand:
+			u = min(ub[nd.a], ub[nd.b])
+		case vecOpBor, vecOpBxor:
+			u = mask(max(ub[nd.a], ub[nd.b]))
+		case vecOpShrU:
+			u = ub[nd.a] >> nd.arg
+		case vecOpMulU:
+			u = mul(ub[nd.a], ub[nd.b])
+		case vecOpAdd:
+			if nd.typ == wasm.ValueTypeI64 {
+				u = add(ub[nd.a], ub[nd.b])
+			}
+		}
+		ub[i] = min(u, top)
+	}
+	ok := true
+	seen := make([]bool, len(p.nodes))
+	var walk func(n uint8)
+	walk = func(n uint8) {
+		if seen[n] {
+			return
+		}
+		seen[n] = true
+		nd := p.nodes[n]
+		if nd.typ == wasm.ValueTypeI64 {
+			switch nd.op {
+			case vecOpZext, vecOpBand, vecOpBor, vecOpBxor, vecOpShrU, vecOpMulU, vecOpAdd, vecOpConst:
+			default:
+				ok = false
+			}
+			if ub[n] >= 1<<32 {
+				ok = false
+			}
+		}
+		switch {
+		case vecBinaryOp(nd.op):
+			walk(nd.a)
+			walk(nd.b)
+		case vecUnaryOp(nd.op):
+			walk(nd.a)
+		}
+	}
+	for _, r := range p.reduces {
+		if p.nodes[r.node].typ == wasm.ValueTypeI64 && r.op != vecOpAdd {
+			return false
+		}
+		walk(r.node)
+	}
+	return ok
 }
 
 // below32 reports whether the i64 node n is always below 2^32.

@@ -2327,6 +2327,8 @@ func (b vecOp) String() string {
 		return "smull2"
 	case vecOpUmull:
 		return "umull"
+	case vecOpUadalp:
+		return "uadalp"
 	}
 	panic(int(b))
 }
@@ -2404,6 +2406,7 @@ const (
 	vecOpSmull
 	vecOpSmull2
 	vecOpUmull
+	vecOpUadalp
 	// The rest of the "Advanced SIMD permute" family that zip1 belongs to.
 	vecOpZip2
 	vecOpUzp1
