@@ -66,7 +66,7 @@ func testVecMap(t *testing.T) {
 	frontend.VecPlanHook = nil
 	require.NoError(t, err)
 	if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
-		require.Equal(t, 21, vectorized, "every loop of the module but skip2's and pick's should be vectorized")
+		require.Equal(t, 24, vectorized, "every loop of the module but skip2's and pick's should be vectorized")
 	}
 	interp := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 	defer interp.Close(ctx)
@@ -190,6 +190,30 @@ func testVecMap(t *testing.T) {
 		{"umax runs off the end", call{"umax", []uint64{memSize - 400, 16384, 32768, 4000}}},
 		{"smaxle", call{"smaxle", []uint64{0, 16384, 32768, 4000}}},
 		{"pick", call{"pick", []uint64{0, 16384, 400}}},
+		// b[k] = 0 stores the pivot a[k] unchanged; anything below changes it.
+		{"floyd pivot outside", call{"floyd", []uint64{0, 16384, 20000, 4000, 16384, 0, 16384, 0}}},
+		{"floyd pivot before", call{"floyd", []uint64{4096, 16384, 4092, 4000, 16384, 0, 16384, 0}}},
+		{"floyd pivot unchanged", call{"floyd", []uint64{0, 16384, 1200, 4000, 16384 + 1200, 0, 16384 + 1200, 0}}},
+		{"floyd pivot first", call{"floyd", []uint64{0, 16384, 0, 4000, 16384, 0, 16384, 0}}},
+		{"floyd pivot last", call{"floyd", []uint64{0, 16384, 3996, 4000, 16384 + 3996, 0, 16384 + 3996, 0}}},
+		{"floyd pivot changed", call{"floyd", []uint64{0, 16384, 1200, 4000, 16384 + 1200, api.EncodeI32(-5), 16384 + 1200, api.EncodeI32(-5)}}},
+		{"floyd pivot changed last", call{"floyd", []uint64{0, 16384, 3996, 4000, 16384 + 3996, api.EncodeI32(-1), 16384 + 3996, api.EncodeI32(-1)}}},
+		{"floyd pivot overflows", call{"floyd", []uint64{0, 16384, 1200, 4000, 16384 + 1200, math.MaxInt32, 16384 + 1200, math.MaxInt32}}},
+		// The pivot straddles a[300] and a[301]: a[300] = MaxInt32 becomes the pivot itself, which
+		// compares equal to the new a[300] it would be were it a whole element, but changes it.
+		{"floyd pivot misaligned", call{"floyd", []uint64{0, 16384, 1202, 4000, 16384 + 1200, 0, 1200, math.MaxInt32}}},
+		{"floyd2 pivot outside", call{"floyd2", []uint64{0, 16384, 20000, 4000, 16384, 0, 16384, 0}}},
+		{"floyd2 pivot unchanged", call{"floyd2", []uint64{0, 16384, 1200, 4000, 16384 + 1200, 0, 16384 + 1200, 0}}},
+		{"floyd2 pivot unchanged odd", call{"floyd2", []uint64{0, 16384, 1204, 4000, 16384 + 1204, 0, 16384 + 1204, 0}}},
+		{"floyd2 pivot changed", call{"floyd2", []uint64{0, 16384, 1200, 4000, 16384 + 1200, api.EncodeI32(-5), 16384 + 1200, api.EncodeI32(-5)}}},
+		{"floyd2 pivot changed odd", call{"floyd2", []uint64{0, 16384, 1204, 4000, 16384 + 1204, api.EncodeI32(-5), 16384 + 1204, api.EncodeI32(-5)}}},
+		{"floyd2 pivot misaligned", call{"floyd2", []uint64{0, 16384, 1202, 4000, 16384 + 1200, 0, 1200, math.MaxInt32}}},
+		{"floyd2 pivot in b", call{"floyd2", []uint64{0, 16384, 16384 + 1200, 4000, 16384 + 1200, 0, 16384 + 1200, 0}}},
+		{"fscale pivot outside", call{"fscale", []uint64{0, 2000, f64(1.5), 8000}}},
+		{"fscale pivot one", call{"fscale", []uint64{0, 500, f64(1), 8000}}},
+		{"fscale pivot zero", call{"fscale", []uint64{0, 500, f64(0), 8000}}},
+		{"fscale pivot negative zero", call{"fscale", []uint64{0, 500, f64(math.Copysign(0, -1)), 8000}}},
+		{"fscale pivot two", call{"fscale", []uint64{0, 500, f64(2), 8000}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

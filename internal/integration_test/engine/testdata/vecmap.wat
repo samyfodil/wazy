@@ -271,5 +271,44 @@
                 (local.tee $p (i32.load (i32.add (local.get $x) (local.get $i))))
                 (i32.lt_s (local.get $p) (i32.const 100))))
       (br_if $l (i32.ne (local.tee $i (i32.add (local.get $i) (i32.const 4))) (local.get $n)))))
-)
+;; a[j] = min(a[j], *pa + b[j]), signed, after *s1 = v1 and *s2 = v2: Floyd-Warshall's relaxation with
+  ;; its pivot loaded every iteration, which may be in the row stored.
+  (func (export "floyd") (param $a i32) (param $b i32) (param $pa i32) (param $n i32)
+    (param $s1 i32) (param $v1 i32) (param $s2 i32) (param $v2 i32)
+    (local $j i32) (local $x i32) (local $s i32)
+    (i32.store (local.get $s1) (local.get $v1))
+    (i32.store (local.get $s2) (local.get $v2))
+    (loop $l
+      (i32.store (i32.add (local.get $a) (local.get $j))
+        (select (local.tee $x (i32.load (i32.add (local.get $a) (local.get $j))))
+                (local.tee $s (i32.add (i32.load (local.get $pa)) (i32.load (i32.add (local.get $b) (local.get $j)))))
+                (i32.gt_s (local.get $s) (local.get $x))))
+      (br_if $l (i32.ne (local.tee $j (i32.add (local.get $j) (i32.const 4))) (local.get $n)))))
 
+  ;; floyd unrolled twice, as polybench's is compiled.
+  (func (export "floyd2") (param $a i32) (param $b i32) (param $pa i32) (param $n i32)
+    (param $s1 i32) (param $v1 i32) (param $s2 i32) (param $v2 i32)
+    (local $j i32) (local $x i32) (local $s i32)
+    (i32.store (local.get $s1) (local.get $v1))
+    (i32.store (local.get $s2) (local.get $v2))
+    (loop $l
+      (i32.store (i32.add (local.get $a) (local.get $j))
+        (select (local.tee $x (i32.load (i32.add (local.get $a) (local.get $j))))
+                (local.tee $s (i32.add (i32.load (local.get $pa)) (i32.load (i32.add (local.get $b) (local.get $j)))))
+                (i32.gt_s (local.get $s) (local.get $x))))
+      (i32.store offset=4 (i32.add (local.get $a) (local.get $j))
+        (select (local.tee $x (i32.load offset=4 (i32.add (local.get $a) (local.get $j))))
+                (local.tee $s (i32.add (i32.load (local.get $pa)) (i32.load offset=4 (i32.add (local.get $b) (local.get $j)))))
+                (i32.gt_s (local.get $s) (local.get $x))))
+      (br_if $l (i32.ne (local.tee $j (i32.add (local.get $j) (i32.const 8))) (local.get $n)))))
+
+  ;; a[j] *= a[k], after a[k] = ak: the pivot is unchanged where it is stored only for 0 and 1.
+  (func (export "fscale") (param $a i32) (param $k i32) (param $ak f64) (param $n i32)
+    (local $j i32)
+    (f64.store (i32.add (local.get $a) (i32.shl (local.get $k) (i32.const 3))) (local.get $ak))
+    (loop $l
+      (f64.store (i32.add (local.get $a) (local.get $j))
+        (f64.mul (f64.load (i32.add (local.get $a) (local.get $j)))
+                 (f64.load (i32.add (local.get $a) (i32.shl (local.get $k) (i32.const 3))))))
+      (br_if $l (i32.ne (local.tee $j (i32.add (local.get $j) (i32.const 8))) (local.get $n)))))
+)

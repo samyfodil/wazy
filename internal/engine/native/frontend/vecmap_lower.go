@@ -3,6 +3,7 @@ package frontend
 import (
 	"math"
 	"math/bits"
+	"slices"
 
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -399,6 +400,7 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 	}
 
 	memBase := c.getMemoryBaseValue(0, false)
+
 	// The loads every iteration makes of one element: the ones the program takes as invariants are loaded
 	// once, after the checks a moving load gets, and every other one must read its partner's element, or
 	// be in bounds when nothing uses it.
@@ -412,6 +414,153 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 			invLo[i] = bin(ssa.OpcodeIadd, zext(aff(acc.addr)), i64(acc.offset))
 		}
 		return invLo[i]
+	}
+
+	// element computes, in scalar code, the value the loop stores at the element off bytes into its store
+	// stream, from memory as it is before the loop runs: the vector part reads it so too. A moving load
+	// reads the element as far into its own stream, which every copy of an unrolled body steps through
+	// one element at a time.
+	element := func(off ssa.Value) ssa.Value {
+		it := udiv(off, e)
+		memo := map[uint8]ssa.Value{}
+		load := func(at ssa.Value, t wasm.ValueType) ssa.Value {
+			return builder.AllocateInstruction().AsLoad(bin(ssa.OpcodeIadd, memBase, at), 0, vecSSAType(t)).Insert(builder).Return()
+		}
+		var scalar func(n uint8) ssa.Value
+		scalar = func(n uint8) ssa.Value {
+			if v, ok := memo[n]; ok {
+				return v
+			}
+			nd := p.nodes[n]
+			v := ssa.ValueInvalid
+			isFloat := nd.typ == wasm.ValueTypeF32 || nd.typ == wasm.ValueTypeF64
+			ins := builder.AllocateInstruction()
+			switch nd.op {
+			case vecOpConst:
+				switch nd.typ {
+				case wasm.ValueTypeI32:
+					ins.AsIconst32(uint32(nd.bits))
+				case wasm.ValueTypeI64:
+					ins.AsIconst64(nd.bits)
+				case wasm.ValueTypeF32:
+					ins.AsF32const(math.Float32frombits(uint32(nd.bits)))
+				default:
+					ins.AsF64const(math.Float64frombits(nd.bits))
+				}
+				v = ins.Insert(builder).Return()
+			case vecOpInv:
+				v = l0[nd.arg]
+			case vecOpInvAff:
+				v = aff(p.invAffs[nd.arg])
+			case vecOpIota:
+				it32 := builder.AllocateInstruction().AsIreduce(it, ssa.TypeI32).Insert(builder).Return()
+				v = bin(ssa.OpcodeIadd, aff(p.invAffs[nd.arg]), mulK(it32, uint64(p.stride(p.invAffs[nd.arg]))))
+			case vecOpLoad:
+				acc := p.loads[nd.arg]
+				if p.stride(acc.addr) == 0 {
+					v = load(invLoOf(int(nd.arg)), nd.typ)
+				} else {
+					v = load(bin(ssa.OpcodeIadd, walk(acc), off), nd.typ)
+				}
+			case vecOpZext:
+				v = zext(scalar(nd.a))
+			case vecOpShl, vecOpShrU, vecOpShrS:
+				x := scalar(nd.a)
+				amt := i32(uint32(nd.arg))
+				if x.Type() == ssa.TypeI64 {
+					amt = i64(uint64(nd.arg))
+				}
+				switch nd.op {
+				case vecOpShl:
+					ins.AsIshl(x, amt)
+				case vecOpShrU:
+					ins.AsUshr(x, amt)
+				default:
+					ins.AsSshr(x, amt)
+				}
+				v = ins.Insert(builder).Return()
+			case vecOpNeg:
+				v = ins.AsFneg(scalar(nd.a)).Insert(builder).Return()
+			case vecOpAbs:
+				v = ins.AsFabs(scalar(nd.a)).Insert(builder).Return()
+			case vecOpSqrt:
+				v = ins.AsSqrt(scalar(nd.a)).Insert(builder).Return()
+			case vecOpMinS, vecOpMinU, vecOpMaxS, vecOpMaxU:
+				x, y := scalar(nd.a), scalar(nd.b)
+				cond := map[uint8]ssa.IntegerCmpCond{
+					vecOpMinS: ssa.IntegerCmpCondSignedLessThan, vecOpMinU: ssa.IntegerCmpCondUnsignedLessThan,
+					vecOpMaxS: ssa.IntegerCmpCondSignedGreaterThan, vecOpMaxU: ssa.IntegerCmpCondUnsignedGreaterThan,
+				}[nd.op]
+				lt := builder.AllocateInstruction().AsIcmp(x, y, cond).Insert(builder).Return()
+				v = ins.AsSelect(lt, x, y).Insert(builder).Return()
+			default:
+				x, y := scalar(nd.a), scalar(nd.b)
+				switch {
+				case isFloat && nd.op == vecOpAdd:
+					ins.AsFadd(x, y)
+				case isFloat && nd.op == vecOpSub:
+					ins.AsFsub(x, y)
+				case isFloat && nd.op == vecOpMul:
+					ins.AsFmul(x, y)
+				case isFloat && nd.op == vecOpDiv:
+					ins.AsFdiv(x, y)
+				default:
+					v = bin(map[uint8]ssa.Opcode{
+						vecOpAdd: ssa.OpcodeIadd, vecOpSub: ssa.OpcodeIsub, vecOpMul: ssa.OpcodeImul, vecOpMulU: ssa.OpcodeImul,
+						vecOpBand: ssa.OpcodeBand, vecOpBor: ssa.OpcodeBor, vecOpBxor: ssa.OpcodeBxor,
+					}[nd.op], x, y)
+				}
+				if !v.Valid() {
+					v = ins.Insert(builder).Return()
+				}
+			}
+			memo[n] = v
+			return v
+		}
+		return scalar(p.stores[0].node)
+	}
+	// unchangedIfStored leaves unless an invariant element at lo, which the loop loads once though it
+	// would reload it every iteration, is outside the stored range or would be stored as it already is.
+	// Then the stores do not change it: Floyd-Warshall's pivot, in the row it relaxes, is one.
+	unchangedIfStored := func(lo ssa.Value) {
+		if store == nil {
+			return
+		}
+		if len(p.stores) != int(p.unroll) || p.spaced || p.unroll != 1 && slices.ContainsFunc(p.nodes, func(nd vecNode) bool { return nd.op == vecOpIota }) {
+			disjoint(lo, i64(e))
+			return
+		}
+		ok := builder.AllocateBasicBlock()
+		before := builder.AllocateInstruction().AsIcmp(bin(ssa.OpcodeIadd, lo, i64(e)), store.base, ssa.IntegerCmpCondUnsignedLessThanOrEqual).Insert(builder).Return()
+		builder.AllocateInstruction().AsBrnz(before, ssa.ValuesNil, ok).Insert(builder)
+		next := builder.AllocateBasicBlock()
+		c.insertJumpToBlock(ssa.ValuesNil, next)
+		builder.SetCurrentBlock(next)
+		builder.Seal(next)
+		after := builder.AllocateInstruction().AsIcmp(lo, storeEnd, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).Insert(builder).Return()
+		builder.AllocateInstruction().AsBrnz(after, ssa.ValuesNil, ok).Insert(builder)
+		inside := builder.AllocateBasicBlock()
+		c.insertJumpToBlock(ssa.ValuesNil, inside)
+		builder.SetCurrentBlock(inside)
+		builder.Seal(inside)
+		// Inside the range it has to be a whole element, which the loop stores...
+		off := bin(ssa.OpcodeIsub, lo, store.base)
+		skipIf(urem(off, e), i64(0), ssa.IntegerCmpCondNotEqual)
+		// ... as it is: compared bit for bit.
+		now := builder.AllocateInstruction().AsLoad(bin(ssa.OpcodeIadd, memBase, lo), 0, vecSSAType(p.elem)).Insert(builder).Return()
+		stored := element(off)
+		if p.elem == wasm.ValueTypeF32 || p.elem == wasm.ValueTypeF64 {
+			it := ssa.TypeI32
+			if e == 8 {
+				it = ssa.TypeI64
+			}
+			now = builder.AllocateInstruction().AsBitcast(now, it).Insert(builder).Return()
+			stored = builder.AllocateInstruction().AsBitcast(stored, it).Insert(builder).Return()
+		}
+		skipIf(stored, now, ssa.IntegerCmpCondNotEqual)
+		c.insertJumpToBlock(ssa.ValuesNil, ok)
+		builder.SetCurrentBlock(ok)
+		builder.Seal(ok)
 	}
 	// toVec turns an invariant into the float type that carries it in a vector register: an i32 into an
 	// i64 lane zero-extended, as a Spaced program wants it.
@@ -438,8 +587,8 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 			invs[k] = i32(p.stride(iotas[src.arg]))
 		case vecInvLoad:
 			lo := invLoOf(int(src.arg))
-			disjoint(lo, i64(e))
 			inBounds(lo, i64(e))
+			unchangedIfStored(lo)
 			invs[k] = builder.AllocateInstruction().AsLoad(bin(ssa.OpcodeIadd, memBase, lo), 0, vtyp).Insert(builder).Return()
 		case vecInvLocal:
 			invs[k] = l0[src.arg]
