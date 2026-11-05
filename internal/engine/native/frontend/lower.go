@@ -263,6 +263,9 @@ func (c *Compiler) state() *loweringState {
 
 func (c *Compiler) lowerCurrentOpcode() {
 	op := c.wasmFunctionBody[c.loweringState.pc]
+	if !keepsMemory(op) {
+		c.lastStore = storedValue{}
+	}
 
 	if c.needSourceOffsetInfo {
 		c.ssaBuilder.SetCurrentSourceOffset(
@@ -1337,6 +1340,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 		builder.AllocateInstruction().
 			AsStore(opcode, value, addr, disp).
 			Insert(builder)
+		if opcode == ssa.OpcodeStore && !c.memoryShared[memIndex] {
+			c.lastStore = storedValue{blk: builder.CurrentBlock(), base: baseAddr, offset: offset, mem: memIndex, size: opSize, value: value}
+		}
 
 	case wasm.OpcodeI32Load,
 		wasm.OpcodeI64Load,
@@ -1378,6 +1384,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		baseAddr := state.pop()
+		if v, ok := c.lastStore.forward(builder.CurrentBlock(), baseAddr, offset, memIndex, op); ok {
+			state.push(v)
+			break
+		}
 		addr := c.memOpSetup(memIndex, baseAddr, offset, opSize)
 		load := builder.AllocateInstruction()
 		switch op {

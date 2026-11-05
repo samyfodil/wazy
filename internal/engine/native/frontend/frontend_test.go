@@ -1269,8 +1269,7 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	v9:i64 = Load v1, 0x8
 	v10:i64 = Iadd v9, v5
 	Store v3, v10, 0x0
-	v11:i32 = Load v10, 0x0
-	Jump blk_ret, v11
+	Jump blk_ret, v3
 `,
 		},
 		{
