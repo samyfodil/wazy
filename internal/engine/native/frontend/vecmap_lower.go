@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"math"
+	"math/bits"
 
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 	"github.com/samyfodil/wazy/internal/wasm"
@@ -12,8 +13,8 @@ import (
 const vecChunk = 4096
 
 // vecGroup is the multiple of elements the vector part always does, so that every vector width a
-// backend picks, up to eight lanes, divides it.
-const vecGroup = 8
+// backend picks, up to eight lanes, unrolled twice, divides it.
+const vecGroup = 16
 
 // vecMaxPtrs and vecMaxRegs bound a program by the registers its expansion has: pointers live in
 // general registers beside the element count, invariants and temporaries in vector registers.
@@ -90,6 +91,23 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 		}
 		return instr.Insert(builder).Return()
 	}
+	// udiv and urem divide by a constant: a shift or a mask for the powers of two counts and strides
+	// usually are, rather than a divide instruction with its zero check.
+	udiv := func(x ssa.Value, k uint64) ssa.Value {
+		if k&(k-1) == 0 {
+			sh := builder.AllocateInstruction().AsIconst64(uint64(bits.TrailingZeros64(k))).Insert(builder).Return()
+			return builder.AllocateInstruction().AsUshr(x, sh).Insert(builder).Return()
+		}
+		return bin(ssa.OpcodeUdiv, x, i64(k))
+	}
+	urem := func(x ssa.Value, k uint64) ssa.Value {
+		if k&(k-1) == 0 {
+			band := builder.AllocateInstruction()
+			band.AsBand(x, i64(k-1))
+			return band.Insert(builder).Return()
+		}
+		return bin(ssa.OpcodeUrem, x, i64(k))
+	}
 	skip, join := builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
 	// skipIf leaves for the scalar loop when cond holds.
 	skipIf := func(x, y ssa.Value, cond ssa.IntegerCmpCond) {
@@ -114,8 +132,8 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 		if int32(dA) < 0 {
 			diff, step = zext(bin(ssa.OpcodeIsub, a0, b0)), uint64(-dA)
 		}
-		skipIf(bin(ssa.OpcodeUrem, diff, i64(step)), i64(0), ssa.IntegerCmpCondNotEqual)
-		n = bin(ssa.OpcodeIadd, bin(ssa.OpcodeUdiv, diff, i64(step)), i64(1))
+		skipIf(urem(diff, step), i64(0), ssa.IntegerCmpCondNotEqual)
+		n = bin(ssa.OpcodeIadd, udiv(diff, step), i64(1))
 	default: // lt_s, lt_u: A(t) >= B ends it.
 		signed := p.condOp == wasm.OpcodeI32LtS
 		ext, maxV, ge := zext, uint64(1<<32-1), ssa.IntegerCmpCondUnsignedGreaterThanOrEqual
@@ -126,14 +144,14 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 		skipIf(a, b, ge) // It ends after one iteration: nothing to vectorize.
 		// No step may carry A past the largest value before it reaches B.
 		skipIf(bin(ssa.OpcodeIadd, b, i64(uint64(dA)-1)), i64(maxV), ssa.IntegerCmpCondSignedGreaterThan)
-		t := bin(ssa.OpcodeUdiv, bin(ssa.OpcodeIadd, bin(ssa.OpcodeIsub, b, a), i64(uint64(dA)-1)), i64(uint64(dA)))
+		t := udiv(bin(ssa.OpcodeIadd, bin(ssa.OpcodeIsub, b, a), i64(uint64(dA)-1)), uint64(dA))
 		n = bin(ssa.OpcodeIadd, t, i64(1))
 	}
 
 	// m source iterations go to the vector part: all but at least one, in whole groups of elements.
 	u := uint64(p.unroll)
 	q := uint64(vecGroup) / gcd(u, vecGroup)
-	m := bin(ssa.OpcodeImul, bin(ssa.OpcodeUdiv, bin(ssa.OpcodeIsub, n, i64(1)), i64(q)), i64(q))
+	m := bin(ssa.OpcodeImul, udiv(bin(ssa.OpcodeIsub, n, i64(1)), q), i64(q))
 	skipIf(m, i64(0), ssa.IntegerCmpCondEqual)
 	e := uint64(p.elemSize)
 	elems := bin(ssa.OpcodeImul, m, i64(u))

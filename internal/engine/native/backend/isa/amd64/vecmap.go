@@ -80,15 +80,10 @@ func (i *instruction) encodeVecMap(c backend.Compiler) {
 	if !ok {
 		panic("BUG: vector map program does not fit its registers")
 	}
-	e := 4
-	if p.F64 {
-		e = 8
-	}
 	width := 16
 	if avx {
 		width = 32
 	}
-	lanes := width / e
 	// pd forms carry the 66 prefix (pp=1), ps forms none.
 	pp := byte(0)
 	if p.F64 {
@@ -126,56 +121,70 @@ func (i *instruction) encodeVecMap(c backend.Compiler) {
 		}
 	}
 
+	// rcx counts elements; turn it into a byte index running from -bytes up to zero, with every pointer
+	// at its stream's end, so the loop addresses [ptr + rcx] and only rcx moves.
+	shift := byte(2)
+	if p.F64 {
+		shift = 3
+	}
+	// shl rcx, shift: REX.W C1 /4 ib
+	c.EmitByte(0x48)
+	c.EmitByte(0xc1)
+	c.EmitByte(0xe1)
+	c.EmitByte(shift)
+	for k := 0; k < p.Ptrs; k++ {
+		// add ptr, rcx: REX.W 01 /r, rcx in ModRM.reg
+		enc := regEncodings[vecMapPtrRegs[k]]
+		rex := byte(0x48)
+		if enc.rexBit() > 0 {
+			rex |= 1
+		}
+		c.EmitByte(rex)
+		c.EmitByte(0x01)
+		c.EmitByte(0xc0 | 1<<3 | enc.encoding())
+	}
+	// neg rcx: REX.W F7 /3
+	c.EmitByte(0x48)
+	c.EmitByte(0xf7)
+	c.EmitByte(0xd9)
+
 	loopStart := len(*c.BufPtr())
-	for idx, op := range p.Ops {
-		r := regs[idx]
-		switch op.Kind {
-		case ssa.VecOpInv:
-		case ssa.VecOpLoad:
-			base := vecMapPtrRegs[op.Arg]
-			// movupd/movups r, [base]: (66) 0F 10 /r
-			if avx {
-				vexMem(c, r, base, pp, 0x10)
-			} else {
-				legacyMem(c, r, base, pp, 0x10)
-			}
-		case ssa.VecOpAdd, ssa.VecOpSub, ssa.VecOpMul, ssa.VecOpDiv:
-			opc := map[uint8]byte{ssa.VecOpAdd: 0x58, ssa.VecOpSub: 0x5c, ssa.VecOpMul: 0x59, ssa.VecOpDiv: 0x5e}[op.Kind]
-			vecBinary(c, avx, pp, opc, r, regs[op.A], regs[op.B])
-		case ssa.VecOpXor, ssa.VecOpAnd:
-			opc := byte(0x57)
-			if op.Kind == ssa.VecOpAnd {
-				opc = 0x54
-			}
-			vecBinary(c, avx, pp, opc, r, regs[op.A], op.Arg)
-		case ssa.VecOpSqrt:
-			// sqrtpd/sqrtps r, a: (66) 0F 51 /r
-			if avx {
-				vex(c, r, regs[op.A], 0, 1, true, pp, 0x51)
-			} else {
-				legacyRegReg(c, r, regs[op.A], pp, 0x51)
+	// Two vectors' worth per iteration, the second width bytes further on.
+	for copyN := 0; copyN < 2; copyN++ {
+		disp := byte(copyN * width)
+		for idx, op := range p.Ops {
+			r := regs[idx]
+			switch op.Kind {
+			case ssa.VecOpInv:
+			case ssa.VecOpLoad:
+				// movupd/movups r, [base + rcx + disp]: (66) 0F 10 /r
+				vecMem(c, avx, r, vecMapPtrRegs[op.Arg], disp, pp, 0x10)
+			case ssa.VecOpAdd, ssa.VecOpSub, ssa.VecOpMul, ssa.VecOpDiv:
+				opc := map[uint8]byte{ssa.VecOpAdd: 0x58, ssa.VecOpSub: 0x5c, ssa.VecOpMul: 0x59, ssa.VecOpDiv: 0x5e}[op.Kind]
+				vecBinary(c, avx, pp, opc, r, regs[op.A], regs[op.B])
+			case ssa.VecOpXor, ssa.VecOpAnd:
+				opc := byte(0x57)
+				if op.Kind == ssa.VecOpAnd {
+					opc = 0x54
+				}
+				vecBinary(c, avx, pp, opc, r, regs[op.A], op.Arg)
+			case ssa.VecOpSqrt:
+				// sqrtpd/sqrtps r, a: (66) 0F 51 /r
+				if avx {
+					vex(c, r, regs[op.A], 0, 1, true, pp, 0x51)
+				} else {
+					legacyRegReg(c, r, regs[op.A], pp, 0x51)
+				}
 			}
 		}
+		// movupd/movups [store + rcx + disp], value: (66) 0F 11 /r
+		vecMem(c, avx, regs[len(p.Ops)-1], vecMapPtrRegs[p.Store], disp, pp, 0x11)
 	}
-	// movupd/movups [store], value: (66) 0F 11 /r
-	value := regs[len(p.Ops)-1]
-	if avx {
-		vexMem(c, value, vecMapPtrRegs[p.Store], pp, 0x11)
-	} else {
-		legacyMem(c, value, vecMapPtrRegs[p.Store], pp, 0x11)
-	}
-	for k := 0; k < p.Ptrs; k++ {
-		// add reg, width: REX.W 83 /0 ib
-		emitRexW(c, vecMapPtrRegs[k])
-		c.EmitByte(0x83)
-		c.EmitByte(0xc0 | regEncodings[vecMapPtrRegs[k]].encoding())
-		c.EmitByte(byte(width))
-	}
-	// sub rcx, lanes: REX.W 83 /5 ib
+	// add rcx, 2*width: REX.W 83 /0 ib
 	c.EmitByte(0x48)
 	c.EmitByte(0x83)
-	c.EmitByte(0xe9)
-	c.EmitByte(byte(lanes))
+	c.EmitByte(0xc1)
+	c.EmitByte(byte(2 * width))
 	// jnz loopStart
 	rel := loopStart - (len(*c.BufPtr()) + 2)
 	if rel >= -128 {
@@ -196,14 +205,6 @@ func (i *instruction) encodeVecMap(c backend.Compiler) {
 }
 
 func modRMRegReg(reg, rm byte) byte { return 0xc0 | (reg&7)<<3 | rm&7 }
-
-func emitRexW(c backend.Compiler, r regalloc.RealReg) {
-	rex := byte(0x48)
-	if regEncodings[r].rexBit() > 0 {
-		rex |= 1
-	}
-	c.EmitByte(rex)
-}
 
 // vex emits a three-byte VEX prefix, the opcode and a register-register ModRM: dst in ModRM.reg, src in
 // ModRM.rm, src1 in VEX.vvvv (0 when the instruction has no such operand, which encodes as 1111). m is the
@@ -227,42 +228,48 @@ func vex(c backend.Compiler, dst, src, src1 byte, m byte, l256 bool, pp byte, op
 	c.EmitByte(modRMRegReg(dst, src))
 }
 
-// vexMem emits VEX.256.pp.0F opcode with ModRM addressing [base], vvvv unused.
-func vexMem(c backend.Compiler, reg byte, base regalloc.RealReg, pp byte, opcode byte) {
+// vecMem emits a 128- or 256-bit move between register reg and memory at [base + rcx + disp]: VEX.256 on
+// AVX, legacy SSE otherwise, (66) 0F opcode either way.
+func vecMem(c backend.Compiler, avx bool, reg byte, base regalloc.RealReg, disp byte, pp byte, opcode byte) {
 	enc := regEncodings[base]
-	b1 := byte(0xe0) | 1
-	if reg&8 != 0 {
-		b1 &^= 0x80
-	}
-	if enc.rexBit() > 0 {
-		b1 &^= 0x20
-	}
-	b2 := byte(0xf<<3) | 4 | pp // vvvv = 1111: unused; L = 256
-	c.EmitByte(0xc4)
-	c.EmitByte(b1)
-	c.EmitByte(b2)
-	c.EmitByte(opcode)
-	c.EmitByte((reg&7)<<3 | enc.encoding())
-}
-
-// legacyMem emits (66) 0F opcode with ModRM addressing [base].
-func legacyMem(c backend.Compiler, reg byte, base regalloc.RealReg, pp byte, opcode byte) {
-	enc := regEncodings[base]
-	if pp == 1 {
-		c.EmitByte(0x66)
-	}
-	if rex := byte(0x40); reg&8 != 0 || enc.rexBit() > 0 {
+	if avx {
+		b1 := byte(0xe0) | 1 // R̄, X̄, B̄ set, map 0F
 		if reg&8 != 0 {
-			rex |= 4
+			b1 &^= 0x80
 		}
 		if enc.rexBit() > 0 {
-			rex |= 1
+			b1 &^= 0x20
 		}
-		c.EmitByte(rex)
+		c.EmitByte(0xc4)
+		c.EmitByte(b1)
+		c.EmitByte(byte(0xf<<3) | 4 | pp) // vvvv unused, L = 256
+	} else {
+		if pp == 1 {
+			c.EmitByte(0x66)
+		}
+		if enc.rexBit() > 0 || reg&8 != 0 {
+			rex := byte(0x40)
+			if reg&8 != 0 {
+				rex |= 4
+			}
+			if enc.rexBit() > 0 {
+				rex |= 1
+			}
+			c.EmitByte(rex)
+		}
+		c.EmitByte(0x0f)
 	}
-	c.EmitByte(0x0f)
 	c.EmitByte(opcode)
-	c.EmitByte((reg&7)<<3 | enc.encoding())
+	// ModRM: mod = 00 or 01 (disp8), rm = 100 (SIB); SIB: scale 1, index rcx, base.
+	mod := byte(0)
+	if disp != 0 {
+		mod = 1
+	}
+	c.EmitByte(mod<<6 | (reg&7)<<3 | 4)
+	c.EmitByte(1<<3 | enc.encoding())
+	if disp != 0 {
+		c.EmitByte(disp)
+	}
 }
 
 // legacyRegReg emits (66) 0F opcode with a register-register ModRM; the registers are below xmm8.
