@@ -607,8 +607,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		x, y, lane := instr.Arg2WithLane()
 		arr := ssaLaneToArrangement(lane)
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
-		rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 		rd := m.compiler.VRegOf(instr.Return())
+		if def := m.compiler.ValueDefinition(y); def.IsFromInstr() && def.Instr.Constant() {
+			m.lowerVShiftImm(op, rd, rn, def.Instr.ConstantVal(), arr)
+			break
+		}
+		rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 		m.lowerVShift(op, rd, rn, rm, arr)
 	case ssa.OpcodeVSqrt:
 		m.lowerVecMisc(vecOpFsqrt, instr)
@@ -899,6 +903,41 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 }
 
 func (m *machine) lowerShuffle(rd regalloc.VReg, rn, rm operand, lane1, lane2 uint64) {
+	var lanes [16]byte
+	for i := 0; i < 8; i++ {
+		lanes[i], lanes[8+i] = byte(lane1>>(i*8)), byte(lane2>>(i*8))
+	}
+	// Sixteen bytes in a row of rn followed by rm, a window sliding over the two, is one ext.
+	window := true
+	for i, l := range lanes {
+		window = window && l == lanes[0]+byte(i)
+	}
+	if window && lanes[0] > 0 && lanes[0] < 16 {
+		ext := m.allocateInstr()
+		ext.asVecExtract(rd, rn, rm, vecArrangement16B, uint32(lanes[0]))
+		m.insert(ext)
+		return
+	}
+	// Every lane from one of the two is a tbl of that one alone.
+	fromRn, fromRm := true, true
+	for _, l := range lanes {
+		fromRn, fromRm = fromRn && l < 16, fromRm && l >= 16
+	}
+	if fromRn || fromRm {
+		src := rn
+		if fromRm {
+			src = rm
+			lane1 -= 0x1010101010101010
+			lane2 -= 0x1010101010101010
+		}
+		tmp := operandNR(m.compiler.AllocateVReg(ssa.TypeV128))
+		m.lowerFpuConst128(tmp.nr(), lane1, lane2)
+		tbl1 := m.allocateInstr()
+		tbl1.asVecTbl(1, rd, src, tmp, vecArrangement16B)
+		m.insert(tbl1)
+		return
+	}
+
 	// `tbl2` requires 2 consecutive registers, so we arbitrarily pick v29, v30.
 	vReg, wReg := v29VReg, v30VReg
 
@@ -923,6 +962,35 @@ func (m *machine) lowerShuffle(rd regalloc.VReg, rn, rm operand, lane1, lane2 ui
 	tbl2 := m.allocateInstr()
 	tbl2.asVecTbl(2, rd, operandNR(vReg), tmp, vecArrangement16B)
 	m.insert(tbl2)
+}
+
+// lowerVShiftImm shifts by a constant amount, an immediate: shl, ushr or sshr, or a copy for a shift by
+// zero once taken modulo the lane width.
+func (m *machine) lowerVShiftImm(op ssa.Opcode, rd regalloc.VReg, rn operand, amount uint64, arr vecArrangement) {
+	var bits uint64
+	switch arr {
+	case vecArrangement16B:
+		bits = 8
+	case vecArrangement8H:
+		bits = 16
+	case vecArrangement4S:
+		bits = 32
+	default:
+		bits = 64
+	}
+	k := byte(amount & (bits - 1))
+	i := m.allocateInstr()
+	switch {
+	case k == 0:
+		i.asVecRRR(vecOpOrr, rd, rn, rn, vecArrangement16B)
+	case op == ssa.OpcodeVIshl:
+		i.asVecShiftImm(vecOpShl, rd, rn, operandShiftImm(k), arr)
+	case op == ssa.OpcodeVSshr:
+		i.asVecShiftImm(vecOpSshr, rd, rn, operandShiftImm(k), arr)
+	default:
+		i.asVecShiftImm(vecOpUshr, rd, rn, operandShiftImm(k), arr)
+	}
+	m.insert(i)
 }
 
 func (m *machine) lowerVShift(op ssa.Opcode, rd regalloc.VReg, rn, rm operand, arr vecArrangement) {

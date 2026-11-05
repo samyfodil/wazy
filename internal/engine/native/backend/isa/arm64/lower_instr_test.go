@@ -740,29 +740,25 @@ func TestMachine_lowerShuffle(t *testing.T) {
 			name:  "lanes 0..15",
 			lanes: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
 			expectedAsm: `
-mov v29.16b, x2.16b
-mov v30.16b, x15.16b
 ldr q1?, L0 ;; pooled const 0706050403020100 0f0e0d0c0b0a0908
-tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
+tbl x1.16b, { x2.16b }, v1?.16b
 `,
 			// The high-entropy shuffle mask is loaded from the literal pool via a
 			// single ldr-literal (no branch-over-literal); the 16 mask bytes sit
 			// in the pool appended after the body (C8 part 2b).
-			expectedBytes: "5d1ca24efe1daf4e4000009ca123004e000102030405060708090a0b0c0d0e0f",
+			expectedBytes: "4000009c4100004e000102030405060708090a0b0c0d0e0f",
 		},
 		{
 			name:  "lanes 0101...",
 			lanes: []uint64{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1},
 			expectedAsm: `
-mov v29.16b, x2.16b
-mov v30.16b, x15.16b
 orr x2?, xzr, #0x100010001000100
 fmov d1?, x2?
 orr x3?, xzr, #0x100010001000100
 ins v1?.d[1], x3?
-tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
+tbl x1.16b, { x2.16b }, v1?.16b
 `,
-			expectedBytes: "5d1ca24efe1daf4ee08308b20000679ee08308b2001c184ea123004e",
+			expectedBytes: "e08308b20000679ee08308b2001c184e4100004e",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
