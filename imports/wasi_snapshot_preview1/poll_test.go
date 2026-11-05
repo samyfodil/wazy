@@ -248,12 +248,12 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 `,
 		},
 		{
-			name:            "20ms timeout, fdread on tty (buffer ready): only the fd event, the clock has not expired",
+			name:            "1m timeout, fdread on tty (buffer ready): only the fd event, the clock has not expired",
 			nsubscriptions:  2,
 			expectedNevents: 1,
 			stdin:           &ttyStdinFile{StdinFile: sys.StdinFile{Reader: strings.NewReader("test")}},
 			mem: concat(
-				clockNsSub(20*1000*1000),
+				clockNsSub(60*1000*1000*1000), // a minute: a short clock could expire on a loaded machine
 				fdReadSub,
 			),
 			expectedErrno: wasip1.ErrnoSuccess,
@@ -349,12 +349,12 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 `,
 		},
 		{
-			name:            "20ms timeout, fdread on regular file: only the fd event, the clock has not expired",
+			name:            "1m timeout, fdread on regular file: only the fd event, the clock has not expired",
 			nsubscriptions:  2,
 			expectedNevents: 1,
 			stdin:           &sys.StdinFile{Reader: strings.NewReader("test")},
 			mem: concat(
-				clockNsSub(20*1000*1000),
+				clockNsSub(60*1000*1000*1000), // a minute: a short clock could expire on a loaded machine
 				fdReadSub,
 			),
 			expectedErrno: wasip1.ErrnoSuccess,
