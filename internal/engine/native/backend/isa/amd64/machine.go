@@ -573,37 +573,6 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 		return
 	}
 
-	// Either of two comparisons: a jump on each, which a brz takes only where neither holds.
-	if m.c.MatchInstr(cvalDef, ssa.OpcodeBor) {
-		a, bv := cvalDef.Instr.Arg2()
-		ad, bd := m.c.ValueDefinition(a), m.c.ValueDefinition(bv)
-		if m.c.MatchInstr(ad, ssa.OpcodeIcmp) && m.c.MatchInstr(bd, ssa.OpcodeIcmp) {
-			brz := b.Opcode() == ssa.OpcodeBrz
-			x, y, c := ad.Instr.IcmpData()
-			m.lowerIcmpToFlag(m.c.ValueDefinition(x), m.c.ValueDefinition(y), x.Type() == ssa.TypeI64)
-			first := m.allocateInstr()
-			m.insert(first)
-			x2, y2, c2 := bd.Instr.IcmpData()
-			m.lowerIcmpToFlag(m.c.ValueDefinition(x2), m.c.ValueDefinition(y2), x2.Type() == ssa.TypeI64)
-			cc2 := condFromSSAIntCmpCond(c2)
-			if brz {
-				cc2 = cc2.invert()
-			}
-			m.insert(m.allocateInstr().asJmpIf(cc2, newOperandLabel(target)))
-			if brz {
-				neither, neitherLabel := m.allocateBrTarget()
-				m.insert(neither)
-				first.asJmpIf(condFromSSAIntCmpCond(c), newOperandLabel(neitherLabel))
-			} else {
-				first.asJmpIf(condFromSSAIntCmpCond(c), newOperandLabel(target))
-			}
-			ad.Instr.MarkLowered()
-			bd.Instr.MarkLowered()
-			cvalDef.Instr.MarkLowered()
-			return
-		}
-	}
-
 	switch m.c.MatchInstrOneOf(cvalDef, condBranchMatches[:]) {
 	case ssa.OpcodeIcmp:
 		cvalInstr := cvalDef.Instr

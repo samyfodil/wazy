@@ -1730,7 +1730,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			builder.SetCurrentBlock(current)
 		}
 
-		if argNum == 0 && !hinted && !sealTargetBlk {
+		if brIfMerge && argNum == 0 && !hinted && !sealTargetBlk {
 			v = c.mergeBrIfs(v, labelIndex)
 		}
 

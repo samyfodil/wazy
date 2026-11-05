@@ -1,10 +1,16 @@
 package frontend
 
 import (
+	"runtime"
+
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
 	"github.com/samyfodil/wazy/internal/leb128"
 	"github.com/samyfodil/wazy/internal/wasm"
 )
+
+// brIfMerge is whether br_ifs are merged: arm64 branches on either of two comparisons with one conditional
+// branch, where amd64 would need two, as it does for them apart.
+var brIfMerge = runtime.GOARCH == "arm64"
 
 // mergeBrIfs returns the condition of the br_if to labelIndex at the current instruction, cond, or-ed with
 // those of the br_ifs to the same label right after it whose conditions are one comparison of locals and
