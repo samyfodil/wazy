@@ -41,4 +41,39 @@
       (br_if $top (i32.lt_u (local.get $i) (i32.and (local.get $a) (i32.const 255))))
       (br_if $top (i32.lt_s (local.get $n) (i32.and (local.get $b) (i32.const 1023)))))
     (local.get $n))
+  ;; A br_if ending its block, after one to that block: not the first, then the second, to the outer label.
+  ;; The first an and, the second arithmetic and eqz.
+  (func (export "overand") (param $a i32) (param $b i32) (param $c i64) (result i32)
+    (block $out
+      (block $next
+        (br_if $next (i32.and (local.get $a) (i32.const 0x0f0)))
+        (br_if $out (i32.eqz (i32.and (local.get $b) (i32.xor (local.get $a) (i32.const -1))))))
+      (return (i32.const 4)))
+    (i32.const 5))
+  ;; The first 64 bits, the second arithmetic to a loop, round again.
+  (func (export "overloop") (param $a i32) (param $b i32) (param $c i64) (result i32)
+    (local $i i32)
+    (loop $top
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (block $skip
+        (br_if $skip (i64.gt_s (local.get $c) (i64.extend_i32_s (local.get $i))))
+        (br_if $top (i32.lt_u (i32.add (local.get $i) (local.get $b)) (i32.and (local.get $a) (i32.const 511))))))
+    (local.get $i))
+  ;; Arithmetic in a merged condition to one label.
+  (func (export "arith") (param $a i32) (param $b i32) (param $c i64) (result i32)
+    (block $out
+      (br_if $out (i32.lt_s (local.get $a) (i32.const 1)))
+      (br_if $out (i32.gt_u (i32.mul (i32.sub (local.get $a) (local.get $b)) (i32.const 3)) (i32.const 90)))
+      (br_if $out (i64.ne (i64.shr_s (local.get $c) (i64.const 1)) (i64.const -3)))
+      (return (i32.const 6)))
+    (i32.const 7))
+  ;; The second br_if carries a value: no merge.
+  (func (export "overresult") (param $a i32) (param $b i32) (param $c i64) (result i32)
+    (block $out (result i32)
+      (block $next
+        (br_if $next (i32.and (local.get $a) (local.get $b)))
+        (drop (br_if $out (i32.const 8) (i32.eqz (local.get $b)))))
+      (i32.const 9))
+    (i32.const 1)
+    (i32.add))
 )

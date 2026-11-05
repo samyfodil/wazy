@@ -16,7 +16,8 @@ import (
 var brIfMergeWasm []byte
 
 // TestBrIfMerge runs br_ifs to one label after one another, which the compiler makes one branch on
-// either condition, against the interpreter for values around every constant they compare with.
+// either condition, and a br_if ending a block after one to it, which it makes one branch on not the first
+// and the second, against the interpreter for values around every constant they compare with.
 func TestBrIfMerge(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
@@ -36,7 +37,7 @@ func TestBrIfMerge(t *testing.T) {
 	}
 	i32s := []int32{math.MinInt32, -6, -5, -4, -1, 0, 1, 2, 6, 7, 8, 30, 31, 32, 99, 100, 101, 300, math.MaxInt32}
 	i64s := []int64{math.MinInt64, -6, -5, -4, 0, 5, math.MaxInt64}
-	for _, fn := range []string{"range", "three", "mixed", "twolabels", "loop"} {
+	for _, fn := range []string{"range", "three", "mixed", "twolabels", "loop", "overand", "overloop", "arith", "overresult"} {
 		for _, a := range i32s {
 			for _, b := range i32s {
 				for _, c := range i64s {

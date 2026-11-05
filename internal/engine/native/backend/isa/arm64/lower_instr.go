@@ -141,7 +141,8 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 		cbr.asCondBr(registerAsSignBitCond(tmp, !brz), target, true)
 		m.insert(cbr)
 		cvalDef.Instr.MarkLowered()
-	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeBor) && m.lowerOrOfIcmpsToFlag(cvalDef.Instr, b.Opcode() == ssa.OpcodeBrz, target):
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeBor) && m.lowerTwoIcmpsToFlag(cvalDef.Instr, false, b.Opcode() == ssa.OpcodeBrz, target),
+		m.compiler.MatchInstr(cvalDef, ssa.OpcodeBand) && m.lowerTwoIcmpsToFlag(cvalDef.Instr, true, b.Opcode() == ssa.OpcodeBrz, target):
 		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
 		cvalInstr := cvalDef.Instr
@@ -184,13 +185,14 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	}
 }
 
-// lowerOrOfIcmpsToFlag branches to target where either of the comparisons or or-s holds, or, for a brz,
-// neither: the first sets the flags, and a conditional compare sets them by the second where the first
-// does not hold, and otherwise to flags that satisfy the second's condition. It reports false, emitting
-// nothing, where or is not of two comparisons of same-width registers, or of a register with a constant
-// up to 31, that are its only uses.
-func (m *machine) lowerOrOfIcmpsToFlag(or *ssa.Instruction, brz bool, target label) bool {
-	a, b := or.Arg2()
+// lowerTwoIcmpsToFlag branches to target where either of the comparisons op or-s holds, or, where and,
+// both of those it and-s do, or, for a brz, where that does not hold: the first sets the flags, and a
+// conditional compare sets them by the second where the first does not hold (holds, for and), and
+// otherwise to flags that satisfy the second's condition (fail it). It reports false, emitting nothing,
+// where op is not of two comparisons of same-width registers, or of a register with a constant up to
+// 31, that are its only uses. The first may be a test of an and with zero.
+func (m *machine) lowerTwoIcmpsToFlag(op *ssa.Instruction, and, brz bool, target label) bool {
+	a, b := op.Arg2()
 	ad, bd := m.compiler.ValueDefinition(a), m.compiler.ValueDefinition(b)
 	if !m.compiler.MatchInstr(ad, ssa.OpcodeIcmp) || !m.compiler.MatchInstr(bd, ssa.OpcodeIcmp) {
 		return false
@@ -210,14 +212,20 @@ func (m *machine) lowerOrOfIcmpsToFlag(or *ssa.Instruction, brz bool, target lab
 		imm, isImm = k, k <= 31
 	}
 	cc1, cc2 := condFlagFromSSAIntegerCmpCond(ac), condFlagFromSSAIntegerCmpCond(bc)
-	m.lowerIcmpToFlag(ax, ay, ac.Signed())
+	if !m.tryLowerBandToFlag(ax, ay, ac) {
+		m.lowerIcmpToFlag(ax, ay, ac.Signed())
+	}
+	when, otherwise := cc1.invert(), satisfyingFlags(cc2)
+	if and {
+		when, otherwise = cc1, satisfyingFlags(cc2.invert())
+	}
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(bx), extModeNone)
 	ccmp := m.allocateInstr()
 	if isImm {
-		ccmp.asCCmpImm(rn, imm, cc1.invert(), satisfyingFlags(cc2), bx.Type().Bits() == 64)
+		ccmp.asCCmpImm(rn, imm, when, otherwise, bx.Type().Bits() == 64)
 		byDef.Instr.MarkLowered()
 	} else {
-		ccmp.asCCmpReg(rn, m.getOperand_NR(byDef, extModeNone), cc1.invert(), satisfyingFlags(cc2), bx.Type().Bits() == 64)
+		ccmp.asCCmpReg(rn, m.getOperand_NR(byDef, extModeNone), when, otherwise, bx.Type().Bits() == 64)
 	}
 	m.insert(ccmp)
 	if brz {

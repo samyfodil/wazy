@@ -1713,6 +1713,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		v := state.pop()
+		if brIfMerge && !hinted {
+			if cond, l, ok := c.mergeBrIfOverBlockEnd(v, labelIndex); ok {
+				v, labelIndex = cond, l
+				likely, hinted = c.branchHint(state.pc)
+			}
+		}
 		if c.branchChecks(labelIndex) {
 			c.emitInlinePreemptCheck()
 		}
