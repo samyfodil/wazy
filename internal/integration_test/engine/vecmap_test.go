@@ -66,7 +66,7 @@ func testVecMap(t *testing.T) {
 	frontend.VecPlanHook = nil
 	require.NoError(t, err)
 	if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
-		require.Equal(t, 16, vectorized, "every loop of the module should be vectorized")
+		require.Equal(t, 21, vectorized, "every loop of the module but skip2's and pick's should be vectorized")
 	}
 	interp := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 	defer interp.Close(ctx)
@@ -174,6 +174,22 @@ func testVecMap(t *testing.T) {
 		{"mixred short", call{"mixred", []uint64{10, 2}}},
 		{"andor", call{"andor", []uint64{0, 3000}}},
 		{"andor wraps", call{"andor", []uint64{0xffffff00, 700}}},
+		{"dot2", call{"dot2", []uint64{0, 16384, 8000}}},
+		{"dot2 short", call{"dot2", []uint64{0, 16384, 16}}},
+		{"dot2 aliased", call{"dot2", []uint64{100, 100, 4000}}},
+		{"dot2 runs off the end", call{"dot2", []uint64{memSize - 4000, 0, 8000}}},
+		{"xor4", call{"xor4", []uint64{8, 900}}},
+		{"xor4 misaligned", call{"xor4", []uint64{3, 400}}},
+		{"xor4 runs off the end", call{"xor4", []uint64{memSize - 3200, 101}}},
+		{"skip2", call{"skip2", []uint64{0, 500}}},
+		{"relax", call{"relax", []uint64{0, 16384, 5, 4000}}},
+		{"relax negative", call{"relax", []uint64{0, 16384, api.EncodeI32(-1 << 30), 4000}}},
+		{"relax in place", call{"relax", []uint64{16384, 16384, 1, 4000}}},
+		{"relax overlapping", call{"relax", []uint64{16384, 16388, 1, 4000}}},
+		{"umax", call{"umax", []uint64{0, 16384, 32768, 4000}}},
+		{"umax runs off the end", call{"umax", []uint64{memSize - 400, 16384, 32768, 4000}}},
+		{"smaxle", call{"smaxle", []uint64{0, 16384, 32768, 4000}}},
+		{"pick", call{"pick", []uint64{0, 16384, 400}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

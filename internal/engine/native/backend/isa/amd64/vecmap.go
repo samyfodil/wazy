@@ -155,6 +155,14 @@ func vecEncOf(kind, w uint8, elem ssa.Type) vecEnc {
 		return vecEnc{2, 1, 0x40, 0}
 	case ssa.VecOpMulU: // pmuludq
 		return vecEnc{1, 1, 0xf4, 0}
+	case ssa.VecOpMinS: // pminsd
+		return vecEnc{2, 1, 0x39, 0}
+	case ssa.VecOpMinU: // pminud
+		return vecEnc{2, 1, 0x3b, 0}
+	case ssa.VecOpMaxS: // pmaxsd
+		return vecEnc{2, 1, 0x3d, 0}
+	case ssa.VecOpMaxU: // pmaxud
+		return vecEnc{2, 1, 0x3f, 0}
 	case ssa.VecOpBand:
 		return vecEnc{1, 1, 0xdb, 0}
 	case ssa.VecOpBor:

@@ -353,6 +353,14 @@ func vecMapBinaryOp(kind uint8, isInt bool) vecOp {
 		return vecOpOrr
 	case ssa.VecOpBxor:
 		return vecOpEOR
+	case ssa.VecOpMinS:
+		return vecOpSmin
+	case ssa.VecOpMinU:
+		return vecOpUmin
+	case ssa.VecOpMaxS:
+		return vecOpSmax
+	case ssa.VecOpMaxU:
+		return vecOpUmax
 	}
 	panic("BUG: not a binary vector map op")
 }

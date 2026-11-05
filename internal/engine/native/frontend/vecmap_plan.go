@@ -77,6 +77,10 @@ const (
 	vecOpIota
 	vecOpZext // a, an i32, zero-extended to i64
 	vecOpMulU // an i64 product of a and b, each below 2^32
+	vecOpMinS // i32 minimum of a and b, signed
+	vecOpMinU
+	vecOpMaxS
+	vecOpMaxU
 )
 
 type vecNode struct {
@@ -89,7 +93,8 @@ type vecNode struct {
 
 func vecBinaryOp(op uint8) bool {
 	switch op {
-	case vecOpAdd, vecOpSub, vecOpMul, vecOpDiv, vecOpBand, vecOpBor, vecOpBxor, vecOpMulU:
+	case vecOpAdd, vecOpSub, vecOpMul, vecOpDiv, vecOpBand, vecOpBor, vecOpBxor, vecOpMulU,
+		vecOpMinS, vecOpMinU, vecOpMaxS, vecOpMaxU:
 		return true
 	}
 	return false
@@ -114,12 +119,15 @@ const (
 	vkAff  = iota // an i32 affine form
 	vkNode        // an element node
 	vkCond        // the result of the comparison deciding the loop's exit
+	vkCmp         // a comparison of element nodes a and b with cmp, which only a select may take
 )
 
 type vecVal struct {
 	kind uint8
 	aff  vecAffine
 	node uint8
+	cmp  wasm.Opcode
+	a, b uint8
 }
 
 // vecReduction is a local a reducing loop folds an element value into: slot, with op, node being each
@@ -128,6 +136,9 @@ type vecReduction struct {
 	slot int
 	op   uint8
 	node uint8
+	// terms are what one iteration folds in: unroll copies of node's computation, each an element further
+	// on, one of them node itself.
+	terms []uint8
 }
 
 type vecPlan struct {
@@ -269,7 +280,7 @@ func (pl *vecPlanner) toNode(v vecVal) (uint8, bool) {
 	switch v.kind {
 	case vkNode:
 		return v.node, pl.p.nodes[v.node].typ == wasm.ValueTypeI32
-	case vkCond:
+	case vkCond, vkCmp:
 		return 0, false
 	}
 	a := v.aff
@@ -306,7 +317,7 @@ func (pl *vecPlanner) pop() (vecVal, bool) {
 func (pl *vecPlanner) pop2() (x, y vecVal, ok bool) {
 	y, ok1 := pl.pop()
 	x, ok2 := pl.pop()
-	return x, y, ok1 && ok2 && x.kind != vkCond && y.kind != vkCond
+	return x, y, ok1 && ok2 && x.kind != vkCond && y.kind != vkCond && x.kind != vkCmp && y.kind != vkCmp
 }
 
 func (pl *vecPlanner) u32() (uint32, bool) {
@@ -404,7 +415,7 @@ func (pl *vecPlanner) run() bool {
 				return false
 			}
 			v, ok := pl.pop()
-			if !ok || v.kind == vkCond || v.kind == vkAff && pl.p.slotType[s] != wasm.ValueTypeI32 {
+			if !ok || v.kind == vkCond || v.kind == vkCmp || v.kind == vkAff && pl.p.slotType[s] != wasm.ValueTypeI32 {
 				return false
 			}
 			if v.kind == vkNode && pl.p.slotType[s] != pl.p.nodes[v.node].typ {
@@ -657,18 +668,62 @@ func (pl *vecPlanner) run() bool {
 		case wasm.OpcodeI32Eq, wasm.OpcodeI32Ne, wasm.OpcodeI32LtU, wasm.OpcodeI32LtS, wasm.OpcodeI32GtU, wasm.OpcodeI32GtS,
 			wasm.OpcodeI32LeU, wasm.OpcodeI32LeS, wasm.OpcodeI32GeU, wasm.OpcodeI32GeS:
 			x, y, ok := pl.pop2()
-			if !ok || x.kind != vkAff || y.kind != vkAff || pl.p.condOp != 0 {
+			if !ok {
 				return false
 			}
-			pl.p.condOp, pl.p.condA, pl.p.condB = op, x.aff, y.aff
-			pl.push(vecVal{kind: vkCond})
+			if x.kind == vkAff && y.kind == vkAff && pl.p.condOp == 0 {
+				pl.p.condOp, pl.p.condA, pl.p.condB = op, x.aff, y.aff
+				pl.push(vecVal{kind: vkCond})
+				continue
+			}
+			// A comparison of element values: one a select of the two compared turns into a min or a max.
+			if op == wasm.OpcodeI32Eq || op == wasm.OpcodeI32Ne {
+				return false
+			}
+			xn, ok1 := pl.toNode(x)
+			yn, ok2 := pl.toNode(y)
+			if !ok1 || !ok2 {
+				return false
+			}
+			pl.push(vecVal{kind: vkCmp, cmp: op, a: xn, b: yn})
+		case wasm.OpcodeSelect:
+			c, ok1 := pl.pop()
+			v2, ok2 := pl.pop()
+			v1, ok3 := pl.pop()
+			if !ok1 || !ok2 || !ok3 || c.kind != vkCmp {
+				return false
+			}
+			n1, ok1 := pl.toNode(v1)
+			n2, ok2 := pl.toNode(v2)
+			if !ok1 || !ok2 {
+				return false
+			}
+			// c ? v1 : v2. Picking the first compared when it is the lesser is a min, else a max; picking the
+			// second turns that around. An equal pair gives either, the same bits.
+			less := c.cmp == wasm.OpcodeI32LtS || c.cmp == wasm.OpcodeI32LtU || c.cmp == wasm.OpcodeI32LeS || c.cmp == wasm.OpcodeI32LeU
+			signed := c.cmp == wasm.OpcodeI32LtS || c.cmp == wasm.OpcodeI32LeS || c.cmp == wasm.OpcodeI32GtS || c.cmp == wasm.OpcodeI32GeS
+			var min bool
+			switch {
+			case n1 == c.a && n2 == c.b:
+				min = less
+			case n1 == c.b && n2 == c.a:
+				min = !less
+			default:
+				return false
+			}
+			o := map[[2]bool]uint8{{true, true}: vecOpMinS, {true, false}: vecOpMinU, {false, true}: vecOpMaxS, {false, false}: vecOpMaxU}[[2]bool{min, signed}]
+			v, ok := pl.node(vecNode{op: o, a: c.a, b: c.b}, wasm.ValueTypeI32)
+			if !ok {
+				return false
+			}
+			pl.push(v)
 		case wasm.OpcodeBrIf:
 			l, ok := pl.u32()
 			if !ok || l > 1 {
 				return false
 			}
 			c, ok := pl.pop()
-			if !ok || c.kind == vkNode || len(pl.stack) != 0 {
+			if !ok || c.kind == vkNode || c.kind == vkCmp || len(pl.stack) != 0 {
 				return false
 			}
 			if c.kind == vkAff { // br_if on an i32 itself: taken while it is not zero.
@@ -782,7 +837,7 @@ func (pl *vecPlanner) finish() bool {
 		roots = append(roots, st.node)
 	}
 	for _, r := range p.reduces {
-		roots = append(roots, r.node)
+		roots = append(roots, r.terms...)
 	}
 	for _, n := range roots {
 		for s := 0; s < p.slotN; s++ {
@@ -797,9 +852,16 @@ func (pl *vecPlanner) finish() bool {
 			pl.why = "reduction and stores"
 			return false
 		}
-		p.unroll = 1
+		p.unroll = uint32(len(p.reduces[0].terms))
+		for i := range p.reduces {
+			r := &p.reduces[i]
+			if uint32(len(r.terms)) != p.unroll || !pl.rerollReduction(r) {
+				pl.why = "reduction copies"
+				return false
+			}
+		}
 		for _, l := range p.loads {
-			if st := p.stride(l.addr); st != 0 && st != p.elemSize {
+			if st := p.stride(l.addr); st != 0 && st != p.unroll*p.elemSize {
 				pl.why = "load stride"
 				return false
 			}
@@ -831,21 +893,95 @@ func (pl *vecPlanner) reduction(s int, n uint8) bool {
 	default:
 		return false
 	}
+	// The operation gives the same bits in any order, so the terms of a chain of it are the reduction's
+	// whatever the grouping: an unrolled loop adds several elements to the accumulator at once.
 	isAcc := func(m uint8) bool { return p.nodes[m].op == vecOpInv && p.nodes[m].arg == uint8(s) }
-	var elem uint8
-	switch {
-	case isAcc(nd.a):
-		elem = nd.b
-	case isAcc(nd.b):
-		elem = nd.a
-	default:
+	var terms []uint8
+	accs := 0
+	var flatten func(m uint8)
+	flatten = func(m uint8) {
+		switch t := p.nodes[m]; {
+		case isAcc(m):
+			accs++
+		case t.op == nd.op && t.typ == nd.typ:
+			flatten(t.a)
+			flatten(t.b)
+		default:
+			terms = append(terms, m)
+		}
+	}
+	flatten(n)
+	if accs != 1 || len(terms) == 0 {
 		return false
 	}
-	if pl.mentions(elem, s) {
-		return false
+	for _, t := range terms {
+		if pl.mentions(t, s) {
+			return false
+		}
 	}
-	p.reduces = append(p.reduces, vecReduction{slot: s, op: nd.op, node: elem})
+	p.reduces = append(p.reduces, vecReduction{slot: s, op: nd.op, node: terms[0], terms: terms})
 	return true
+}
+
+// rerollReduction finds, among the terms of r, an unrolled loop's copy zero: the term whose first moving
+// load reads lowest, which every other term computes again an element, two, ... further on. It reports
+// false when the terms are not such copies.
+func (pl *vecPlanner) rerollReduction(r *vecReduction) bool {
+	p := &pl.p
+	if len(r.terms) == 1 {
+		return true
+	}
+	shifts := make([]int64, len(r.terms))
+	first, ok := pl.firstMovingLoad(r.terms[0])
+	if !ok {
+		return false
+	}
+	base := 0
+	for k, t := range r.terms {
+		l, ok := pl.firstMovingLoad(t)
+		if !ok {
+			return false
+		}
+		if shifts[k], ok = shiftOf(p.loads[first], p.loads[l]); !ok {
+			return false
+		}
+		if shifts[k] < shifts[base] {
+			base = k
+		}
+	}
+	e := int64(p.elemSize)
+	seen := make([]bool, len(r.terms))
+	for k, t := range r.terms {
+		d := shifts[k] - shifts[base]
+		if d%e != 0 || d/e >= int64(len(r.terms)) || seen[d/e] {
+			return false
+		}
+		seen[d/e] = true
+		if k != base && !pl.sameShifted(r.terms[base], t, d) {
+			return false
+		}
+	}
+	r.node = r.terms[base]
+	return true
+}
+
+// firstMovingLoad returns the first load, in the order the tree under n reads them, whose address moves
+// with the loop.
+func (pl *vecPlanner) firstMovingLoad(n uint8) (uint8, bool) {
+	p := &pl.p
+	nd := p.nodes[n]
+	switch {
+	case nd.op == vecOpLoad:
+		return nd.arg, p.stride(p.loads[nd.arg].addr) != 0
+	case vecBinaryOp(nd.op):
+		if l, ok := pl.firstMovingLoad(nd.a); ok {
+			return l, true
+		}
+		return pl.firstMovingLoad(nd.b)
+	case vecUnaryOp(nd.op):
+		return pl.firstMovingLoad(nd.a)
+	}
+	return 0, false
 }
 
 // iotas turns each i32 node that reads a counter the loop moves, and no other local it writes, into an iota.
@@ -913,8 +1049,10 @@ func (pl *vecPlanner) onlyReads(s int) bool {
 		}
 	}
 	for _, r := range pl.p.reduces {
-		if pl.mentions(r.node, s) {
-			return false
+		for _, t := range r.terms {
+			if pl.mentions(t, s) {
+				return false
+			}
 		}
 	}
 	return true

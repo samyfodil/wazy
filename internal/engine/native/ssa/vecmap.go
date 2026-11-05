@@ -57,6 +57,10 @@ const (
 	VecOpIota
 	VecOpZext // A, an i32 of a Spaced program, zero-extended to i64
 	VecOpMulU // the low 32 bits of each lane of A times those of B, an i64 product
+	VecOpMinS // i32 minimum of A and B, signed
+	VecOpMinU // unsigned
+	VecOpMaxS // i32 maximum of A and B, signed
+	VecOpMaxU // unsigned
 )
 
 // VecOp is one step of a VecProgram. W is how many bytes wide its value is: the size of Elem, but for the
@@ -68,7 +72,8 @@ type VecOp struct {
 // Binary reports whether op reads both A and B.
 func (op VecOp) Binary() bool {
 	switch op.Kind {
-	case VecOpAdd, VecOpSub, VecOpMul, VecOpDiv, VecOpBand, VecOpBor, VecOpBxor, VecOpMulU:
+	case VecOpAdd, VecOpSub, VecOpMul, VecOpDiv, VecOpBand, VecOpBor, VecOpBxor, VecOpMulU,
+		VecOpMinS, VecOpMinU, VecOpMaxS, VecOpMaxU:
 		return true
 	}
 	return false

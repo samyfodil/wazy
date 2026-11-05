@@ -193,4 +193,83 @@
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br_if $l (local.tee $n (i32.add (local.get $n) (i32.const -1)))))
     (i64.xor (local.get $o) (i64.extend_i32_u (local.get $a))))
+;; A dot product of bytes stored as i32s, less 128 each, unrolled twice, the second element's product
+  ;; added first: the reduction is the chain's terms, whatever their grouping.
+  (func (export "dot2") (param $a i32) (param $b i32) (param $n i32) (result i32)
+    (local $i i32) (local $acc i32)
+    (loop $l
+      (local.set $acc (i32.add
+        (i32.mul (i32.add (i32.load offset=4 (i32.add (local.get $a) (local.get $i))) (i32.const -128))
+                 (i32.add (i32.load offset=4 (i32.add (local.get $b) (local.get $i))) (i32.const -128)))
+        (i32.add
+          (i32.mul (i32.add (i32.load (i32.add (local.get $a) (local.get $i))) (i32.const -128))
+                   (i32.add (i32.load (i32.add (local.get $b) (local.get $i))) (i32.const -128)))
+          (local.get $acc))))
+      (br_if $l (i32.ne (local.tee $i (i32.add (local.get $i) (i32.const 8))) (local.get $n))))
+    (local.get $acc))
+
+  ;; An xor of four elements an iteration, in no particular order.
+  (func (export "xor4") (param $p i32) (param $n i32) (result i64)
+    (local $acc i64)
+    (loop $l
+      (local.set $acc (i64.xor
+        (i64.xor (i64.load offset=16 (local.get $p)) (local.get $acc))
+        (i64.xor (i64.load (local.get $p))
+          (i64.xor (i64.load offset=24 (local.get $p)) (i64.load offset=8 (local.get $p))))))
+      (local.set $p (i32.add (local.get $p) (i32.const 32)))
+      (br_if $l (local.tee $n (i32.add (local.get $n) (i32.const -1)))))
+    (local.get $acc))
+
+  ;; Two elements an iteration, but the second is two further on: not copies of one element.
+  (func (export "skip2") (param $p i32) (param $n i32) (result i32)
+    (local $acc i32)
+    (loop $l
+      (local.set $acc (i32.add (local.get $acc)
+        (i32.add (i32.load (local.get $p)) (i32.load offset=8 (local.get $p)))))
+      (local.set $p (i32.add (local.get $p) (i32.const 8)))
+      (br_if $l (local.tee $n (i32.add (local.get $n) (i32.const -1)))))
+    (local.get $acc))
+;; a[j] = min(a[j], b[j] + c), signed, as a select picking a[j] when the sum is greater; unrolled twice
+  ;; like Floyd-Warshall's relaxation.
+  (func (export "relax") (param $a i32) (param $b i32) (param $c i32) (param $n i32)
+    (local $j i32) (local $x i32) (local $s i32)
+    (loop $l
+      (i32.store (i32.add (local.get $a) (local.get $j))
+        (select (local.tee $x (i32.load (i32.add (local.get $a) (local.get $j))))
+                (local.tee $s (i32.add (i32.load (i32.add (local.get $b) (local.get $j))) (local.get $c)))
+                (i32.gt_s (local.get $s) (local.get $x))))
+      (i32.store offset=4 (i32.add (local.get $a) (local.get $j))
+        (select (local.tee $x (i32.load offset=4 (i32.add (local.get $a) (local.get $j))))
+                (local.tee $s (i32.add (i32.load offset=4 (i32.add (local.get $b) (local.get $j))) (local.get $c)))
+                (i32.gt_s (local.get $s) (local.get $x))))
+      (br_if $l (i32.ne (local.tee $j (i32.add (local.get $j) (i32.const 8))) (local.get $n)))))
+
+  ;; d[i] = max(x[i], y[i]), unsigned, and m[i] = max(x[i], y[i]) signed, picked by x <= y the other way round.
+  (func (export "umax") (param $d i32) (param $x i32) (param $y i32) (param $n i32)
+    (local $i i32) (local $p i32) (local $q i32)
+    (loop $l
+      (i32.store (i32.add (local.get $d) (local.get $i))
+        (select (local.tee $p (i32.load (i32.add (local.get $x) (local.get $i))))
+                (local.tee $q (i32.load (i32.add (local.get $y) (local.get $i))))
+                (i32.gt_u (local.get $p) (local.get $q))))
+      (br_if $l (i32.ne (local.tee $i (i32.add (local.get $i) (i32.const 4))) (local.get $n)))))
+  (func (export "smaxle") (param $d i32) (param $x i32) (param $y i32) (param $n i32)
+    (local $i i32) (local $p i32) (local $q i32)
+    (loop $l
+      (i32.store (i32.add (local.get $d) (local.get $i))
+        (select (local.tee $q (i32.load (i32.add (local.get $y) (local.get $i))))
+                (local.tee $p (i32.load (i32.add (local.get $x) (local.get $i))))
+                (i32.le_s (local.get $p) (local.get $q))))
+      (br_if $l (i32.ne (local.tee $i (i32.add (local.get $i) (i32.const 4))) (local.get $n)))))
+
+  ;; A select of values other than the two compared is no min or max.
+  (func (export "pick") (param $d i32) (param $x i32) (param $n i32)
+    (local $i i32) (local $p i32)
+    (loop $l
+      (i32.store (i32.add (local.get $d) (local.get $i))
+        (select (i32.const 7)
+                (local.tee $p (i32.load (i32.add (local.get $x) (local.get $i))))
+                (i32.lt_s (local.get $p) (i32.const 100))))
+      (br_if $l (i32.ne (local.tee $i (i32.add (local.get $i) (i32.const 4))) (local.get $n)))))
 )
+

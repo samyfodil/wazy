@@ -745,6 +745,7 @@ func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream, []v
 			kind := map[uint8]uint8{
 				vecOpAdd: ssa.VecOpAdd, vecOpSub: ssa.VecOpSub, vecOpMul: ssa.VecOpMul, vecOpDiv: ssa.VecOpDiv,
 				vecOpBand: ssa.VecOpBand, vecOpBor: ssa.VecOpBor, vecOpBxor: ssa.VecOpBxor,
+				vecOpMinS: ssa.VecOpMinS, vecOpMinU: ssa.VecOpMinU, vecOpMaxS: ssa.VecOpMaxS, vecOpMaxU: ssa.VecOpMaxU,
 			}[nd.op]
 			// An integer operation whose operands may trade places takes a moving load second, where a
 			// backend can read it from memory. A float one keeps its order, which decides which NaN it
