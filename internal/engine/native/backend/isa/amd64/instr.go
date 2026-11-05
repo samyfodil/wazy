@@ -462,8 +462,13 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 		*regs = append(*regs, src, tmpGp, tmpGp2)
 	case useKindDivRem:
 		execCtx, divisor, tmpGp, _, _, _ := i.idivRemSequenceData()
-		// idiv uses rax and rdx as implicit operands.
-		*regs = append(*regs, raxVReg, rdxVReg, execCtx, divisor, tmpGp)
+		// idiv uses rax and rdx as implicit operands. One trapping through the shared islands has no
+		// execution context.
+		*regs = append(*regs, raxVReg, rdxVReg)
+		if execCtx.Valid() {
+			*regs = append(*regs, execCtx)
+		}
+		*regs = append(*regs, divisor, tmpGp)
 	case useKindMulHi:
 		// mul multiplies rax by its operand.
 		*regs = append(*regs, raxVReg, i.op1.reg())
@@ -627,6 +632,9 @@ func (i *instruction) AssignUse(index int, v regalloc.VReg) {
 			panic("BUG")
 		}
 	case useKindDivRem:
+		if execCtx, _, _, _, _, _ := i.idivRemSequenceData(); !execCtx.Valid() && index >= 2 {
+			index++
+		}
 		switch index {
 		case 0:
 			if v != raxVReg {

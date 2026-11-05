@@ -2943,8 +2943,19 @@ func (m *machine) lowerIDivRem(si *ssa.Instruction, isDiv bool, signed bool) {
 
 	dividend := m.getOperand_Reg(m.c.ValueDefinition(x))
 	divisor := m.getOperand_Reg(m.c.ValueDefinition(y))
-	ctxVReg := m.c.VRegOf(execCtx)
 	tmpGp := m.c.AllocateVReg(si.Return().Type())
+	// As for a bounds check, a division traps through the shared islands, which reload the execution
+	// context themselves, unless debug info wants each trap where it happened: then it needs the context
+	// in a register, which in a loop is one more value kept live, or reloaded, on every iteration.
+	ctxVReg := regalloc.VRegInvalid
+	if si.SourceOffset().Valid() {
+		ctxVReg = m.c.VRegOf(execCtx)
+	} else {
+		m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerDivisionByZero)
+		if signed && isDiv {
+			m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerOverflow)
+		}
+	}
 
 	m.copyTo(dividend.reg(), raxVReg)
 	m.insert(m.allocateInstr().asDefineUninitializedReg(rdxVReg))
@@ -2964,18 +2975,24 @@ func (m *machine) lowerIDivRemSequenceAfterRegAlloc(i *instruction) {
 
 	dividend := raxVReg
 
+	shared := !execCtx.Valid() // The traps go to the shared islands lowerIDivRem made.
+
 	// Ensure yr is not zero.
 	test := m.allocateInstr()
 	test.asCmpRmiR(false, newOperandReg(divisor), divisor, _64)
 	m.insert(test)
 
-	jnz := m.allocateInstr()
-	m.insert(jnz)
+	if shared {
+		m.insert(m.allocateInstr().asJmpIf(condZ, newOperandLabel(m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerDivisionByZero))))
+	} else {
+		jnz := m.allocateInstr()
+		m.insert(jnz)
 
-	nz := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerDivisionByZero)
+		nz := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerDivisionByZero)
 
-	// If not zero, we can proceed with the division.
-	jnz.asJmpIf(condNZ, newOperandLabel(nz))
+		// If not zero, we can proceed with the division.
+		jnz.asJmpIf(condNZ, newOperandLabel(nz))
+	}
 
 	var ifRemNeg1 *instruction
 	if signed {
@@ -3020,9 +3037,16 @@ func (m *machine) lowerIDivRemSequenceAfterRegAlloc(i *instruction) {
 			// Trap if we are trying to do (math.MinInt32 / -1) or (math.MinInt64 / -1),
 			// as that is the overflow in division as the result becomes 2^31 which is larger than
 			// the maximum of signed 32-bit int (2^31-1).
-			end := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerOverflow)
-			ifNotNeg1.asJmpIf(condNZ, newOperandLabel(end))
-			ifNotMinInt.asJmpIf(condNZ, newOperandLabel(end))
+			if shared {
+				cont, contLabel := m.allocateBrTarget()
+				ifNotNeg1.asJmpIf(condNZ, newOperandLabel(contLabel))
+				ifNotMinInt.asJmpIf(condZ, newOperandLabel(m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerOverflow)))
+				m.insert(cont)
+			} else {
+				end := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerOverflow)
+				ifNotNeg1.asJmpIf(condNZ, newOperandLabel(end))
+				ifNotMinInt.asJmpIf(condNZ, newOperandLabel(end))
+			}
 		} else {
 			// If it is remainder, zeros DX register and compare the divisor to -1.
 			xor := m.allocateInstr().asZeros(rdxVReg)
