@@ -422,6 +422,10 @@ func (bb *basicBlock) LoopHeader() bool {
 // already available at that point, and the branch has to stay last.
 func (bb *basicBlock) insertBeforeTerminator(instr *Instruction) {
 	term := bb.currentInstr
+	// A block can end in a conditional branch followed by a jump; both are its terminator.
+	for term != nil && term.prev != nil && term.prev.IsBranching() {
+		term = term.prev
+	}
 	if term == nil {
 		instr.prev, instr.next = nil, nil
 		bb.rootInstr, bb.currentInstr = instr, instr
