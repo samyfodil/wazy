@@ -1524,6 +1524,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 		}
 	case wasm.OpcodeIf:
+		if !state.unreachable && c.lowerIfAsSelect() {
+			break
+		}
 		likely, hinted := c.branchHint(state.pc)
 		bt := c.readBlockType()
 

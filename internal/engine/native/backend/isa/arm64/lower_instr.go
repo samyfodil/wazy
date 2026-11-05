@@ -2698,6 +2698,11 @@ func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 		if v == shared {
 			return operandNR(sharedReg)
 		}
+		// An integer zero is the zero register.
+		if def := m.compiler.ValueDefinition(v); v.Type().IsInt() && m.compiler.MatchInstr(def, ssa.OpcodeIconst) && def.Instr.ConstantVal() == 0 {
+			def.Instr.MarkLowered()
+			return operandNR(xzrVReg)
+		}
 		return m.getOperand_NR(m.compiler.ValueDefinition(v), extModeNone)
 	}
 	rn, rm := operandOf(x), operandOf(y)
