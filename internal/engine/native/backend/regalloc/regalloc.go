@@ -1415,11 +1415,18 @@ func (a *Allocator[I, B, F]) scheduleSpills(f F) {
 
 func (a *Allocator[I, B, F]) scheduleSpill(f F, vs *vrState[I, B, F]) {
 	v := vs.v
+	defInstr, def := vs.defInstr, VRegInvalid
 	if vs.isPhi {
-		for defInstr := vs.phiDefInstList; defInstr != nil; defInstr = defInstr.next {
-			f.StoreRegisterAfter(defInstr.v, defInstr.instr)
+		// A parameter of the entry block, a parameter of the function, has its one definition there: it is
+		// stored where its reloads need it, as any other value is, rather than on paths that never reload it.
+		if d := vs.phiDefInstList; d != nil && d.next == nil && vs.defBlk.Entry() {
+			defInstr, def = d.instr, d.v
+		} else {
+			for d := vs.phiDefInstList; d != nil; d = d.next {
+				f.StoreRegisterAfter(d.v, d.instr)
+			}
+			return
 		}
-		return
 	}
 
 	pos := vs.lca
@@ -1465,12 +1472,13 @@ func (a *Allocator[I, B, F]) scheduleSpill(f F, vs *vrState[I, B, F]) {
 	}
 
 	if pos == definingBlk {
-		defInstr := vs.defInstr
-		defInstr.Defs(&a.vs)
+		if !def.Valid() {
+			def = defInstr.Defs(&a.vs)[0]
+		}
 		if nativeapi.RegAllocLoggingEnabled {
 			fmt.Printf("schedule spill v%d after %v\n", v.ID(), defInstr)
 		}
-		f.StoreRegisterAfter(a.vs[0], defInstr)
+		f.StoreRegisterAfter(def, defInstr)
 	} else {
 		// Found an ancestor block that holds the value in the register at the beginning of the block.
 		// We need to insert a spill before the last use.

@@ -167,8 +167,7 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		},
 		{
 			exp: `
-	add sp, sp, #0x10
-	add sp, sp, #0x50
+	add sp, sp, #0x60
 	ldr x30, [sp], #0x10
 	ret
 `,
@@ -177,8 +176,7 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		},
 		{
 			exp: `
-	add sp, sp, #0x10
-	add sp, sp, #0x50
+	add sp, sp, #0x60
 	ldr x30, [sp], #0x10
 	add sp, sp, #0x20
 	ret
@@ -210,8 +208,7 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		},
 		{
 			exp: `
-	add sp, sp, #0x10
-	add sp, sp, #0xa0
+	add sp, sp, #0xb0
 	ldp q18, q27, [sp]
 	ldp x18, x25, [sp, #0x20]
 	add sp, sp, #0x30
@@ -223,8 +220,7 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		},
 		{
 			exp: `
-	add sp, sp, #0x10
-	add sp, sp, #0xa0
+	add sp, sp, #0xb0
 	ldp q18, q27, [sp]
 	ldp x18, x25, [sp, #0x20]
 	add sp, sp, #0x30

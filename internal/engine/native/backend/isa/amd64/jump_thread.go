@@ -85,4 +85,68 @@ func (m *machine) threadJumps() {
 			}
 		}
 	}
+	m.copyReturns()
+}
+
+// copyReturns turns a jump to an epilogue, a few instructions ending in ret, into a copy of it: the
+// path that jumped returns on its own, one jump shorter.
+func (m *machine) copyReturns() {
+	const maxEpilogue = 8
+	var epilogue [maxEpilogue]*instruction
+	for cur := m.rootInstr; cur != nil; cur = cur.next {
+		if cur.kind != jmp || cur.op1.kind != operandKindLabel {
+			continue
+		}
+		pos := m.labelPositionPool.Get(int(cur.op1.label()))
+		if pos == nil || pos.begin == nil {
+			continue
+		}
+		n, returns := 0, false
+	scan:
+		for i := pos.begin; i != nil && n < maxEpilogue; i = i.next {
+			switch i.kind {
+			case nop0:
+			case movRR, pop64, aluRmiR, xmmUnaryRmR:
+				if !epilogueInstr(i) {
+					break scan
+				}
+				epilogue[n] = i
+				n++
+			case ret:
+				epilogue[n] = i
+				n++
+				returns = true
+				break scan
+			default:
+				break scan
+			}
+		}
+		if !returns {
+			continue
+		}
+		prev, next := cur.prev, cur.next
+		*cur = *epilogue[0]
+		cur.prev, cur.next = prev, next
+		for _, e := range epilogue[1:n] {
+			c := m.allocateInstr()
+			*c = *e
+			c.prev, c.next = nil, nil
+			cur = linkInstr(cur, c)
+		}
+		linkInstr(cur, next)
+	}
+}
+
+// epilogueInstr reports whether i is one an epilogue is made of: rsp restored from rbp or moved up, or a
+// register popped or restored from the stack.
+func epilogueInstr(i *instruction) bool {
+	switch i.kind {
+	case movRR:
+		return i.op1.reg() == rbpVReg && i.op2.reg() == rspVReg
+	case aluRmiR:
+		return i.op2.reg() == rspVReg
+	case xmmUnaryRmR:
+		return i.op1.kind == operandKindMem && i.op1.addressMode().kind() == amodeImmReg && i.op1.addressMode().base == rspVReg
+	}
+	return true
 }

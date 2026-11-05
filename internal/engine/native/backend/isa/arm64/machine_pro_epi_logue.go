@@ -503,37 +503,33 @@ func (m *machine) postRegAlloc() {
 func (m *machine) setupEpilogueAfter(cur *instruction) {
 	prevNext := cur.next
 
-	// We've stored the frame size in the prologue, and now that we are about to return from this function, we won't need it anymore.
-	cur = m.addsAddOrSubStackPointer(cur, spVReg, 16, true)
-
-	if s := m.spillSlotSize; s > 0 {
-		// Adjust SP to the original value:
-		//
-		//            (high address)                        (high address)
-		//          +-----------------+                  +-----------------+
-		//          |     .......     |                  |     .......     |
-		//          |      ret Y      |                  |      ret Y      |
-		//          |     .......     |                  |     .......     |
-		//          |      ret 0      |                  |      ret 0      |
-		//          |      arg X      |                  |      arg X      |
-		//          |     .......     |                  |     .......     |
-		//          |      arg 1      |                  |      arg 1      |
-		//          |      arg 0      |                  |      arg 0      |
-		//          |      xxxxx      |                  |      xxxxx      |
-		//          |   ReturnAddress |                  |   ReturnAddress |
-		//          +-----------------+      ====>       +-----------------+
-		//          |    clobbered M  |                  |    clobbered M  |
-		//          |   ............  |                  |   ............  |
-		//          |    clobbered 1  |                  |    clobbered 1  |
-		//          |    clobbered 0  |                  |    clobbered 0  |
-		//          |   spill slot N  |                  +-----------------+ <---- SP
-		//          |   ............  |
-		//          |   spill slot 0  |
-		//   SP---> +-----------------+
-		//             (low address)
-		//
-		cur = m.addsAddOrSubStackPointer(cur, spVReg, s, true)
-	}
+	// We've stored the frame size in the prologue, and now that we are about to return from this function,
+	// we won't need it anymore; one add frees it and the spill slots with it, adjusting SP to:
+	//
+	//            (high address)                        (high address)
+	//          +-----------------+                  +-----------------+
+	//          |     .......     |                  |     .......     |
+	//          |      ret Y      |                  |      ret Y      |
+	//          |     .......     |                  |     .......     |
+	//          |      ret 0      |                  |      ret 0      |
+	//          |      arg X      |                  |      arg X      |
+	//          |     .......     |                  |     .......     |
+	//          |      arg 1      |                  |      arg 1      |
+	//          |      arg 0      |                  |      arg 0      |
+	//          |      xxxxx      |                  |      xxxxx      |
+	//          |   ReturnAddress |                  |   ReturnAddress |
+	//          +-----------------+      ====>       +-----------------+
+	//          |    clobbered M  |                  |    clobbered M  |
+	//          |   ............  |                  |   ............  |
+	//          |    clobbered 1  |                  |    clobbered 1  |
+	//          |    clobbered 0  |                  |    clobbered 0  |
+	//          |   spill slot N  |                  +-----------------+ <---- SP
+	//          |   ............  |
+	//          |   spill slot 0  |
+	//   SP---> +-----------------+
+	//             (low address)
+	//
+	cur = m.addsAddOrSubStackPointer(cur, spVReg, 16+m.spillSlotSize, true)
 
 	// First we need to restore the clobbered registers.
 	if len(m.clobberedRegs) > 0 {

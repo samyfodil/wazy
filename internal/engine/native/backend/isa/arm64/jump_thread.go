@@ -79,4 +79,66 @@ func (m *machine) threadJumps() {
 			}
 		}
 	}
+	m.copyReturns()
+}
+
+// copyReturns turns a branch to an epilogue, a few instructions ending in ret, into a copy of it: the
+// path that branched returns on its own, one branch shorter.
+func (m *machine) copyReturns() {
+	const maxEpilogue = 10
+	var epilogue [maxEpilogue]*instruction
+	for cur := m.rootInstr; cur != nil; cur = cur.next {
+		if cur.kind != br {
+			continue
+		}
+		pos := m.labelPositionPool.Get(int(cur.brLabel()))
+		if pos == nil || pos.begin == nil {
+			continue
+		}
+		n, returns := 0, false
+	scan:
+		for i := pos.begin; i != nil && n < maxEpilogue; i = i.next {
+			switch i.kind {
+			case nop0:
+			case aluRRImm12, aluRRR, movZ, movN, movK, uLoad64, fpuLoad128, loadP64, loadP128:
+				if !epilogueInstr(i) {
+					break scan
+				}
+				epilogue[n] = i
+				n++
+			case ret:
+				epilogue[n] = i
+				n++
+				returns = true
+				break scan
+			default:
+				break scan
+			}
+		}
+		if !returns {
+			continue
+		}
+		prev, next := cur.prev, cur.next
+		*cur = *epilogue[0]
+		cur.prev, cur.next = prev, next
+		for _, e := range epilogue[1:n] {
+			c := m.allocateInstr()
+			*c = *e
+			c.prev, c.next = nil, nil
+			cur = linkInstr(cur, c)
+		}
+		linkInstr(cur, next)
+	}
+}
+
+// epilogueInstr reports whether i is one an epilogue is made of: a stack pointer adjustment, the constant
+// a large one is made of, or a register restored from the stack.
+func epilogueInstr(i *instruction) bool {
+	switch i.kind {
+	case aluRRImm12, aluRRR:
+		return i.rd == spVReg
+	case movZ, movN, movK:
+		return i.rd == tmpRegVReg
+	}
+	return i.getAmode().rn == spVReg
 }
