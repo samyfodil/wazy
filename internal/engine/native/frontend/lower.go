@@ -383,6 +383,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.push(v)
 			break
 		}
+		if v, ok := c.mulByPowerOfTwo(x, y); ok {
+			state.push(v)
+			break
+		}
 		imul := builder.AllocateInstruction()
 		imul.AsImul(x, y)
 		builder.InsertInstruction(imul)
@@ -7319,4 +7323,35 @@ func (c *Compiler) gcStoreElement(ref, index, v ssa.Value) {
 	lo, hi := c.gcSplitWords(v)
 	c.callGC(wasm.GCArraySet, ref, index, lo)
 	c.callGC(wasm.GCArraySet, ref, index, hi, c.gcConst(2))
+}
+
+// mulByPowerOfTwo returns x times y as a left shift where one of them is a constant power of two, which
+// the backends fold into an add's shifted operand or an address, as they do not a multiplication.
+func (c *Compiler) mulByPowerOfTwo(x, y ssa.Value) (ssa.Value, bool) {
+	builder := c.ssaBuilder
+	k := builder.InstructionOfValue(y)
+	if k == nil || k.Opcode() != ssa.OpcodeIconst {
+		x, y = y, x
+		if k = builder.InstructionOfValue(y); k == nil || k.Opcode() != ssa.OpcodeIconst {
+			return ssa.ValueInvalid, false
+		}
+	}
+	n := k.ConstantVal()
+	if x.Type() == ssa.TypeI32 {
+		n = uint64(uint32(n))
+	}
+	switch {
+	case n == 0 || n&(n-1) != 0:
+		return ssa.ValueInvalid, false
+	case n == 1:
+		return x, true
+	}
+	amount := builder.AllocateInstruction()
+	if x.Type() == ssa.TypeI32 {
+		amount.AsIconst32(uint32(bits.TrailingZeros64(n)))
+	} else {
+		amount.AsIconst64(uint64(bits.TrailingZeros64(n)))
+	}
+	shift := builder.AllocateInstruction().AsIshl(x, amount.Insert(builder).Return()).Insert(builder)
+	return shift.Return(), true
 }
