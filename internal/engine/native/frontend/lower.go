@@ -6575,6 +6575,9 @@ func (c *Compiler) results() int {
 	return len(c.wasmFunctionTyp.Results)
 }
 
+// brTableChainMax is the most labels, the default's included, a br_table is lowered as comparisons for.
+const brTableChainMax = 4
+
 func (c *Compiler) lowerBrTable(labels []uint32, index ssa.Value) {
 	state := c.state()
 	builder := c.ssaBuilder
@@ -6585,6 +6588,26 @@ func (c *Compiler) lowerBrTable(labels []uint32, index ssa.Value) {
 		numArgs = len(f.blockType.Params)
 	} else {
 		numArgs = len(f.blockType.Results)
+	}
+
+	// A few labels are a chain of comparisons: a conditional branch on each is cheaper than a jump through
+	// a table, which also has to clamp the index to the default first. Any other index takes the default.
+	if len(labels) <= brTableChainMax {
+		for i, l := range labels[:len(labels)-1] {
+			targetBlk, _ := state.brTargetArgNumFor(l)
+			k := builder.AllocateInstruction().AsIconst32(uint32(i)).Insert(builder).Return()
+			eq := builder.AllocateInstruction().AsIcmp(index, k, ssa.IntegerCmpCondEqual).Insert(builder).Return()
+			builder.AllocateInstruction().AsBrnz(eq, c.nPeekDup(numArgs), targetBlk).Insert(builder)
+			next := builder.AllocateBasicBlock()
+			c.insertJumpToBlock(ssa.ValuesNil, next)
+			c.finalizeKnownSafeBoundsAtTheEndOfBlock(builder.CurrentBlock().ID())
+			builder.SetCurrentBlock(next)
+			builder.Seal(next)
+			c.initializeCurrentBlockKnownBounds()
+		}
+		targetBlk, _ := state.brTargetArgNumFor(labels[len(labels)-1])
+		c.insertJumpToBlock(c.nPeekDup(numArgs), targetBlk)
+		return
 	}
 
 	varPool := builder.VarLengthPool()
