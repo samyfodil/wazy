@@ -335,13 +335,17 @@ func (m *machine) setupPrologue() {
 		}
 	}
 
+	// The frame size's store below reserves the spill slots too where its pre-index reaches past them.
+	spillByFrameSizeSlot := m.spillSlotSize > 0 && m.spillSlotSize+16 <= 256
 	if size := m.spillSlotSize; size > 0 {
 		// Check if size is 16-byte aligned.
 		if size&0xf != 0 {
 			panic(fmt.Errorf("BUG: spill slot size %d is not 16-byte aligned", size))
 		}
 
-		cur = m.addsAddOrSubStackPointer(cur, spVReg, size, false)
+		if !spillByFrameSizeSlot {
+			cur = m.addsAddOrSubStackPointer(cur, spVReg, size, false)
+		}
 
 		// At this point, the stack looks like:
 		//
@@ -398,7 +402,11 @@ func (m *machine) setupPrologue() {
 	//                                            +-----------------+ <---- SP
 	//            (low address)
 	//
-	cur = m.createFrameSizeSlot(cur, m.frameSize())
+	below := int64(16)
+	if spillByFrameSizeSlot {
+		below += m.spillSlotSize
+	}
+	cur = m.createFrameSizeSlot(cur, m.frameSize(), below)
 
 	// P3.0: for functions with an EH context, store the entry-ABI context
 	// registers (execCtx in x0, moduleCtx in x1) into the reserved fixed
@@ -456,7 +464,8 @@ func (m *machine) createReturnAddrAndSizeOfArgRetSlot(cur *instruction) *instruc
 	return cur
 }
 
-func (m *machine) createFrameSizeSlot(cur *instruction, s int64) *instruction {
+// createFrameSizeSlot stores the frame size s at below bytes under the stack pointer, which it moves there.
+func (m *machine) createFrameSizeSlot(cur *instruction, s, below int64) *instruction {
 	var frameSizeReg regalloc.VReg
 	if s > 0 {
 		cur = m.lowerConstantI64AndInsert(cur, tmpRegVReg, s)
@@ -465,8 +474,8 @@ func (m *machine) createFrameSizeSlot(cur *instruction, s int64) *instruction {
 		frameSizeReg = xzrVReg
 	}
 	_amode := addressModePreOrPostIndex(m, spVReg,
-		-16,  // stack pointer must be 16-byte aligned.
-		true, // Decrement before store.
+		-below, // a multiple of 16, as the stack pointer must be.
+		true,   // Decrement before store.
 	)
 	store := m.allocateInstr()
 	store.asStore(operandNR(frameSizeReg), _amode, 64)
@@ -654,7 +663,9 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 
 	// The stored limit is raised by backend.StackCheckBiasBytes, so only the excess is checked for.
 	adjust := max(requiredStackSize-backend.StackCheckBiasBytes, 0)
-	if immm12op, ok := asImm12Operand(uint64(adjust)); ok {
+	if adjust == 0 {
+		// sp itself is compared.
+	} else if immm12op, ok := asImm12Operand(uint64(adjust)); ok {
 		// sub tmp, sp, #adjust
 		sub := m.allocateInstr()
 		sub.asALU(aluOpSub, tmpRegVReg, operandNR(spVReg), immm12op, true)
@@ -681,9 +692,13 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 	ldr.asULoad(tmp2, amode, 64)
 	cur = linkInstr(cur, ldr)
 
-	// subs xzr, tmp, tmp2
+	// subs xzr, tmp, tmp2, or subs xzr, sp, tmp2.
 	subs := m.allocateInstr()
-	subs.asALU(aluOpSubS, xzrVReg, operandNR(tmpRegVReg), operandNR(tmp2), true)
+	if adjust == 0 {
+		subs.asALU(aluOpSubS, xzrVReg, operandNR(spVReg), operandNR(tmp2), true)
+	} else {
+		subs.asALU(aluOpSubS, xzrVReg, operandNR(tmpRegVReg), operandNR(tmp2), true)
+	}
 	cur = linkInstr(cur, subs)
 
 	// b.ge #imm

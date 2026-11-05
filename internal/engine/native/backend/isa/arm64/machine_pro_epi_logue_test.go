@@ -39,9 +39,8 @@ func TestMachine_setupPrologue(t *testing.T) {
 			spillSlotSize: 16,
 			exp: `
 	stp x30, xzr, [sp, #-0x10]!
-	sub sp, sp, #0x10
 	orr x27, xzr, #0x10
-	str x27, [sp, #-0x10]!
+	str x27, [sp, #-0x20]!
 	udf
 `,
 		},
@@ -140,9 +139,8 @@ func TestMachine_setupPrologue_ehContext(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, `
 	stp x30, xzr, [sp, #-0x10]!
-	sub sp, sp, #0x10
 	orr x27, xzr, #0x10
-	str x27, [sp, #-0x10]!
+	str x27, [sp, #-0x20]!
 	str x0, [sp, #0x10]
 	str x1, [sp, #0x18]
 	udf
@@ -278,9 +276,8 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 		{
 			requiredStackSize: 0x10,
 			exp: `
-	sub x27, sp, #0x0
 	ldr x11, [x0, #0x28]
-	subs xzr, x27, x11
+	subs xzr, sp, x11
 	b.ge #0x14
 	orr x27, xzr, #0x10
 	str x27, [x0, #0x40]
