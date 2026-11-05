@@ -995,6 +995,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.lowerDivByConst(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		result := builder.AllocateInstruction().AsSDiv(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
@@ -1003,6 +1007,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.lowerDivByConst(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		result := builder.AllocateInstruction().AsUDiv(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
@@ -1011,6 +1019,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.lowerDivByConst(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		result := builder.AllocateInstruction().AsSRem(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
@@ -1019,6 +1031,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.lowerDivByConst(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		result := builder.AllocateInstruction().AsURem(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
@@ -4965,8 +4981,45 @@ func (c *Compiler) staticUpperBoundU32Depth(v ssa.Value, depth int) (uint64, boo
 				return xBound << shift, true
 			}
 		}
+	case ssa.OpcodeUshr:
+		if shift, ok := c.constUpperBoundU32(y); ok && v.Type() == ssa.TypeI32 {
+			xBound, xOK := c.staticUpperBoundU32Depth(x, depth+1)
+			if !xOK {
+				xBound = uint64(^uint32(0))
+			}
+			return xBound >> (shift & 31), true
+		}
+	case ssa.OpcodeIreduce:
+		// The low half of a value that fits in it, as a division by a constant leaves its result.
+		if b := c.staticUpperBoundU64(x, depth+1); b <= uint64(^uint32(0)) {
+			return b, true
+		}
 	}
 	return 0, false
+}
+
+// staticUpperBoundU64 returns an inclusive upper bound for the unsigned 64-bit value v: all ones when
+// it knows none better. It covers the shapes a division by a constant lowers to.
+func (c *Compiler) staticUpperBoundU64(v ssa.Value, depth int) uint64 {
+	def := c.ssaBuilder.InstructionOfValue(v)
+	if def == nil || depth > 4 {
+		return ^uint64(0)
+	}
+	if def.Constant() {
+		return def.ConstantVal()
+	}
+	x, y := def.Arg2()
+	switch def.Opcode() {
+	case ssa.OpcodeUExtend:
+		if b, ok := c.staticUpperBoundU32Depth(def.Arg(), depth+1); ok {
+			return b
+		}
+		return uint64(^uint32(0))
+	case ssa.OpcodeUmulhi:
+		hi, _ := bits.Mul64(c.staticUpperBoundU64(x, depth+1), c.staticUpperBoundU64(y, depth+1))
+		return hi
+	}
+	return ^uint64(0)
 }
 
 // recordRangeSafeBound materializes the absolute address for a bounds-check-

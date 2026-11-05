@@ -1294,14 +1294,19 @@ blk0: (v0:i64, v1:i64, v2:i32)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i32 = Iconst_32 0xfffd
-	v4:i32 = Urem v2, v3
-	v5:i32 = Iconst_32 0x100000
-	v6:i32 = Iadd v4, v5
-	v7:i64 = Load v1, 0x8
-	v8:i64 = UExtend v6, 32->64
-	v9:i64 = Iadd v7, v8
-	v10:i32 = Load v9, 0x0
-	Jump blk_ret, v10
+	v4:i64 = UExtend v2, 32->64
+	v5:i64 = Iconst_64 0x100030009001c
+	v6:i64 = Imul v4, v5
+	v7:i64 = Iconst_64 0xfffd
+	v8:i64 = Umulhi v6, v7
+	v9:i32 = Ireduce v8
+	v10:i32 = Iconst_32 0x100000
+	v11:i32 = Iadd v9, v10
+	v12:i64 = Load v1, 0x8
+	v13:i64 = UExtend v11, 32->64
+	v14:i64 = Iadd v12, v13
+	v15:i32 = Load v14, 0x0
+	Jump blk_ret, v15
 `,
 		},
 		{
