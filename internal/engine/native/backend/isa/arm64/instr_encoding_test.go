@@ -76,40 +76,50 @@ func TestInstruction_encode(t *testing.T) {
 			i.asVecShiftImm(vecOpSshr, v1VReg, operandNR(v2VReg), operandShiftImm(7), vecArrangement2D)
 		}},
 
-		{want: "41a40d0f", setup: func(i *instruction) {
+		// shl, ushr and sshr by an immediate, as llvm-mc encodes them.
+		{want: "4154274f", setup: func(i *instruction) {
+			i.asVecShiftImm(vecOpShl, v1VReg, operandNR(v2VReg), operandShiftImm(7), vecArrangement4S)
+		}},
+		{want: "4104776f", setup: func(i *instruction) {
+			i.asVecShiftImm(vecOpUshr, v1VReg, operandNR(v2VReg), operandShiftImm(9), vecArrangement2D)
+		}},
+		{want: "4104214f", setup: func(i *instruction) {
+			i.asVecShiftImm(vecOpSshr, v1VReg, operandNR(v2VReg), operandShiftImm(31), vecArrangement4S)
+		}},
+		{want: "41a40b0f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement8B)
 		}},
-		{want: "41a40d4f", setup: func(i *instruction) { // sshll2
+		{want: "41a40b4f", setup: func(i *instruction) { // sshll2
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement16B)
 		}},
-		{want: "41a41d0f", setup: func(i *instruction) {
+		{want: "41a4130f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement4H)
 		}},
-		{want: "41a41d4f", setup: func(i *instruction) { // sshll2
+		{want: "41a4134f", setup: func(i *instruction) { // sshll2
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement8H)
 		}},
-		{want: "41a43d0f", setup: func(i *instruction) {
+		{want: "41a4230f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement2S)
 		}},
-		{want: "41a43d4f", setup: func(i *instruction) { // sshll2
+		{want: "41a4234f", setup: func(i *instruction) { // sshll2
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement4S)
 		}},
-		{want: "41a40d2f", setup: func(i *instruction) {
+		{want: "41a40b2f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement8B)
 		}},
-		{want: "41a40d6f", setup: func(i *instruction) { // ushll2
+		{want: "41a40b6f", setup: func(i *instruction) { // ushll2
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement16B)
 		}},
-		{want: "41a41d2f", setup: func(i *instruction) {
+		{want: "41a4132f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement4H)
 		}},
-		{want: "41a41d6f", setup: func(i *instruction) { // ushll2
+		{want: "41a4136f", setup: func(i *instruction) { // ushll2
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement8H)
 		}},
-		{want: "41a43d2f", setup: func(i *instruction) {
+		{want: "41a4232f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement2S)
 		}},
-		{want: "41a43d6f", setup: func(i *instruction) { // ushll2
+		{want: "41a4236f", setup: func(i *instruction) { // ushll2
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement4S)
 		}},
 		{want: "4100030e", setup: func(i *instruction) {

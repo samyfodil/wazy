@@ -265,6 +265,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerExtLoad(op, ptr, offset, ret)
 	case ssa.OpcodeCall, ssa.OpcodeCallIndirect:
 		m.lowerCall(instr)
+	case ssa.OpcodeVecMap:
+		m.lowerVecMap(instr)
 	case ssa.OpcodeYield:
 		// Below this frame the trampoline takes what a call passing nothing on the
 		// stack does, which the margin every call site keeps covers (see

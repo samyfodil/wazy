@@ -2088,46 +2088,53 @@ func encodeVecLanes(op vecOp, rd uint32, rn uint32, arr vecArrangement) uint32 {
 // encodeVecLanes encodes as Data Processing (Advanced SIMD scalar shift by immediate) depending on vecOp in
 // https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en
 func encodeVecShiftImm(op vecOp, rd uint32, rn, amount uint32, arr vecArrangement) uint32 {
-	var u, q, immh, immb, opcode uint32
+	var u, q, opcode uint32
+	left := false
 	switch op {
 	case vecOpSshll:
-		u, opcode = 0b0, 0b10100
+		u, opcode, left = 0b0, 0b10100, true
 	case vecOpUshll:
-		u, opcode = 0b1, 0b10100
+		u, opcode, left = 0b1, 0b10100, true
 	case vecOpSshr:
 		u, opcode = 0, 0b00000
+	case vecOpUshr:
+		u, opcode = 1, 0b00000
+	case vecOpShl:
+		u, opcode, left = 0, 0b01010, true
 	default:
 		panic("unsupported or illegal vecOp: " + op.String())
 	}
+	var esize uint32
 	switch arr {
 	case vecArrangement16B:
 		q = 0b1
 		fallthrough
 	case vecArrangement8B:
-		immh = 0b0001
-		immb = 8 - uint32(amount&0b111)
+		esize = 8
 	case vecArrangement8H:
 		q = 0b1
 		fallthrough
 	case vecArrangement4H:
-		v := 16 - uint32(amount&0b1111)
-		immb = v & 0b111
-		immh = 0b0010 | (v >> 3)
+		esize = 16
 	case vecArrangement4S:
 		q = 0b1
 		fallthrough
 	case vecArrangement2S:
-		v := 32 - uint32(amount&0b11111)
-		immb = v & 0b111
-		immh = 0b0100 | (v >> 3)
+		esize = 32
 	case vecArrangement2D:
-		q = 0b1
-		v := 64 - uint32(amount&0b111111)
-		immb = v & 0b111
-		immh = 0b1000 | (v >> 3)
+		q, esize = 0b1, 64
 	default:
 		panic("unsupported arrangement: " + arr.String())
 	}
+	// immh:immb is esize+amount for a left shift, and 2*esize-amount for a right one, amount in [1, esize].
+	amount &= esize - 1
+	v := 2*esize - amount
+	if left {
+		v = esize + amount
+	} else if amount == 0 {
+		v = esize // A right shift by 0 has no encoding: this is one by esize, as it always was. None asks.
+	}
+	immh, immb := v>>3, v&0b111
 	return q<<30 | u<<29 | 0b011110<<23 | immh<<19 | immb<<16 | 0b000001<<10 | opcode<<11 | 0b1<<10 | rn<<5 | rd
 }
 

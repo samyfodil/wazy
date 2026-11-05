@@ -65,7 +65,7 @@ func testVecMap(t *testing.T) {
 	_, err := compiler.CompileModule(ctx, vecMapWasm)
 	frontend.VecPlanHook = nil
 	require.NoError(t, err)
-	if runtime.GOARCH == "amd64" {
+	if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
 		require.Equal(t, 10, vectorized, "every loop of the module but counter's should be vectorized")
 	}
 	interp := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())

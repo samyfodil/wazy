@@ -63,6 +63,7 @@ const (
 	defKindNone defKind = iota + 1
 	defKindRD
 	defKindCall
+	defKindVecMap
 )
 
 var defKinds = [numInstructionKinds]defKind{
@@ -152,6 +153,7 @@ var defKinds = [numInstructionKinds]defKind{
 	tailCall:             defKindCall,
 	tailCallInd:          defKindCall,
 	yield:                defKindNone,
+	vecMap:               defKindVecMap,
 }
 
 // Defs returns the list of regalloc.VReg that are defined by the instruction.
@@ -169,6 +171,10 @@ func (i *instruction) Defs(regs *[]regalloc.VReg) []regalloc.VReg {
 		}
 		for i := byte(0); i < retFloatRealRegs; i++ {
 			*regs = append(*regs, regInfo.RealRegToVReg[floatParamResultRegs[i]])
+		}
+	case defKindVecMap:
+		if i.vecMapReduces() {
+			*regs = append(*regs, regInfo.RealRegToVReg[vecMapCountReg])
 		}
 	default:
 		panic(fmt.Sprintf("defKind for %v not defined", i))
@@ -202,6 +208,8 @@ const (
 	useKindAMode
 	useKindRNAMode
 	useKindCond
+	// useKindVecMap is the registers a vecMap reads or overwrites; see vecMapUses.
+	useKindVecMap
 	// useKindRDRewrite indicates an instruction where RD is used both as a source and destination.
 	// A temporary register for RD must be allocated explicitly with the source copied to this
 	// register before the instruction and the value copied from this register to the instruction
@@ -296,6 +304,7 @@ var useKinds = [numInstructionKinds]useKind{
 	tailCall:             useKindCall,
 	tailCallInd:          useKindCallInd,
 	yield:                useKindRN,
+	vecMap:               useKindVecMap,
 }
 
 // Uses returns the list of regalloc.VReg that are used by the instruction.
@@ -304,6 +313,8 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 	*regs = (*regs)[:0]
 	switch useKinds[i.kind] {
 	case useKindNone:
+	case useKindVecMap:
+		i.vecMapUses(regs)
 	case useKindRN:
 		if rn := i.rn.reg(); rn.Valid() {
 			*regs = append(*regs, rn)
@@ -1698,6 +1709,8 @@ func (i *instruction) String() (str string) {
 		str = fmt.Sprintf("b %s", formatVRegSized(i.rn.nr(), 64))
 	case yield:
 		str = fmt.Sprintf("yield %s", formatVRegSized(i.rn.nr(), 64))
+	case vecMap:
+		str = i.vecMapString()
 	case udf:
 		str = "udf"
 	case emitSourceOffsetInfo:
@@ -1989,6 +2002,9 @@ const (
 	// emitSourceOffsetInfo is a dummy instruction to emit source offset info.
 	// The existence of this instruction does not affect the execution.
 	emitSourceOffsetInfo
+
+	// vecMap is an OpcodeVecMap until expandVecMaps turns it into its loop; see lowerVecMap.
+	vecMap
 
 	// ------------------- do not define below this line -------------------
 	numInstructionKinds
@@ -2294,6 +2310,10 @@ func (b vecOp) String() string {
 		return "trn1"
 	case vecOpTrn2:
 		return "trn2"
+	case vecOpUshr:
+		return "ushr"
+	case vecOpShl:
+		return "shl"
 	case vecOpFmin:
 		return "fmin"
 	case vecOpFmax:
@@ -2384,6 +2404,9 @@ const (
 	vecOpUzp2
 	vecOpTrn1
 	vecOpTrn2
+	// vecOpUshr and vecOpShl shift each lane right, unsigned, or left, by an immediate.
+	vecOpUshr
+	vecOpShl
 )
 
 // bitOp determines the type of bitwise operation, i.e. which member of the

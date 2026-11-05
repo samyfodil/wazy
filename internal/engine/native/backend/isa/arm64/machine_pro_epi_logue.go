@@ -12,6 +12,7 @@ import (
 func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
+	m.expandVecMaps()
 	m.pairSpillAccesses()
 	m.emitTrapIslands()
 	m.emitPreemptIslands()

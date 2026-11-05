@@ -184,7 +184,7 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 		offset:                            offset,
 		loopYield:                         LoopYield,
 		inlineLeaves:                      true,
-		vecMap:                            runtime.GOARCH == "amd64",
+		vecMap:                            runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64",
 		needSourceOffsetInfo:              sourceInfo,
 		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
