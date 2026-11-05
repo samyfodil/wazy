@@ -55,7 +55,17 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 				target = b.floatConstTarget(loopOf[blk.id], floatConsts)
 			}
 			if cur.opcode == OpcodeIconst && hoistIntConsts && multiInstructionConst(cur) && b.everyIteration(blk, loopOf[blk.id]) {
-				target = b.floatConstTarget(loopOf[blk.id], intConsts)
+				// One register serves every use of a value: a copy already before the loop takes the rest.
+				if pre := b.dominators[loopOf[blk.id].id]; pre != nil {
+					if same := pre.pinnedConstLike(cur); same != nil {
+						blk.removeInstruction(cur)
+						b.alias(cur.rValue, same.rValue)
+						defBlk[cur.rValue.ID()] = pre
+						cur = next
+						continue
+					}
+				}
+				target = b.intConstTarget(loopOf[blk.id], intConsts)
 			}
 			if target != nil {
 				blk.removeInstruction(cur)
@@ -437,8 +447,32 @@ func (b *builder) floatConstTarget(header *basicBlock, hoisted map[*basicBlock]i
 }
 
 // maxHoistedFloatConsts is how many float constants floatConstTarget moves out of one loop: half the
-// vector registers amd64 has. It counts integer constants separately.
-const maxHoistedFloatConsts = 8
+// vector registers amd64 has. maxHoistedIntConsts is how many distinct integer ones intConstTarget does:
+// arm64, the only one that does, allocates 27 general registers.
+const (
+	maxHoistedFloatConsts = 8
+	maxHoistedIntConsts   = 16
+)
+
+// intConstTarget is floatConstTarget for an integer constant.
+func (b *builder) intConstTarget(header *basicBlock, hoisted map[*basicBlock]int) *basicBlock {
+	preheader := b.dominators[header.id]
+	if preheader == nil || preheader == header || preheader.invalid || hoisted[header] == maxHoistedIntConsts {
+		return nil
+	}
+	hoisted[header]++
+	return preheader
+}
+
+// pinnedConstLike returns the integer constant already pinned in blk with instr's value and type, if any.
+func (blk *basicBlock) pinnedConstLike(instr *Instruction) *Instruction {
+	for cur := blk.rootInstr; cur != nil; cur = cur.next {
+		if cur.pinned && cur.opcode == OpcodeIconst && cur.typ == instr.typ && cur.u1 == instr.u1 {
+			return cur
+		}
+	}
+	return nil
+}
 
 // hoistIntConsts is whether a loop's integer constants that take more than one instruction to make are
 // computed before the loop, pinned like float ones: on arm64, whose instructions take only small

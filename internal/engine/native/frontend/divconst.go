@@ -50,6 +50,13 @@ func (c *Compiler) lowerDivByConst(op wasm.Opcode, x, y ssa.Value) (ssa.Value, b
 	if ad&(ad-1) == 0 {
 		return l.sPow2(x, ad, sd < 0, rem), true
 	}
+	if !is64 {
+		q := l.sdiv32(x, int32(sd))
+		if rem {
+			return l.sub(x, l.mul(q, l.k(d))), true
+		}
+		return q, true
+	}
 	// |x| divided by |d|, unsigned, then the signs: a quotient is negative when exactly one of them is,
 	// and a remainder takes the dividend's sign.
 	s := l.sshr(x, width-1)
@@ -173,6 +180,66 @@ func (l *divLowering) urem(x ssa.Value, d uint64) ssa.Value {
 		return l.wrap(l.umulhi(frac, l.k64(d)))
 	}
 	return l.sub(x, l.mul(l.udiv(x, d), l.k(d)))
+}
+
+// sdiv32 divides the i32 x, signed, by d, which is neither 0, nor ±1, nor ± a power of two: the high
+// half of x times d's magic number, corrected by x when their signs disagree, shifted, and one more
+// when negative to round towards zero (Warren, "Hacker's Delight", 10-4).
+func (l *divLowering) sdiv32(x ssa.Value, d int32) ssa.Value {
+	m, sh := magicS32(d)
+	wide := l.b().AllocateInstruction().AsSExtend(x, 32, 64).Insert(l.b()).Return()
+	p := l.mul(wide, l.k64(uint64(int64(m))))
+	var q ssa.Value
+	if d > 0 && m < 0 || d < 0 && m > 0 {
+		hi := l.wrap(l.sshr(p, 32))
+		if d > 0 {
+			hi = l.add(hi, x)
+		} else {
+			hi = l.sub(hi, x)
+		}
+		q = hi
+		if sh > 0 {
+			q = l.sshr(hi, uint64(sh))
+		}
+	} else {
+		q = l.wrap(l.sshr(p, 32+uint64(sh)))
+	}
+	return l.add(q, l.ushr(q, 31))
+}
+
+// magicS32 returns the magic number and shift of signed 32-bit division by d, |d| at least 2 (Warren,
+// "Hacker's Delight", figure 10-1).
+func magicS32(d int32) (int32, uint) {
+	const two31 = uint32(1) << 31
+	ad := uint32(d)
+	if d < 0 {
+		ad = -ad
+	}
+	t := two31 + uint32(d)>>31
+	anc := t - 1 - t%ad
+	p := 31
+	q1, r1 := two31/anc, two31-two31/anc*anc
+	q2, r2 := two31/ad, two31-two31/ad*ad
+	for {
+		p++
+		q1, r1 = 2*q1, 2*r1
+		if r1 >= anc {
+			q1, r1 = q1+1, r1-anc
+		}
+		q2, r2 = 2*q2, 2*r2
+		if r2 >= ad {
+			q2, r2 = q2+1, r2-ad
+		}
+		delta := ad - r2
+		if !(q1 < delta || q1 == delta && r1 == 0) {
+			break
+		}
+	}
+	m := int32(q2 + 1)
+	if d < 0 {
+		m = -m
+	}
+	return m, uint(p - 32)
 }
 
 // sPow2 divides x, signed, by ±ad, a power of two: shifting rounds towards minus infinity, so a
