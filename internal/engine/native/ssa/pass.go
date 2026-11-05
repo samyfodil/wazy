@@ -26,6 +26,7 @@ func (b *builder) runPreBlockLayoutPasses() {
 	// The result of passCalculateImmediateDominators will be used by various passes below.
 	passCalculateImmediateDominators(b)
 	passRedundantPhiEliminationOpt(b)
+	passWidenMemoryBoundsOpt(b)
 	passDominatedMemoryBoundsEliminationOpt(b)
 
 	// Note: wazy intentionally does NOT run middle-end "language compiler"
@@ -100,6 +101,71 @@ func passDominatedMemoryBoundsEliminationOpt(b *builder) {
 }
 
 func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID, ceil uint64, ok bool) {
+	base, memLen, ceil, _, _, ok = memoryBoundsCheckParts(b, instr)
+	return
+}
+
+// passWidenMemoryBoundsOpt merges a bounds check into an earlier one in its block of the same address and
+// memory, where only pure instructions, loads and other bounds checks run between them: the earlier one
+// checks the greater ceiling of the two, and the later one goes. Two fields of a struct read one after
+// the other then cost one check. A check that would have trapped later traps earlier instead, as out of
+// bounds still, with nothing observable having happened between.
+func passWidenMemoryBoundsOpt(b *builder) {
+	type open struct {
+		base, memLen ValueID
+		ceil         uint64
+		check        *Instruction
+		ext, lenV    Value
+	}
+	var opens []open
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		opens = opens[:0]
+		for cur := blk.rootInstr; cur != nil; {
+			next := cur.next
+			base, memLen, ceil, ext, lenV, ok := memoryBoundsCheckParts(b, cur)
+			switch {
+			case ok:
+				i := 0
+				for i < len(opens) && (opens[i].base != base || opens[i].memLen != memLen) {
+					i++
+				}
+				if i == len(opens) {
+					opens = append(opens, open{base: base, memLen: memLen, ceil: ceil, check: cur, ext: ext, lenV: lenV})
+					break
+				}
+				if o := &opens[i]; ceil > o.ceil {
+					// memLen < zext(base) + ceil: the form that holds for any ceiling.
+					k := b.insertBefore(blk, o.check, b.AllocateInstruction().AsIconst64(ceil))
+					end := b.insertBefore(blk, o.check, b.AllocateInstruction().AsIadd(o.ext, k))
+					o.check.v2 = b.insertBefore(blk, o.check, b.AllocateInstruction().AsIcmp(o.lenV, end, IntegerCmpCondUnsignedLessThan))
+					o.ceil = ceil
+				}
+				blk.removeInstruction(cur)
+			case cur.sideEffect() != sideEffectNone:
+				opens = opens[:0]
+			}
+			cur = next
+		}
+	}
+}
+
+// insertBefore inserts instr, which returns one value, into blk right before at, and returns its value.
+func (b *builder) insertBefore(blk *basicBlock, at, instr *Instruction) Value {
+	t, _ := instructionReturnTypes[instr.opcode](b, instr)
+	instr.rValue = b.allocateValue(t).setInstructionID(instr.id)
+	instr.prev, instr.next = at.prev, at
+	if at.prev != nil {
+		at.prev.next = instr
+	} else {
+		blk.rootInstr = instr
+	}
+	at.prev = instr
+	return instr.rValue
+}
+
+// memoryBoundsCheckParts is memoryBoundsCheckData with the zero-extended address and the memory length it
+// compares.
+func memoryBoundsCheckParts(b *builder, instr *Instruction) (base, memLen ValueID, ceil uint64, ext, lenV Value, ok bool) {
 	if instr.opcode != OpcodeExitIfTrueWithCode {
 		return
 	}
@@ -127,7 +193,7 @@ func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID
 		if from, to, _ := extend.ExtendData(); from != 32 || to != 64 {
 			return
 		}
-		return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(memLenV).ID(), uint64(constant.ConstantVal()), true
+		return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(memLenV).ID(), uint64(constant.ConstantVal()), lenOperand, memLenV, true
 	}
 	if cond != IntegerCmpCondUnsignedLessThan {
 		return
@@ -153,7 +219,7 @@ func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID
 	if from != 32 || to != 64 {
 		return
 	}
-	return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(lenOperand).ID(), ceil, true
+	return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(lenOperand).ID(), ceil, extended, lenOperand, true
 }
 
 func (b *builder) hasDominatingMemoryBound(blk *basicBlock, base, memLen ValueID, ceil uint64) bool {
