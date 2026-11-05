@@ -90,6 +90,8 @@ type (
 		loopBlocksOf  map[int32][2]int32
 		blockClobbers []RegSet
 		loopClobbers  map[int32]RegSet
+		// feeders are the values recordFeed found copied into another.
+		feeders []*vrState[I, B, F]
 		// firstUseBuf is parallel to liveInsBuf: where a live-in is first used in its block, from the
 		// block's start, or -1. distBuf holds the blocks' next-use distances, and stamp numbers the passes
 		// that use vrState scratch. See computeNextUseDistances.
@@ -179,6 +181,9 @@ type (
 		nextUseBlockID int32
 		// useDepth is the deepest loop nesting of any block using this value.
 		useDepth uint8
+		// crosses is the fixed registers instructions overwrite while this value is live across them, other
+		// than a call's: in one of those, the value would be moved out of the way there.
+		crosses RegSet
 		// firstUse is, while firstUseBlk is that block's ID, where livenessAnalysis found this value first
 		// used in a block, counting instructions from the end.
 		firstUse, firstUseBlk int32
@@ -286,6 +291,7 @@ func resetVrState[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) {
 	vs.lastUseUpdatedAtBlockID = -1
 	vs.nextUseBlockID = -1
 	vs.useDepth = 0
+	vs.crosses = 0
 	vs.firstUseBlk, vs.distStamp, vs.ownStamp = -1, -1, -1
 	vs.homeReg = RealRegInvalid
 	vs.feedsReg = RealRegInvalid
@@ -501,6 +507,7 @@ func (b *blockState[I, B, F]) dump(a *RegisterInfo) {
 func (a *Allocator[I, B, F]) DoAllocation(f F) {
 	a.computeLoopDepths(f)
 	a.livenessAnalysis(f)
+	a.propagateCrossings()
 	a.computeLoopClobbers()
 	a.computeNextUseDistances(f)
 	a.alloc(f)
@@ -542,6 +549,7 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 
 	a.liveInsBuf = a.liveInsBuf[:0]
 	a.firstUseBuf = a.firstUseBuf[:0]
+	a.feeders = a.feeders[:0]
 
 	for i := range s.realRegStates {
 		vs := &s.realRegStates[i]
@@ -600,18 +608,30 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 
 			var use, def VReg
 			var defIsPhi bool
-			if instr.IsCall() || instr.IsIndirectCall() {
+			call := instr.IsCall() || instr.IsIndirectCall()
+			if call {
 				clobbers |= a.regInfo.CallerSavedRegisters
 			}
+			var fixed RegSet
 			for _, def = range instr.Defs(&a.vs) {
 				if def.IsRealReg() {
-					clobbers = clobbers.add(def.RealReg())
+					fixed = fixed.add(def.RealReg())
 				}
 				if !def.IsRealReg() {
 					st := s.getOrAllocateVRegState(def)
 					defIsPhi = st.isPhi
 					// Note: We use .spilled field to store the flag.
 					st.spilled = flagDeleted
+				}
+			}
+			clobbers |= fixed
+			// A copy into a fixed register sets up the instruction after it, a call's arguments say, which
+			// is the one that counts.
+			if fixed != 0 && !call && !instr.IsCopy() {
+				for _, st := range a.ss {
+					if st.spilled == flagLive { //nolint:gosimple
+						st.crosses |= fixed
+					}
 				}
 			}
 			for _, use = range instr.Uses(&a.vs) {
@@ -1096,17 +1116,22 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 				// Allocate a new real register if `def` is not currently assigned one.
 				// It can happen when multiple instructions define the same VReg (e.g. const loads).
 				if r == RealRegInvalid {
+					// A value keeps clear of the registers instructions overwrite while it is live across them,
+					// and a loop's phi, live across the whole loop, of those the loop overwrites at fixed
+					// places, a division's or a call's say, while another is free.
+					avoid := vState.crosses
+					if vState.isPhi && vState.defBlk.LoopHeader() {
+						avoid |= a.loopClobbers[int32(vState.defBlk.ID())]
+					}
 					// A value feeding a block parameter goes where that parameter lives, which makes the copy
 					// into it a no-op; that matters more than reusing a copy's source register, which saves
 					// only this one move.
-					if home := homeOf(vState); home != RealRegInvalid && !s.regsInUse.has(home) {
-						r = home
+					home := homeOf(vState)
+					if vState.crosses.has(home) {
+						home = RealRegInvalid
 					}
-					// A loop's phi, live across the whole loop, keeps clear of the registers the loop
-					// overwrites at fixed places, a division's or a call's say, while another is free.
-					var avoid RegSet
-					if vState.isPhi && vState.defBlk.LoopHeader() {
-						avoid = a.loopClobbers[int32(vState.defBlk.ID())]
+					if home != RealRegInvalid && !s.regsInUse.has(home) {
+						r = home
 					}
 					if r == RealRegInvalid && instr.IsCopy() {
 						copySrc := instr.Uses(&a.vs)[0].RealReg()
@@ -1114,12 +1139,22 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 							r = copySrc
 						}
 					}
-					if r == RealRegInvalid && avoid != 0 {
-						r = s.findAllocatable(a.regInfo.AllocatableRegisters[def.RegType()], avoid)
-					}
 					if r == RealRegInvalid {
-						typ := def.RegType()
-						r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[typ], RegSet(0), homeOf(vState))
+						regs := a.regInfo.AllocatableRegisters[def.RegType()]
+						if avoid != 0 {
+							r = s.findAllocatable(regs, avoid)
+						}
+						if r == RealRegInvalid {
+							// Evicting a value now, once, beats the value being moved aside later.
+							forbidden := RegSet(0)
+							for _, cand := range regs {
+								if !avoid.has(cand) {
+									forbidden = avoid
+									break
+								}
+							}
+							r = a.findOrSpillAllocatable(s, regs, forbidden, home)
+						}
 					}
 					s.useRealReg(r, vState)
 				}
@@ -1845,8 +1880,37 @@ func (a *Allocator[I, B, F]) recordFeed(instr I) {
 	switch {
 	case src.feeds == nil:
 		src.feeds = dst
+		a.feeders = append(a.feeders, src)
 	case src.feeds != dst && src.feeds2 == nil:
 		src.feeds2 = dst
+	}
+}
+
+// propagateCrossings has a value copied into another, a block parameter say, share the fixed registers it
+// crosses: the copy is free only if both sit in the same register. Not the one the other is copied into
+// itself, as a dividend is.
+func (a *Allocator[I, B, F]) propagateCrossings() {
+	// A copy chain through a temporary or two is the deepest that matters.
+	for range 3 {
+		changed := false
+		for _, src := range a.feeders {
+			for _, dst := range [2]*vrState[I, B, F]{src.feeds, src.feeds2} {
+				if dst == nil {
+					continue
+				}
+				c := src.crosses
+				if dst.feedsReg != RealRegInvalid {
+					c &^= RegSet(0).add(dst.feedsReg)
+				}
+				if dst.crosses|c != dst.crosses {
+					dst.crosses |= c
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			return
+		}
 	}
 }
 
