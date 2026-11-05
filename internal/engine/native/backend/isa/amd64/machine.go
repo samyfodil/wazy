@@ -20,6 +20,7 @@ func NewBackend() backend.Machine {
 		cpuFeatures:                         platform.CpuFeatures,
 		regAlloc:                            regalloc.NewAllocator[*instruction, *labelPosition, *regAllocFn](regInfo),
 		spillSlots:                          map[regalloc.VRegID]int64{},
+		threadBegins:                        map[*instruction]label{},
 		amodePool:                           nativeapi.NewPool[amode](nil),
 		labelPositionPool:                   nativeapi.NewIDedPool[labelPosition](resetLabelPosition),
 		instrPool:                           nativeapi.NewPool[instruction](resetInstruction),
@@ -94,6 +95,9 @@ type (
 
 		labelResolutionPends []labelResolutionPend
 
+		// threadTargets and threadBegins are threadJumps' scratch.
+		threadTargets []label
+		threadBegins  map[*instruction]label
 		// jmpTableTargets holds the labels of the jump table targets.
 		jmpTableTargets [][]uint32
 		// jmpTableTargetNext is the index to the jmpTableTargets slice to be used for the next jump table.

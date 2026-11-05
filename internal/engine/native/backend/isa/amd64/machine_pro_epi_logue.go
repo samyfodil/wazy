@@ -12,6 +12,7 @@ func (m *machine) PostRegAlloc() {
 	m.postRegAlloc()
 	m.emitTrapIslands()
 	m.emitPreemptIslands()
+	m.threadJumps()
 }
 
 // emitPreemptIslands materializes the out-of-line halves of masked preemption

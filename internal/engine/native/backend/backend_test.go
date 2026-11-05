@@ -351,7 +351,7 @@ L4 (SSA Block: blk4):
 	lea 1(%rcx), %ecx
 	movl $1, %edx
 	testl %edx, %edx
-	jnz L6
+	jnz L1
 	jmp L5
 L6 (SSA Block: blk6):
 	jmp L1
@@ -410,7 +410,7 @@ L1 (SSA Block: blk1):
 L4 (SSA Block: blk4):
 	lea 1(%rax), %eax
 	cmpl $100, %eax
-	jb L8
+	jb L1
 	jmp L5
 L8 (SSA Block: blk8):
 	jmp L1
