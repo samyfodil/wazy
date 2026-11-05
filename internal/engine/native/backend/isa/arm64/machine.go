@@ -60,6 +60,9 @@ type (
 		// condBrRelocs holds the conditional branches which need offset relocation.
 		condBrRelocs []condBrReloc
 
+		// threadTargets and threadBegins are threadJumps' scratch.
+		threadTargets []label
+		threadBegins  map[*instruction]label
 		// jmpTableTargets holds the labels of the jump table targets.
 		jmpTableTargets [][]uint32
 		// jmpTableTargetNext is the index to the jmpTableTargets slice to be used for the next jump table.
@@ -208,6 +211,7 @@ func NewBackend() backend.Machine {
 	m := &machine{
 		spillSlots:        make(map[regalloc.VRegID]int64),
 		remat:             map[regalloc.VRegID]uint64{},
+		threadBegins:      map[*instruction]label{},
 		regAlloc:          regalloc.NewAllocator[*instruction, *labelPosition, *regAllocFn](regInfo),
 		amodePool:         nativeapi.NewPool[addressMode](resetAddressMode),
 		instrPool:         nativeapi.NewPool[instruction](resetInstruction),

@@ -15,6 +15,7 @@ func (m *machine) PostRegAlloc() {
 	m.pairSpillAccesses()
 	m.emitTrapIslands()
 	m.emitPreemptIslands()
+	m.threadJumps()
 	m.emitFpConstPool()
 }
 

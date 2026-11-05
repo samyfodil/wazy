@@ -321,7 +321,7 @@ L9:
 L4 (SSA Block: blk4):
 	add w8, w8, #0x1
 	orr w9, wzr, #0x1
-	cbnz w9, #0x8 (L6)
+	cbnz w9, #-0x10 (L1)
 	b #0x8 (L5)
 L6 (SSA Block: blk6):
 	b #-0x18 (L1)
@@ -384,7 +384,7 @@ L1 (SSA Block: blk1):
 L4 (SSA Block: blk4):
 	add w8, w8, #0x1
 	subs wzr, w8, #0x64
-	b.lo #0x8, (L8)
+	b.lo #-0x8, (L1)
 	b #0x8 (L5)
 L8 (SSA Block: blk8):
 	b #-0x10 (L1)
@@ -520,7 +520,7 @@ L4 (SSA Block: blk4):
 	b #-0x8 (L1)
 L3 (SSA Block: blk3):
 	yield x0
-	b #-0x14 (L4)
+	b #-0x1c (L1)
 `,
 		},
 		{
@@ -647,9 +647,8 @@ L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 	mov x8, xzr
-	cbz w8, #0x8 L2
+	cbz w8, #0x4 L2
 L1 (SSA Block: blk1):
-	b #0x4 (L3)
 L2 (SSA Block: blk2):
 L3 (SSA Block: blk3):
 	add sp, sp, #0x10
