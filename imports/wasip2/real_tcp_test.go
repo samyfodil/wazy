@@ -111,7 +111,9 @@ func TestRealTCP(t *testing.T) {
 			}
 			defer inst.Close(ctx)
 
-			if _, err := inst.Call(ctx, "wasi:cli/run@0.2.3#run"); err != nil {
+			callCtx, cancel := context.WithTimeout(ctx, time.Minute)
+			defer cancel()
+			if _, err := inst.Call(callCtx, "wasi:cli/run@0.2.3#run"); err != nil {
 				t.Fatalf("Call run(): %v (stdout so far: %q, stderr: %q)", err, stdout.String(), stderr.String())
 			}
 

@@ -242,7 +242,9 @@ type WASIConfig struct {
 	// access) injects a Dialer that ignores the guest-requested address
 	// and always dials that server (or one that enforces loopback-only
 	// addresses), without needing any change to wasi_sockets.go itself.
-	// Has no effect unless AllowTCP is also true.
+	// Has no effect unless AllowTCP is also true. A call whose context ends
+	// while Dialer is still dialing returns at once, and a connection Dialer
+	// makes after that is closed.
 	Dialer func(network, address string) (net.Conn, error)
 
 	// ResolveIP, when non-nil, replaces net.DefaultResolver.LookupIP as the
@@ -339,9 +341,9 @@ func WithWASI(cfg WASIConfig) []component.Option {
 	// and every fallback lookup reports "not found", falling through to
 	// each dispatch's existing "unknown rep" error exactly as before this
 	// field existed.
-	dial := cfg.Dialer
-	if dial == nil {
-		dial = func(network, address string) (net.Conn, error) { return net.Dial(network, address) }
+	dial := (&net.Dialer{}).DialContext
+	if cfg.Dialer != nil {
+		dial = cancelableDial(cfg.Dialer)
 	}
 	listenPacket := cfg.ListenPacket
 	if listenPacket == nil {
@@ -615,7 +617,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 	// fallback below) rather than fs's/sockets' differently-worded "not
 	// found" errors, so all three output-stream methods report an unknown
 	// rep the same way.
-	writeSink := func(rep uint32, buf []byte) error {
+	writeSink := func(ctx context.Context, rep uint32, buf []byte) error {
 		if w, ok := writerForRep(rep); ok {
 			_, err := w.Write(buf)
 			return err
@@ -624,7 +626,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 			return fs.writeStreamWrite(rep, buf)
 		}
 		if s, found := sockets.outStreamNode(rep); found {
-			return s.write(buf)
+			return s.write(ctx, buf)
 		}
 		if found, err := httphost.bodyStreamWrite(rep, buf); found {
 			return err
@@ -657,7 +659,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		return wasiCheckWriteBudget, nil
 	}
 
-	write := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+	write := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]output-stream.write: expected 2 args (self, contents), got %d", len(args))
 		}
@@ -669,7 +671,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 		if err != nil {
 			return nil, fmt.Errorf("[method]output-stream.write: contents: %w", err)
 		}
-		if err := writeSink(rep, buf); err != nil {
+		if err := writeSink(ctx, rep, buf); err != nil {
 			return nil, fmt.Errorf("[method]output-stream.write: %w", err)
 		}
 		return wasiResultOk, nil

@@ -187,8 +187,9 @@ const CoreFeatureTailCall CoreFeatures = CoreFeatureSIMD << 2
 
 // CoreFeatureExtendedConst enables extended constant expressions.
 //   - Enables i32.add/sub/mul and i64.add/sub/mul in constant expressions.
-//   - Enables references to any previous global index in constant expressions,
-//     instead of just imported globals.
+//
+// It does not let a constant expression read a module-defined global; that
+// came with CoreFeatureGC.
 //
 // See https://github.com/WebAssembly/extended-const for further details.
 const CoreFeatureExtendedConst CoreFeatures = CoreFeatureSIMD << 3
@@ -246,6 +247,9 @@ const CoreFeatureMemory64 CoreFeatures = CoreFeatureSIMD << 8
 //     types, and may declare a subtype relation with `sub` / `sub final`.
 //   - Nine abstract heap types are added -- nofunc, noextern, none, any, eq,
 //     i31, struct, array, noexn -- with a subtyping lattice over them.
+//   - A constant expression may read an immutable module-defined global, not
+//     just an imported one. A global's initializer may read only the globals
+//     declared before it.
 //
 // See https://github.com/WebAssembly/gc for further details.
 const CoreFeatureGC CoreFeatures = CoreFeatureSIMD << 9

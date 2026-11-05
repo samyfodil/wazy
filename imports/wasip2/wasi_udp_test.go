@@ -1,6 +1,7 @@
 package wasip2
 
 import (
+	"context"
 	"errors"
 	"net"
 	"runtime"
@@ -125,7 +126,7 @@ func TestIncomingDatagramStreamReceive(t *testing.T) {
 		}
 		defer pc.Close()
 		s := &incomingDatagramStream{pconn: pc}
-		got, err := s.receive(0)
+		got, err := s.receive(context.Background(), 0)
 		if err != nil {
 			t.Fatalf("receive(0): %v", err)
 		}
@@ -156,7 +157,7 @@ func TestIncomingDatagramStreamReceive(t *testing.T) {
 		}
 
 		s := &incomingDatagramStream{pconn: serverPC}
-		got, err := s.receive(1)
+		got, err := s.receive(context.Background(), 1)
 		if err != nil {
 			t.Fatalf("receive(1): %v", err)
 		}
@@ -211,7 +212,7 @@ func TestIncomingDatagramStreamReceive(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := &incomingDatagramStream{pconn: serverPC, remote: peerAddr}
-		got, err := s.receive(1)
+		got, err := s.receive(context.Background(), 1)
 		if err != nil {
 			t.Fatalf("receive(1): %v", err)
 		}
@@ -236,7 +237,7 @@ func TestIncomingDatagramStreamReceive(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := &incomingDatagramStream{pconn: pc}
-		got, err := s.receive(1)
+		got, err := s.receive(context.Background(), 1)
 		if err != nil {
 			t.Fatalf("receive(1): %v", err)
 		}
@@ -279,7 +280,7 @@ func TestOutgoingDatagramStreamSend(t *testing.T) {
 		datagrams := []abi.Value{
 			[]abi.Value{wasiListFromBytes([]byte("hi")), remoteVal},
 		}
-		got, err := s.send(datagrams)
+		got, err := s.send(context.Background(), datagrams)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -312,7 +313,7 @@ func TestOutgoingDatagramStreamSend(t *testing.T) {
 		datagrams := []abi.Value{
 			[]abi.Value{wasiListFromBytes([]byte("bye")), nil},
 		}
-		got, err := s.send(datagrams)
+		got, err := s.send(context.Background(), datagrams)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -337,7 +338,7 @@ func TestOutgoingDatagramStreamSend(t *testing.T) {
 	t.Run("empty datagram list", func(t *testing.T) {
 		pc, _ := newPeer(t)
 		s := &outgoingDatagramStream{pconn: pc}
-		got, err := s.send(nil)
+		got, err := s.send(context.Background(), nil)
 		if err != nil {
 			t.Fatalf("send(nil): %v", err)
 		}
@@ -350,7 +351,7 @@ func TestOutgoingDatagramStreamSend(t *testing.T) {
 	t.Run("malformed record", func(t *testing.T) {
 		pc, _ := newPeer(t)
 		s := &outgoingDatagramStream{pconn: pc}
-		if _, err := s.send([]abi.Value{uint32(1)}); err == nil {
+		if _, err := s.send(context.Background(), []abi.Value{uint32(1)}); err == nil {
 			t.Fatal("expected an error for a malformed datagram record, got nil")
 		}
 	})
@@ -361,7 +362,7 @@ func TestOutgoingDatagramStreamSend(t *testing.T) {
 		datagrams := []abi.Value{
 			[]abi.Value{wasiListFromBytes([]byte("x")), nil},
 		}
-		got, err := s.send(datagrams)
+		got, err := s.send(context.Background(), datagrams)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
