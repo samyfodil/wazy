@@ -50,6 +50,8 @@ func (b *builder) runPreBlockLayoutPasses() {
 	// instruction with the group id the backend reads.
 	passLoopInvariantCodeMotionOpt(b)
 
+	passCloneSharedComparesOpt(b)
+
 	// passDeadCodeEliminationOpt could be more accurate if we do this after other optimizations.
 	passDeadCodeEliminationOpt(b)
 	b.donePreBlockLayoutPasses = true
@@ -103,6 +105,51 @@ func passDominatedMemoryBoundsEliminationOpt(b *builder) {
 func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID, ceil uint64, ok bool) {
 	base, memLen, ceil, _, _, ok = memoryBoundsCheckParts(b, instr)
 	return
+}
+
+// passCloneSharedComparesOpt gives each select and conditional branch on an integer comparison of its
+// block a copy of the comparison of its own, right before it, where the comparison has other uses: a
+// comparison only one instruction uses becomes the flags that instruction reads, rather than a 0 or 1 in a
+// register that it tests again. The original goes where nothing else uses it.
+func passCloneSharedComparesOpt(b *builder) {
+	uses := make(map[ValueID]int)
+	blockOf := make(map[*Instruction]*basicBlock)
+	count := func(v Value) {
+		if v.Valid() {
+			uses[b.resolveAlias(v).ID()]++
+		}
+	}
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		for cur := blk.rootInstr; cur != nil; cur = cur.next {
+			if cur.opcode == OpcodeIcmp {
+				blockOf[cur] = blk
+			}
+			v1, v2, v3, vs := cur.Args()
+			count(v1)
+			count(v2)
+			count(v3)
+			for _, v := range vs {
+				count(v)
+			}
+		}
+	}
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		for cur := blk.rootInstr; cur != nil; cur = cur.next {
+			switch cur.opcode {
+			case OpcodeSelect, OpcodeBrz, OpcodeBrnz:
+			default:
+				continue
+			}
+			c := b.resolveAlias(cur.v)
+			cmp := b.InstructionOfValue(c)
+			if cmp == nil || cmp.opcode != OpcodeIcmp || uses[c.ID()] < 2 || blockOf[cmp] != blk {
+				continue
+			}
+			x, y, cond := cmp.IcmpData()
+			cur.v = b.insertBefore(blk, cur, b.AllocateInstruction().AsIcmp(x, y, cond))
+			uses[c.ID()]--
+		}
+	}
 }
 
 // passWidenMemoryBoundsOpt merges a bounds check into an earlier one in its block of the same address and
