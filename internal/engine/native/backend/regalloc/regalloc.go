@@ -73,6 +73,8 @@ type (
 		// so the second walk replays this instead of decoding Uses out of the encoding again.
 		useBuf  []VReg
 		useEnds []int32
+		// loopDepth is indexed by block ID: how many loops each block is nested in. See computeLoopDepths.
+		loopDepth []uint8
 		// nextUseAfter is parallel to useBuf: for each use, the program counter of the same value's next
 		// use in the block, programCounterLiveOut if it has none but stays live, or -1 if it dies there.
 		nextUseAfter []programCounter
@@ -146,6 +148,14 @@ type (
 		// while nextUseBlockID is that block's ID. See state.nextUseOf.
 		nextUse        programCounter
 		nextUseBlockID int32
+		// useDepth is the deepest loop nesting of any block using this value.
+		useDepth uint8
+		// feeds and feeds2 are values this one is copied into, if any; see homeOf. A loop variable
+		// typically feeds two: its loop header's parameter and a parameter of the block after the loop.
+		feeds, feeds2 *vrState[I, B, f]
+		// homeReg is, for a block parameter, the register its block starts with it in, once known.
+		// A value feeding it is best defined there, which makes the copy into it a no-op.
+		homeReg RealReg
 		// spilled is true if this value is spilled i.e. the value is reload from the stack somewhere in the program.
 		//
 		// Note that this field is used during liveness analysis for different purpose. This is used to determine the
@@ -236,6 +246,11 @@ func resetVrState[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) {
 	vs.lastUse = -1
 	vs.lastUseUpdatedAtBlockID = -1
 	vs.nextUseBlockID = -1
+	vs.useDepth = 0
+	vs.homeReg = RealRegInvalid
+	if vs.feeds != nil {
+		vs.feeds, vs.feeds2 = nil, nil
+	}
 	vs.isPhi = false
 	vs.desiredLoc = desiredLocUnspecified
 	// The pointer fields are only set for VRegs the function actually defines, so on the states reused
@@ -328,7 +343,7 @@ func (a *Allocator[I, B, F]) findOrSpillAllocatable(s *state[I, B, F], allocatab
 	// Evict the value needed furthest away: a dead one first, then one only live out of the block, then
 	// the one whose next use in it is latest. The preferred register only breaks a tie: evicting a value
 	// the block is about to use, to honor a preference, costs a reload a moment later.
-	var bestCost programCounter
+	var bestCost int64
 	var spillVReg VReg
 	for _, candidateReal := range allocatable {
 		if forbiddenMask.has(candidateReal) {
@@ -349,10 +364,7 @@ func (a *Allocator[I, B, F]) findOrSpillAllocatable(s *state[I, B, F], allocatab
 			continue
 		}
 
-		cost := s.nextUseOf(using)
-		if cost == -1 {
-			cost = programCounterLiveOut // Dead: as good as it gets, ranked with values used only later.
-		}
+		cost := a.evictionCost(using)
 		if r == RealRegInvalid || cost > bestCost || (cost == bestCost && candidateReal == preferred) {
 			bestCost = cost
 			r = candidateReal
@@ -432,6 +444,7 @@ func (b *blockState[I, B, F]) dump(a *RegisterInfo) {
 
 // DoAllocation performs register allocation on the given Function.
 func (a *Allocator[I, B, F]) DoAllocation(f F) {
+	a.computeLoopDepths(f)
 	a.livenessAnalysis(f)
 	a.alloc(f)
 	a.determineCalleeSavedRealRegs(f)
@@ -520,6 +533,9 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 		}
 
 		for instr := blk.InstrRevIteratorBegin(); instr != nilInstr; instr = blk.InstrRevIteratorNext() {
+			if instr.IsCopy() {
+				a.recordFeed(instr)
+			}
 
 			var use, def VReg
 			var defIsPhi bool
@@ -534,6 +550,9 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 			for _, use = range instr.Uses(&a.vs) {
 				if !use.IsRealReg() {
 					st := s.getOrAllocateVRegState(use)
+					if d := a.depthOf(blkID); d > st.useDepth {
+						st.useDepth = d
+					}
 					// Note: We use .spilled field to store the flag.
 					if st.spilled != flagLive { //nolint:gosimple
 						st.spilled = flagLive
@@ -729,6 +748,9 @@ func (a *Allocator[I, B, F]) finalizeStartReg(f F, blk B) {
 
 	s.regsInUse.range_(func(allocated RealReg, v *vrState[I, B, F]) {
 		currentBlkState.startRegs.add(allocated, v)
+		if v.isPhi && v.defBlk == blk {
+			v.homeReg = allocated
+		}
 	})
 	if nativeapi.RegAllocLoggingEnabled {
 		fmt.Printf("finalized start reg for blk%d: %s\n", blk.ID(), currentBlkState.startRegs.format(a.regInfo))
@@ -978,7 +1000,13 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 				// Allocate a new real register if `def` is not currently assigned one.
 				// It can happen when multiple instructions define the same VReg (e.g. const loads).
 				if r == RealRegInvalid {
-					if instr.IsCopy() {
+					// A value feeding a block parameter goes where that parameter lives, which makes the copy
+					// into it a no-op; that matters more than reusing a copy's source register, which saves
+					// only this one move.
+					if home := homeOf(vState); home != RealRegInvalid && !s.regsInUse.has(home) {
+						r = home
+					}
+					if r == RealRegInvalid && instr.IsCopy() {
 						copySrc := instr.Uses(&a.vs)[0].RealReg()
 						if a.allocatableSet.has(copySrc) && !s.regsInUse.has(copySrc) {
 							r = copySrc
@@ -986,7 +1014,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 					}
 					if r == RealRegInvalid {
 						typ := def.RegType()
-						r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[typ], RegSet(0), RealRegInvalid)
+						r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[typ], RegSet(0), homeOf(vState))
 					}
 					s.useRealReg(r, vState)
 				}
@@ -1373,6 +1401,9 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState
 		if vs.isPhi || vs.v.IsRealReg() || (vs.r != RealRegInvalid && s.regsInUse.get(vs.r) == vs) {
 			continue
 		}
+		if vs.useDepth < a.depthOf(s.currentBlockID) {
+			continue // Nothing in the loop uses it.
+		}
 		r := s.findAllocatable(a.regInfo.AllocatableRegisters[vs.v.RegType()], 0)
 		if r == RealRegInvalid {
 			continue
@@ -1401,4 +1432,106 @@ func (a *Allocator[I, B, F]) moveAsideOccupant(f F, instr I, r RealReg, pc progr
 	f.InsertMoveBefore(FromRealReg(free, typ), occ.v.SetRealReg(r), instr)
 	s.releaseRealReg(r)
 	s.useRealReg(free, occ)
+}
+
+// evictionCost ranks vs as a value to evict; the highest goes first. A dead value costs nothing. One
+// used only after the block costs a reload somewhere later, and if no block at this loop depth uses
+// it, that reload is outside the loop rather than on every iteration. Otherwise, the later its next
+// use in the block, the cheaper.
+func (a *Allocator[I, B, F]) evictionCost(vs *vrState[I, B, F]) int64 {
+	s := &a.state
+	switch next := s.nextUseOf(vs); next {
+	case -1:
+		return 3 << 32
+	case programCounterLiveOut:
+		if vs.useDepth < a.depthOf(s.currentBlockID) {
+			return 2 << 32
+		}
+		return 1 << 32
+	default:
+		return int64(next)
+	}
+}
+
+// computeLoopDepths fills loopDepth from the loop nesting forest: a loop header and the blocks of its
+// loop sit one level deeper than the loop around it.
+func (a *Allocator[I, B, F]) computeLoopDepths(f F) {
+	depths := a.loopDepth[:0]
+	var nilBlk B
+	for blk := f.ReversePostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.ReversePostOrderBlockIteratorNext() {
+		if id := int(blk.ID()); id >= len(depths) {
+			depths = append(depths, make([]uint8, id+1-len(depths))...)
+		}
+	}
+	clear(depths)
+	a.loopDepth = depths
+	blks := a.blks[:0]
+	for i := 0; i < f.LoopNestingForestRoots(); i++ {
+		root := f.LoopNestingForestRoot(i)
+		if root.LoopHeader() {
+			depths[root.ID()] = 1
+			blks = append(blks, root)
+		}
+	}
+	for len(blks) > 0 {
+		header := blks[len(blks)-1]
+		blks = blks[:len(blks)-1]
+		d := depths[header.ID()]
+		for i := 0; i < header.LoopNestingForestChildren(); i++ {
+			child := f.LoopNestingForestChild(header, i)
+			if child.LoopHeader() && child != header {
+				depths[child.ID()] = min(d+1, 255)
+				blks = append(blks, child)
+			} else {
+				depths[child.ID()] = d
+			}
+		}
+	}
+	a.blks = blks
+}
+
+// depthOf returns the loop depth of the block with the given ID, 0 for one computeLoopDepths did not see.
+func (a *Allocator[I, B, F]) depthOf(id int32) uint8 {
+	if int(id) < len(a.loopDepth) {
+		return a.loopDepth[id]
+	}
+	return 0
+}
+
+// recordFeed notes, for a copy, which value it copies into: a block parameter, or a temporary on the way
+// to one (see lowerBlockArguments). Liveness walks blocks in post-order, which reaches a loop's back edge
+// before its header has marked its parameters, so the chain is only followed once allocation needs it:
+// see homeOf.
+func (a *Allocator[I, B, F]) recordFeed(instr I) {
+	defs := instr.Defs(&a.vs)
+	if len(defs) != 1 || defs[0].IsRealReg() {
+		return
+	}
+	def := defs[0] // Uses reuses the slice Defs returned.
+	uses := instr.Uses(&a.vs)
+	if len(uses) != 1 || uses[0].IsRealReg() {
+		return
+	}
+	s := &a.state
+	src, dst := s.getOrAllocateVRegState(uses[0]), s.getOrAllocateVRegState(def)
+	switch {
+	case src.feeds == nil:
+		src.feeds = dst
+	case src.feeds != dst && src.feeds2 == nil:
+		src.feeds2 = dst
+	}
+}
+
+// homeOf returns the home register of the block parameter vs is copied into, directly or through
+// temporaries, or RealRegInvalid.
+func homeOf[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) RealReg {
+	for _, first := range [2]*vrState[I, B, F]{vs.feeds, vs.feeds2} {
+		for t, n := first, 0; t != nil && n < 4; t, n = t.feeds, n+1 {
+			if t.isPhi && t.homeReg != RealRegInvalid {
+				return t.homeReg
+			}
+			// A parameter whose block has not been allocated yet has no home, but where it goes next may.
+		}
+	}
+	return RealRegInvalid
 }
