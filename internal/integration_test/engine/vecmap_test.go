@@ -66,7 +66,7 @@ func testVecMap(t *testing.T) {
 	frontend.VecPlanHook = nil
 	require.NoError(t, err)
 	if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
-		require.Equal(t, 10, vectorized, "every loop of the module but counter's should be vectorized")
+		require.Equal(t, 16, vectorized, "every loop of the module should be vectorized")
 	}
 	interp := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
 	defer interp.Close(ctx)
@@ -152,6 +152,28 @@ func testVecMap(t *testing.T) {
 		{"unused", call{"unused", []uint64{0, 16384, 32768, 1000}}},
 		{"unused load runs off the end", call{"unused", []uint64{0, 16384, memSize - 80, 1000}}},
 		{"counter", call{"counter", []uint64{0, 1000, 1000}}},
+		{"counter wraps", call{"counter", []uint64{0, 600, 1000}}},
+		{"counter short", call{"counter", []uint64{0, 600, 3}}},
+		{"linreg", call{"linreg", []uint64{4096, api.EncodeI32(-1640531527)}}},
+		{"linreg odd", call{"linreg", []uint64{999, 12345}}},
+		{"linreg one", call{"linreg", []uint64{1, 7}}},
+		{"linreg short", call{"linreg", []uint64{13, 7}}},
+		{"linreg none", call{"linreg", []uint64{0, 7}}},
+		{"linreg chunks", call{"linreg", []uint64{20001, 3}}},
+		{"linreg counter wraps", call{"linreg", []uint64{3000, api.EncodeI32(-2000)}}},
+		{"linregwide", call{"linregwide", []uint64{5000, 1}}},
+		{"linregwide wraps", call{"linregwide", []uint64{777, 0xfffffe00}}},
+		{"linregwide short", call{"linregwide", []uint64{5, 0}}},
+		{"iotasum32", call{"iotasum32", []uint64{0, 30000}}},
+		{"iotasum32 negative start", call{"iotasum32", []uint64{api.EncodeI32(-7000), 9001}}},
+		{"iotasum32 short", call{"iotasum32", []uint64{5, 20}}},
+		{"iotasum32 empty", call{"iotasum32", []uint64{50, 20}}},
+		{"iotasum32 near the top", call{"iotasum32", []uint64{api.EncodeI32(math.MaxInt32 - 3000), api.EncodeI32(math.MaxInt32 - 2)}}},
+		{"mixred", call{"mixred", []uint64{100000, 4000}}},
+		{"mixred wraps", call{"mixred", []uint64{10, 5000}}},
+		{"mixred short", call{"mixred", []uint64{10, 2}}},
+		{"andor", call{"andor", []uint64{0, 3000}}},
+		{"andor wraps", call{"andor", []uint64{0xffffff00, 700}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

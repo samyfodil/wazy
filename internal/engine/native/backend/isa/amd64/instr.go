@@ -377,8 +377,8 @@ func (i *instruction) Defs(regs *[]regalloc.VReg) []regalloc.VReg {
 	case defKindMulHi:
 		*regs = append(*regs, raxVReg, rdxVReg)
 	case defKindVecMap:
-		if i.vecProg.Reduce != 0 {
-			*regs = append(*regs, rcxVReg)
+		for k := range i.vecProg.Reduces {
+			*regs = append(*regs, regInfo.RealRegToVReg[vecMapResultReg(i.vecProg, k)])
 		}
 	default:
 		panic(fmt.Sprintf("BUG: invalid defKind \"%s\" for %s", dk, i))

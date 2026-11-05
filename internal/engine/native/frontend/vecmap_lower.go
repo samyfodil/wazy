@@ -48,11 +48,10 @@ func vecSSAType(t wasm.ValueType) ssa.Type {
 // holding what its last iteration wrote, and a check that fails leaves the scalar loop to trap where it
 // would have.
 func (c *Compiler) lowerVecMap(p *vecPlan) bool {
-	prog, invSrc, streams := vecProgramOf(p)
-	if _, ok := prog.Assign(false); !ok || prog.Ptrs > vecMaxPtrs {
+	prog, invSrc, streams, iotas := vecProgramOf(p)
+	if _, ok := prog.Assign(false); !ok || prog.Ptrs > vecMaxPtrs || prog.Ptrs+len(prog.Reduces)-1 > vecMaxPtrs {
 		return false
 	}
-	etyp := vecSSAType(p.elem)
 	// Invariants reach the program as the float type of their size, which is what carries them in a
 	// vector register.
 	vtyp := ssa.TypeF32
@@ -414,9 +413,29 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 		}
 		return invLo[i]
 	}
+	// toVec turns an invariant into the float type that carries it in a vector register: an i32 into an
+	// i64 lane zero-extended, as a Spaced program wants it.
+	toVec := func(v ssa.Value) ssa.Value {
+		if v.Type() == vtyp {
+			return v
+		}
+		if v.Type() == ssa.TypeI32 && vtyp == ssa.TypeF64 {
+			v = zext(v)
+		}
+		return builder.AllocateInstruction().AsBitcast(v, vtyp).Insert(builder).Return()
+	}
+	// An iota starts each chunk where the elements before it left it, from iotaBase.
+	iotaBase := make([]ssa.Value, len(iotas))
+	for k, a := range iotas {
+		iotaBase[k] = aff(a)
+	}
 	invs := make([]ssa.Value, len(invSrc))
 	for k, src := range invSrc {
 		switch src.kind {
+		case vecInvIotaBase:
+			continue
+		case vecInvIotaStep:
+			invs[k] = i32(p.stride(iotas[src.arg]))
 		case vecInvLoad:
 			lo := invLoOf(int(src.arg))
 			disjoint(lo, i64(e))
@@ -435,9 +454,7 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 			}
 			invs[k] = instr.Insert(builder).Return()
 		}
-		if invs[k].Type() != vtyp {
-			invs[k] = builder.AllocateInstruction().AsBitcast(invs[k], vtyp).Insert(builder).Return()
-		}
+		invs[k] = toVec(invs[k])
 	}
 	for i, l := range p.loads {
 		if p.stride(l.addr) != 0 {
@@ -465,14 +482,21 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 	header, done := builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
 	doneSoFar := header.AddParam(builder, ssa.TypeI64)
 	entryArgs := c.allocateVarLengthValues(2, i64(0))
-	var acc ssa.Value
-	reduces := p.reduceSlot >= 0
-	if reduces {
-		acc = header.AddParam(builder, etyp)
-		entryArgs = entryArgs.Append(builder.VarLengthPool(), l0[p.reduceSlot])
+	accs := make([]ssa.Value, len(p.reduces))
+	for k, r := range p.reduces {
+		accs[k] = header.AddParam(builder, vecSSAType(p.slotType[r.slot]))
+		entryArgs = entryArgs.Append(builder.VarLengthPool(), l0[r.slot])
 	}
 	c.insertJumpToBlock(entryArgs, header)
 	builder.SetCurrentBlock(header)
+	if len(iotas) > 0 {
+		done32 := builder.AllocateInstruction().AsIreduce(doneSoFar, ssa.TypeI32).Insert(builder).Return()
+		for k, src := range invSrc {
+			if src.kind == vecInvIotaBase {
+				invs[k] = toVec(bin(ssa.OpcodeIadd, iotaBase[src.arg], mulK(done32, uint64(p.stride(iotas[src.arg])))))
+			}
+		}
+	}
 	left := bin(ssa.OpcodeIsub, elems, doneSoFar)
 	chunk := i64(vecChunk)
 	big := builder.AllocateInstruction().AsIcmp(left, chunk, ssa.IntegerCmpCondUnsignedGreaterThan).Insert(builder).Return()
@@ -486,18 +510,19 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 	for _, v := range invs {
 		args = args.Append(builder.VarLengthPool(), v)
 	}
-	resultType := ssa.TypeInvalid
-	if reduces {
-		resultType = etyp
-	}
-	vm := builder.AllocateInstruction().AsVecMap(progN, args, resultType).Insert(builder)
+	vm := builder.AllocateInstruction().AsVecMap(progN, args).Insert(builder)
 	next := bin(ssa.OpcodeIadd, doneSoFar, count)
 	backArgs := c.allocateVarLengthValues(2, next)
-	if reduces {
-		acc = bin(map[uint8]ssa.Opcode{
+	first, rest := vm.Returns()
+	for k, r := range p.reduces {
+		total := first
+		if k > 0 {
+			total = rest[k-1]
+		}
+		accs[k] = bin(map[uint8]ssa.Opcode{
 			vecOpAdd: ssa.OpcodeIadd, vecOpBand: ssa.OpcodeBand, vecOpBor: ssa.OpcodeBor, vecOpBxor: ssa.OpcodeBxor,
-		}[p.reduceOp], acc, vm.Return())
-		backArgs = backArgs.Append(builder.VarLengthPool(), acc)
+		}[r.op], accs[k], total)
+		backArgs = backArgs.Append(builder.VarLengthPool(), accs[k])
 	}
 	c.emitPreemptCheck()
 	more := builder.AllocateInstruction().AsIcmp(next, elems, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
@@ -516,8 +541,8 @@ func (c *Compiler) lowerVecMap(p *vecPlan) bool {
 		v := builder.AllocateInstruction().AsIadd(l0[s], mulK(m32, uint64(p.step[s]))).Insert(builder).Return()
 		builder.DefineVariableInCurrentBB(c.localVariable(p.slotLocal[s]), v)
 	}
-	if reduces {
-		builder.DefineVariableInCurrentBB(c.localVariable(p.slotLocal[p.reduceSlot]), acc)
+	for k, r := range p.reduces {
+		builder.DefineVariableInCurrentBB(c.localVariable(p.slotLocal[r.slot]), accs[k])
 	}
 	c.insertJumpToBlock(ssa.ValuesNil, join)
 
@@ -581,10 +606,12 @@ func vecConstTrips(op wasm.Opcode, a, b, dA uint32) (uint64, bool) {
 
 // Where an invariant of a VecProgram comes from.
 const (
-	vecInvLoad  = iota // an element the loop loads every iteration: arg is the load
-	vecInvLocal        // a local the loop does not write: arg is its slot
-	vecInvAff          // an i32 the iteration does not change: arg indexes plan.invAffs
-	vecInvConst        // a constant: bits
+	vecInvLoad     = iota // an element the loop loads every iteration: arg is the load
+	vecInvLocal           // a local the loop does not write: arg is its slot
+	vecInvAff             // an i32 the iteration does not change: arg indexes plan.invAffs
+	vecInvConst           // a constant: bits
+	vecInvIotaBase        // where an iota starts: arg indexes the iotas vecProgramOf returns
+	vecInvIotaStep        // how far an iota moves per element
 )
 
 type vecInvSource struct {
@@ -593,25 +620,30 @@ type vecInvSource struct {
 	bits uint64
 }
 
-// vecRoot returns the node whose value the program computes per element.
-func vecRoot(p *vecPlan) uint8 {
-	if p.reduceSlot >= 0 {
-		return p.reduceNode
+// vecRoots returns the nodes whose values the program computes per element.
+func vecRoots(p *vecPlan) []uint8 {
+	if len(p.reduces) == 0 {
+		return []uint8{p.stores[0].node}
 	}
-	return p.stores[0].node
+	roots := make([]uint8, len(p.reduces))
+	for k, r := range p.reduces {
+		roots[k] = r.node
+	}
+	return roots
 }
 
-// vecProgramOf turns the element computation of p into a VecProgram, its invariants' sources and the
-// streams its pointers walk, the store's first.
-func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream) {
+// vecProgramOf turns the element computation of p into a VecProgram, its invariants' sources, the streams
+// its pointers walk, the store's first, and the iotas it moves, each at the start of the loop and without
+// its constant: an iota that differs from another by a constant is that one plus the constant.
+func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream, []vecAffine) {
 	streams := vecStreamsOf(p)
-	prog := &ssa.VecProgram{Elem: vecSSAType(p.elem), Ptrs: len(streams), Store: -1}
-	if p.reduceSlot < 0 {
+	prog := &ssa.VecProgram{Elem: vecSSAType(p.elem), Spaced: p.spaced, Ptrs: len(streams), Store: -1}
+	if len(p.reduces) == 0 {
 		prog.Store = 0
-	} else {
-		prog.Reduce = map[uint8]uint8{vecOpAdd: ssa.VecOpAdd, vecOpBand: ssa.VecOpBand, vecOpBor: ssa.VecOpBor, vecOpBxor: ssa.VecOpBxor}[p.reduceOp]
 	}
 	var invSrc []vecInvSource
+	var iotas []vecAffine
+	var iotaOps []uint8
 	addInv := func(src vecInvSource) uint8 {
 		for k, s := range invSrc {
 			if s == src {
@@ -626,14 +658,62 @@ func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream) {
 		opOf[i] = -1
 	}
 	isFloat := p.elem == wasm.ValueTypeF32 || p.elem == wasm.ValueTypeF64
+	push := func(op ssa.VecOp) uint8 {
+		prog.Ops = append(prog.Ops, op)
+		return uint8(len(prog.Ops) - 1)
+	}
 	var emit func(n uint8) uint8
 	emit = func(n uint8) uint8 {
 		if o := opOf[n]; o >= 0 {
 			return uint8(o)
 		}
 		nd := p.nodes[n]
+		w := uint8(4)
+		if nd.typ == wasm.ValueTypeI64 || nd.typ == wasm.ValueTypeF64 {
+			w = 8
+		}
 		var op ssa.VecOp
 		switch nd.op {
+		case vecOpIota:
+			a := p.invAffs[nd.arg]
+			konst := a.konst
+			a.konst = 0
+			k := 0
+			for k < len(iotas) && iotas[k] != a {
+				k++
+			}
+			if k == len(iotas) {
+				iotas = append(iotas, a)
+				iotaOps = append(iotaOps, push(ssa.VecOp{
+					Kind: ssa.VecOpIota, W: 4,
+					Arg: addInv(vecInvSource{kind: vecInvIotaBase, arg: uint8(k)}),
+					B:   addInv(vecInvSource{kind: vecInvIotaStep, arg: uint8(k)}),
+				}))
+			}
+			if konst == 0 {
+				opOf[n] = int(iotaOps[k])
+				return iotaOps[k]
+			}
+			op = ssa.VecOp{Kind: ssa.VecOpAdd, A: iotaOps[k], B: addInv(vecInvSource{kind: vecInvConst, bits: uint64(konst)})}
+			op.B = push(ssa.VecOp{Kind: ssa.VecOpInv, Arg: op.B, W: 4})
+		case vecOpZext:
+			// An and with an invariant, zero-extended into its lane, already is.
+			if a := p.nodes[nd.a]; a.op == vecOpBand && (vecInvariant(p.nodes[a.a].op) || vecInvariant(p.nodes[a.b].op)) {
+				o := emit(nd.a)
+				prog.Ops[o].W = 8
+				opOf[n] = int(o)
+				return o
+			}
+			op = ssa.VecOp{Kind: ssa.VecOpZext, A: emit(nd.a)}
+		case vecOpMulU:
+			// The multiplication reads only the low half of each lane: an operand zero-extended needs not be.
+			factor := func(m uint8) uint8 {
+				if f := p.nodes[m]; f.op == vecOpZext {
+					return emit(f.a)
+				}
+				return emit(m)
+			}
+			op = ssa.VecOp{Kind: ssa.VecOpMulU, A: factor(nd.a), B: factor(nd.b)}
 		case vecOpLoad:
 			if acc := p.loads[nd.arg]; p.stride(acc.addr) == 0 {
 				op = ssa.VecOp{Kind: ssa.VecOpInv, Arg: addInv(vecInvSource{kind: vecInvLoad, arg: nd.arg})}
@@ -675,13 +755,26 @@ func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream) {
 			}
 			op = ssa.VecOp{Kind: kind, A: a, B: b}
 		}
-		prog.Ops = append(prog.Ops, op)
-		opOf[n] = len(prog.Ops) - 1
+		op.W = w
+		opOf[n] = int(push(op))
 		return uint8(opOf[n])
 	}
-	emit(vecRoot(p))
+	for _, r := range p.reduces {
+		prog.Reduces = append(prog.Reduces, ssa.VecReduce{
+			Op:   map[uint8]uint8{vecOpAdd: ssa.VecOpAdd, vecOpBand: ssa.VecOpBand, vecOpBor: ssa.VecOpBor, vecOpBxor: ssa.VecOpBxor}[r.op],
+			Root: emit(r.node),
+		})
+	}
+	if len(p.reduces) == 0 {
+		emit(p.stores[0].node)
+	}
 	prog.Invs = len(invSrc)
-	return prog, invSrc, streams
+	return prog, invSrc, streams, iotas
+}
+
+// vecInvariant reports whether a node of op is an invariant of the program.
+func vecInvariant(op uint8) bool {
+	return op == vecOpInv || op == vecOpInvAff || op == vecOpConst
 }
 
 // vecStreamsOf returns the moving accesses of the element computation, the store's first: the loads its
@@ -689,7 +782,7 @@ func vecProgramOf(p *vecPlan) (*ssa.VecProgram, []vecInvSource, []vecStream) {
 // shifted by whole elements, so the same streams cover them.
 func vecStreamsOf(p *vecPlan) []vecStream {
 	var streams []vecStream
-	if p.reduceSlot < 0 {
+	if len(p.reduces) == 0 {
 		streams = append(streams, vecStream{acc: p.stores[0], store: true})
 	}
 	var walk func(n uint8)
@@ -707,7 +800,9 @@ func vecStreamsOf(p *vecPlan) []vecStream {
 			walk(nd.a)
 		}
 	}
-	walk(vecRoot(p))
+	for _, n := range vecRoots(p) {
+		walk(n)
+	}
 	return streams
 }
 

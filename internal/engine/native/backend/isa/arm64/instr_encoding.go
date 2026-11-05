@@ -760,6 +760,13 @@ func encodeVecRRR(op vecOp, rd, rn, rm uint32, arr vecArrangement) uint32 {
 		size, _ := arrToSizeQEncoded(arr)
 		return encodeAdvancedSIMDThreeDifferent(rd, rn, rm, 0b1100, size, 0b0, 0b1)
 
+	case vecOpUmull:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, _ := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeDifferent(rd, rn, rm, 0b1100, size, 0b1, 0b0)
+
 	case vecOpZip1, vecOpZip2, vecOpUzp1, vecOpUzp2, vecOpTrn1, vecOpTrn2:
 		// "Advanced SIMD permute" is a three-register group as well, so a vecRRR
 		// carrying one of these ops denotes exactly the permute instruction.

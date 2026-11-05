@@ -173,9 +173,7 @@ func (i *instruction) Defs(regs *[]regalloc.VReg) []regalloc.VReg {
 			*regs = append(*regs, regInfo.RealRegToVReg[floatParamResultRegs[i]])
 		}
 	case defKindVecMap:
-		if i.vecMapReduces() {
-			*regs = append(*regs, regInfo.RealRegToVReg[vecMapCountReg])
-		}
+		i.vecMapResults(regs)
 	default:
 		panic(fmt.Sprintf("defKind for %v not defined", i))
 	}
@@ -2322,6 +2320,8 @@ func (b vecOp) String() string {
 		return "smull"
 	case vecOpSmull2:
 		return "smull2"
+	case vecOpUmull:
+		return "umull"
 	}
 	panic(int(b))
 }
@@ -2398,6 +2398,7 @@ const (
 	vecOpZip1
 	vecOpSmull
 	vecOpSmull2
+	vecOpUmull
 	// The rest of the "Advanced SIMD permute" family that zip1 belongs to.
 	vecOpZip2
 	vecOpUzp1

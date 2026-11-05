@@ -761,13 +761,23 @@ func (op AtomicRmwOp) String() string {
 type returnTypesFn func(b *builder, instr *Instruction) (t1 Type, ts []Type)
 
 var (
-	returnTypesFnNoReturns    returnTypesFn = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return typeInvalid, nil }
-	returnTypesFnSingle                     = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return instr.typ, nil }
-	returnTypesFnI32                        = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeI32, nil }
-	returnTypesFnF32                        = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF32, nil }
-	returnTypesFnF64                        = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF64, nil }
-	returnTypesFnV128                       = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeV128, nil }
-	returnTypesFnCallIndirect               = func(b *builder, instr *Instruction) (t1 Type, ts []Type) {
+	returnTypesFnNoReturns returnTypesFn = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return typeInvalid, nil }
+	returnTypesFnSingle                  = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return instr.typ, nil }
+	returnTypesFnVecMap                  = func(b *builder, instr *Instruction) (t1 Type, ts []Type) {
+		p := b.VecProgram(int(instr.u1))
+		if len(p.Reduces) == 0 {
+			return typeInvalid, nil
+		}
+		for k := 1; k < len(p.Reduces); k++ {
+			ts = append(ts, p.ReduceType(k))
+		}
+		return p.ReduceType(0), ts
+	}
+	returnTypesFnI32          = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeI32, nil }
+	returnTypesFnF32          = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF32, nil }
+	returnTypesFnF64          = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF64, nil }
+	returnTypesFnV128         = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeV128, nil }
+	returnTypesFnCallIndirect = func(b *builder, instr *Instruction) (t1 Type, ts []Type) {
 		sigID := SignatureID(instr.u1)
 		sig, ok := b.signatures[sigID]
 		if !ok {
@@ -1125,7 +1135,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeFence:                       returnTypesFnNoReturns,
 	OpcodePreemptRequested:            returnTypesFnI32,
 	OpcodeYield:                       returnTypesFnNoReturns,
-	OpcodeVecMap:                      returnTypesFnSingle,
+	OpcodeVecMap:                      returnTypesFnVecMap,
 	OpcodeTailCallReturnCallIndirect:  returnTypesFnCallIndirect,
 	OpcodeTailCallReturnCall:          returnTypesFnCall,
 	OpcodeWideningPairwiseDotProductS: returnTypesFnV128,
@@ -3287,13 +3297,12 @@ func (o Opcode) String() (ret string) {
 }
 
 // AsVecMap initializes this instruction as an OpcodeVecMap running program number prog over args: the
-// pointers, the element count and the invariants, in that order. A program that reduces returns the
-// reduction of its elements, of type result; result is TypeInvalid otherwise.
-func (i *Instruction) AsVecMap(prog int, args Values, result Type) *Instruction {
+// pointers, the element count and the invariants, in that order. It returns the program's totals, in the
+// order of its Reduces.
+func (i *Instruction) AsVecMap(prog int, args Values) *Instruction {
 	i.opcode = OpcodeVecMap
 	i.u1 = uint64(prog)
 	i.vs = args
-	i.typ = result
 	return i
 }
 

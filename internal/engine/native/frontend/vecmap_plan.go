@@ -6,11 +6,13 @@ import (
 )
 
 // A vector map loop is a wasm loop whose iterations are independent element computations on lanes of
-// one type: each loads elements at addresses that advance by one element per iteration, combines them and
-// loop-invariant values with arithmetic that is exact lane by lane, and either stores the result the same
-// way or folds it into a reduction local with an operation that gives the same bits in any order. Such a
-// loop computes the same bits whether its elements are done one at a time or several per instruction, as
-// long as the elements it stores do not overlap the ones it loads (see lowerVecMap's guards).
+// one type: each loads elements at addresses that advance by one element per iteration, combines them,
+// loop-invariant values and the values of the loop's counters with arithmetic that is exact lane by lane,
+// and either stores the result the same way or folds results into reduction locals with operations that
+// give the same bits in any order. Such a loop computes the same bits whether its elements are done one at
+// a time or several per instruction, as long as the elements it stores do not overlap the ones it loads
+// (see lowerVecMap's guards). One that loads and stores nothing may mix i32 and i64 values, which a vector
+// holds as i64 lanes.
 //
 // A float reduction is not one: rounding makes the order of a float sum show.
 //
@@ -19,10 +21,11 @@ import (
 // ends right after it, before it does anything else, with `br 0` closing the body.
 
 const (
-	vecMaxLocals = 8
-	vecMaxNodes  = 64
-	vecMaxLoads  = 16
-	vecMaxStores = 8
+	vecMaxLocals  = 16
+	vecMaxNodes   = 64
+	vecMaxLoads   = 16
+	vecMaxStores  = 8
+	vecMaxReduces = 4
 )
 
 // vecAffine is an i32 value inside one iteration: konst + Σ coeff[s]·L[s] modulo 2^32, where L[s] is
@@ -69,18 +72,24 @@ const (
 	vecOpShl  // arg: the shift
 	vecOpShrU // arg: the shift
 	vecOpShrS // arg: the shift
+	// vecOpIota is an i32 value moving with the loop's counters: invAffs[arg] at the start of the element's
+	// iteration.
+	vecOpIota
+	vecOpZext // a, an i32, zero-extended to i64
+	vecOpMulU // an i64 product of a and b, each below 2^32
 )
 
 type vecNode struct {
 	op   uint8
 	a, b uint8 // operand node indices
 	arg  uint8
+	typ  wasm.ValueType
 	bits uint64
 }
 
 func vecBinaryOp(op uint8) bool {
 	switch op {
-	case vecOpAdd, vecOpSub, vecOpMul, vecOpDiv, vecOpBand, vecOpBor, vecOpBxor:
+	case vecOpAdd, vecOpSub, vecOpMul, vecOpDiv, vecOpBand, vecOpBor, vecOpBxor, vecOpMulU:
 		return true
 	}
 	return false
@@ -88,7 +97,7 @@ func vecBinaryOp(op uint8) bool {
 
 func vecUnaryOp(op uint8) bool {
 	switch op {
-	case vecOpNeg, vecOpAbs, vecOpSqrt, vecOpShl, vecOpShrU, vecOpShrS:
+	case vecOpNeg, vecOpAbs, vecOpSqrt, vecOpShl, vecOpShrU, vecOpShrS, vecOpZext:
 		return true
 	}
 	return false
@@ -113,10 +122,21 @@ type vecVal struct {
 	node uint8
 }
 
+// vecReduction is a local a reducing loop folds an element value into: slot, with op, node being each
+// element's value.
+type vecReduction struct {
+	slot int
+	op   uint8
+	node uint8
+}
+
 type vecPlan struct {
-	// elem is the type of the loop's lanes, and elemSize its size in bytes.
+	// elem is the type of the loop's lanes, and elemSize its size in bytes. A spaced loop mixes i32 and
+	// i64 values, each in an i64 lane; types is which value types its nodes have.
 	elem     wasm.ValueType
 	elemSize uint32
+	spaced   bool
+	types    [4]bool
 
 	slotLocal [vecMaxLocals]wasm.Index
 	slotType  [vecMaxLocals]wasm.ValueType
@@ -139,11 +159,8 @@ type vecPlan struct {
 	condA, condB vecAffine
 	top          bool
 
-	// reduceSlot is the local a reducing loop folds its elements into with reduceOp, reduceNode being each
-	// element's value; reduceSlot is -1 for a loop that stores instead.
-	reduceSlot int
-	reduceOp   uint8
-	reduceNode uint8
+	// reduces are the locals a reducing loop folds element values into; it stores nothing.
+	reduces []vecReduction
 
 	// partner is, for each load the element computation makes, the load of copy zero it corresponds to
 	// and how many bytes further on it reads: itself and zero for copy zero's loads, -1 for a load no
@@ -174,7 +191,6 @@ type vecPlanner struct {
 func planVecMap(body []byte, pc int, types []wasm.ValueType) (*vecPlan, string, bool) {
 	pl := &vecPlanner{body: body, pc: pc, types: types}
 	pl.p.nodes = make([]vecNode, 0, 16)
-	pl.p.reduceSlot = -1
 	for i := range pl.p.partner {
 		pl.p.partner[i] = -1
 	}
@@ -214,41 +230,51 @@ func (pl *vecPlanner) slot(l wasm.Index) (int, bool) {
 	return s, true
 }
 
-// elemType records t as the loop's lane type, refusing a loop that mixes two.
-func (pl *vecPlanner) elemType(t wasm.ValueType) bool {
-	if pl.p.elem == 0 {
-		pl.p.elem = t
-		pl.p.elemSize = 4
-		if t == wasm.ValueTypeI64 || t == wasm.ValueTypeF64 {
-			pl.p.elemSize = 8
-		}
+func vecTypeIndex(t wasm.ValueType) int {
+	switch t {
+	case wasm.ValueTypeI32:
+		return 0
+	case wasm.ValueTypeI64:
+		return 1
+	case wasm.ValueTypeF32:
+		return 2
 	}
-	return pl.p.elem == t
+	return 3
 }
 
-func (pl *vecPlanner) node(n vecNode) (vecVal, bool) {
+// node adds n, a value of type typ, refusing a loop that mixes typ with a type other than i32 or i64
+// with each other.
+func (pl *vecPlanner) node(n vecNode, typ wasm.ValueType) (vecVal, bool) {
 	if len(pl.p.nodes) == vecMaxNodes {
 		return vecVal{}, false
 	}
+	pl.p.types[vecTypeIndex(typ)] = true
+	ints := pl.p.types[0] || pl.p.types[1]
+	if pl.p.types[2] && (ints || pl.p.types[3]) || pl.p.types[3] && ints {
+		return vecVal{}, false
+	}
+	n.typ = typ
 	pl.p.nodes = append(pl.p.nodes, n)
 	return vecVal{kind: vkNode, node: uint8(len(pl.p.nodes) - 1)}, true
 }
 
-// toNode turns an i32 value into an element node of an i32 loop: a constant, the starting value of one
-// local, or an invariant the lowering computes before the loop.
+// typed reports whether v is a node of type t.
+func (pl *vecPlanner) typed(v vecVal, t wasm.ValueType) bool {
+	return v.kind == vkNode && pl.p.nodes[v.node].typ == t
+}
+
+// toNode turns an i32 value into an element node: a constant, the starting value of one local, or an
+// invariant the lowering computes before the loop.
 func (pl *vecPlanner) toNode(v vecVal) (uint8, bool) {
 	switch v.kind {
 	case vkNode:
-		return v.node, true
+		return v.node, pl.p.nodes[v.node].typ == wasm.ValueTypeI32
 	case vkCond:
-		return 0, false
-	}
-	if !pl.elemType(wasm.ValueTypeI32) {
 		return 0, false
 	}
 	a := v.aff
 	if a.isConst() {
-		n, ok := pl.node(vecNode{op: vecOpConst, bits: uint64(a.konst)})
+		n, ok := pl.node(vecNode{op: vecOpConst, bits: uint64(a.konst)}, wasm.ValueTypeI32)
 		return n.node, ok
 	}
 	for s, k := range a.coeff {
@@ -256,13 +282,13 @@ func (pl *vecPlanner) toNode(v vecVal) (uint8, bool) {
 			var unit vecAffine
 			unit.coeff[s] = 1
 			if a == unit {
-				n, ok := pl.node(vecNode{op: vecOpInv, arg: uint8(s)})
+				n, ok := pl.node(vecNode{op: vecOpInv, arg: uint8(s)}, wasm.ValueTypeI32)
 				return n.node, ok
 			}
 		}
 	}
 	pl.p.invAffs = append(pl.p.invAffs, a)
-	n, ok := pl.node(vecNode{op: vecOpInvAff, arg: uint8(len(pl.p.invAffs) - 1)})
+	n, ok := pl.node(vecNode{op: vecOpInvAff, arg: uint8(len(pl.p.invAffs) - 1)}, wasm.ValueTypeI32)
 	return n.node, ok
 }
 
@@ -303,11 +329,17 @@ func (pl *vecPlanner) shiftNode(op uint8, x, y vecVal, bits uint32) (vecVal, boo
 	default:
 		return vecVal{}, false
 	}
+	if bits == 64 {
+		if !pl.typed(x, wasm.ValueTypeI64) {
+			return vecVal{}, false
+		}
+		return pl.node(vecNode{op: op, a: x.node, arg: uint8(k % 64)}, wasm.ValueTypeI64)
+	}
 	xn, ok := pl.toNode(x)
 	if !ok {
 		return vecVal{}, false
 	}
-	return pl.node(vecNode{op: op, a: xn, arg: uint8(k % uint64(bits))})
+	return pl.node(vecNode{op: op, a: xn, arg: uint8(k % 32)}, wasm.ValueTypeI32)
 }
 
 func (pl *vecPlanner) binaryNode(op uint8, x, y vecVal) (vecVal, bool) {
@@ -316,7 +348,7 @@ func (pl *vecPlanner) binaryNode(op uint8, x, y vecVal) (vecVal, bool) {
 	if !ok1 || !ok2 {
 		return vecVal{}, false
 	}
-	return pl.node(vecNode{op: op, a: xn, b: yn})
+	return pl.node(vecNode{op: op, a: xn, b: yn}, wasm.ValueTypeI32)
 }
 
 // constBits reads a little-endian constant of n bytes.
@@ -356,10 +388,7 @@ func (pl *vecPlanner) run() bool {
 				a.coeff[s] = 1
 				pl.push(vecVal{kind: vkAff, aff: a})
 			} else {
-				if !pl.elemType(t) {
-					return false
-				}
-				v, ok := pl.node(vecNode{op: vecOpInv, arg: uint8(s)})
+				v, ok := pl.node(vecNode{op: vecOpInv, arg: uint8(s)}, t)
 				if !ok {
 					return false
 				}
@@ -378,7 +407,7 @@ func (pl *vecPlanner) run() bool {
 			if !ok || v.kind == vkCond || v.kind == vkAff && pl.p.slotType[s] != wasm.ValueTypeI32 {
 				return false
 			}
-			if v.kind == vkNode && pl.p.slotType[s] != pl.p.elem {
+			if v.kind == vkNode && pl.p.slotType[s] != pl.p.nodes[v.node].typ {
 				return false
 			}
 			pl.cur[s], pl.set[s], pl.p.written[s] = v, true, true
@@ -394,11 +423,11 @@ func (pl *vecPlanner) run() bool {
 			pl.push(vecVal{kind: vkAff, aff: vecAffine{konst: uint32(v)}})
 		case wasm.OpcodeI64Const:
 			v, n, err := leb128.LoadInt64(pl.body[pl.pc:])
-			if err != nil || !pl.elemType(wasm.ValueTypeI64) {
+			if err != nil {
 				return false
 			}
 			pl.pc += int(n)
-			nd, ok := pl.node(vecNode{op: vecOpConst, bits: uint64(v)})
+			nd, ok := pl.node(vecNode{op: vecOpConst, bits: uint64(v)}, wasm.ValueTypeI64)
 			if !ok {
 				return false
 			}
@@ -409,10 +438,10 @@ func (pl *vecPlanner) run() bool {
 				t, size = wasm.ValueTypeF64, 8
 			}
 			bits, ok := pl.constBits(size)
-			if !ok || !pl.elemType(t) {
+			if !ok {
 				return false
 			}
-			nd, ok := pl.node(vecNode{op: vecOpConst, bits: bits})
+			nd, ok := pl.node(vecNode{op: vecOpConst, bits: bits}, t)
 			if !ok {
 				return false
 			}
@@ -489,24 +518,39 @@ func (pl *vecPlanner) run() bool {
 				return false
 			}
 			pl.push(v)
-		case wasm.OpcodeI64Add, wasm.OpcodeI64Sub, wasm.OpcodeI64And, wasm.OpcodeI64Or, wasm.OpcodeI64Xor:
+		case wasm.OpcodeI64Add, wasm.OpcodeI64Sub, wasm.OpcodeI64And, wasm.OpcodeI64Or, wasm.OpcodeI64Xor, wasm.OpcodeI64Mul:
+			// An i64 multiply has a vector instruction only for factors below 2^32: lanesOK checks.
 			x, y, ok := pl.pop2()
-			if !ok || x.kind != vkNode || y.kind != vkNode || pl.p.elem != wasm.ValueTypeI64 {
+			if !ok || !pl.typed(x, wasm.ValueTypeI64) || !pl.typed(y, wasm.ValueTypeI64) {
 				return false
 			}
 			o := map[wasm.Opcode]uint8{
-				wasm.OpcodeI64Add: vecOpAdd, wasm.OpcodeI64Sub: vecOpSub,
+				wasm.OpcodeI64Add: vecOpAdd, wasm.OpcodeI64Sub: vecOpSub, wasm.OpcodeI64Mul: vecOpMul,
 				wasm.OpcodeI64And: vecOpBand, wasm.OpcodeI64Or: vecOpBor, wasm.OpcodeI64Xor: vecOpBxor,
 			}[op]
-			v, ok := pl.node(vecNode{op: o, a: x.node, b: y.node})
+			v, ok := pl.node(vecNode{op: o, a: x.node, b: y.node}, wasm.ValueTypeI64)
+			if !ok {
+				return false
+			}
+			pl.push(v)
+		case wasm.OpcodeI64ExtendI32U:
+			x, ok := pl.pop()
+			if !ok {
+				return false
+			}
+			xn, ok := pl.toNode(x)
+			if !ok {
+				return false
+			}
+			v, ok := pl.node(vecNode{op: vecOpZext, a: xn}, wasm.ValueTypeI64)
 			if !ok {
 				return false
 			}
 			pl.push(v)
 		case wasm.OpcodeI64Shl, wasm.OpcodeI64ShrU:
-			// i64 has no signed vector shift before AVX-512, and no multiply.
+			// i64 has no signed vector shift before AVX-512.
 			x, y, ok := pl.pop2()
-			if !ok || x.kind != vkNode || pl.p.elem != wasm.ValueTypeI64 {
+			if !ok {
 				return false
 			}
 			o := uint8(vecOpShl)
@@ -526,9 +570,6 @@ func (pl *vecPlanner) run() bool {
 				wasm.OpcodeI32Store: wasm.ValueTypeI32, wasm.OpcodeI64Store: wasm.ValueTypeI64,
 				wasm.OpcodeF32Store: wasm.ValueTypeF32, wasm.OpcodeF64Store: wasm.ValueTypeF64,
 			}[op]
-			if !pl.elemType(t) {
-				return false
-			}
 			align, ok := pl.u32()
 			if !ok || align&0x40 != 0 { // A memory index follows: multi-memory.
 				return false
@@ -544,7 +585,7 @@ func (pl *vecPlanner) run() bool {
 					return false
 				}
 				pl.p.loads = append(pl.p.loads, vecAccess{addr: addr.aff, offset: offset})
-				v, ok := pl.node(vecNode{op: vecOpLoad, arg: uint8(len(pl.p.loads) - 1)})
+				v, ok := pl.node(vecNode{op: vecOpLoad, arg: uint8(len(pl.p.loads) - 1)}, t)
 				if !ok {
 					return false
 				}
@@ -555,10 +596,17 @@ func (pl *vecPlanner) run() bool {
 				if !ok1 || !ok2 || addr.kind != vkAff || len(pl.p.stores) == vecMaxStores {
 					return false
 				}
-				vn, ok := pl.toNode(v)
-				if !ok {
+				var vn uint8
+				if t == wasm.ValueTypeI32 {
+					if vn, ok = pl.toNode(v); !ok {
+						return false
+					}
+				} else if !pl.typed(v, t) {
 					return false
+				} else {
+					vn = v.node
 				}
+				pl.p.types[vecTypeIndex(t)] = true
 				pl.p.stores = append(pl.p.stores, vecAccess{addr: addr.aff, offset: offset, node: vn})
 			}
 		case wasm.OpcodeF64Add, wasm.OpcodeF64Sub, wasm.OpcodeF64Mul, wasm.OpcodeF64Div,
@@ -568,14 +616,14 @@ func (pl *vecPlanner) run() bool {
 				t = wasm.ValueTypeF64
 			}
 			x, y, ok := pl.pop2()
-			if !ok || x.kind != vkNode || y.kind != vkNode || !pl.elemType(t) {
+			if !ok || !pl.typed(x, t) || !pl.typed(y, t) {
 				return false
 			}
 			o := map[wasm.Opcode]uint8{
 				wasm.OpcodeF64Add: vecOpAdd, wasm.OpcodeF64Sub: vecOpSub, wasm.OpcodeF64Mul: vecOpMul, wasm.OpcodeF64Div: vecOpDiv,
 				wasm.OpcodeF32Add: vecOpAdd, wasm.OpcodeF32Sub: vecOpSub, wasm.OpcodeF32Mul: vecOpMul, wasm.OpcodeF32Div: vecOpDiv,
 			}[op]
-			v, ok := pl.node(vecNode{op: o, a: x.node, b: y.node})
+			v, ok := pl.node(vecNode{op: o, a: x.node, b: y.node}, t)
 			if !ok {
 				return false
 			}
@@ -587,14 +635,14 @@ func (pl *vecPlanner) run() bool {
 				t = wasm.ValueTypeF64
 			}
 			x, ok := pl.pop()
-			if !ok || x.kind != vkNode || !pl.elemType(t) {
+			if !ok || !pl.typed(x, t) {
 				return false
 			}
 			o := map[wasm.Opcode]uint8{
 				wasm.OpcodeF64Neg: vecOpNeg, wasm.OpcodeF64Abs: vecOpAbs, wasm.OpcodeF64Sqrt: vecOpSqrt,
 				wasm.OpcodeF32Neg: vecOpNeg, wasm.OpcodeF32Abs: vecOpAbs, wasm.OpcodeF32Sqrt: vecOpSqrt,
 			}[op]
-			v, ok := pl.node(vecNode{op: o, a: x.node})
+			v, ok := pl.node(vecNode{op: o, a: x.node}, t)
 			if !ok {
 				return false
 			}
@@ -672,7 +720,22 @@ func (pl *vecPlanner) anySet() bool {
 // finish checks what one iteration did against what a vector map loop may do.
 func (pl *vecPlanner) finish() bool {
 	p := &pl.p
-	if p.elem == 0 {
+	switch {
+	case p.types[0] && p.types[1]:
+		if len(p.loads) > 0 || len(p.stores) > 0 {
+			pl.why = "mixed widths in memory"
+			return false
+		}
+		p.elem, p.elemSize, p.spaced = wasm.ValueTypeI64, 8, true
+	case p.types[0]:
+		p.elem, p.elemSize = wasm.ValueTypeI32, 4
+	case p.types[1]:
+		p.elem, p.elemSize = wasm.ValueTypeI64, 8
+	case p.types[2]:
+		p.elem, p.elemSize = wasm.ValueTypeF32, 4
+	case p.types[3]:
+		p.elem, p.elemSize = wasm.ValueTypeF64, 8
+	default:
 		return false
 	}
 	for s := 0; s < p.slotN; s++ {
@@ -711,14 +774,15 @@ func (pl *vecPlanner) finish() bool {
 	if !pl.lanesOK() {
 		return false
 	}
-	// An element reads no local the loop writes as it was when the iteration started: an induction's
-	// value differs from one element to the next, and anything else written is a recurrence.
-	roots := make([]uint8, 0, len(p.stores)+1)
+	pl.iotas()
+	// An element reads no local the loop writes as it was when the iteration started, but through an iota:
+	// anything else written is a recurrence.
+	roots := make([]uint8, 0, len(p.stores)+len(p.reduces))
 	for _, st := range p.stores {
 		roots = append(roots, st.node)
 	}
-	if p.reduceSlot >= 0 {
-		roots = append(roots, p.reduceNode)
+	for _, r := range p.reduces {
+		roots = append(roots, r.node)
 	}
 	for _, n := range roots {
 		for s := 0; s < p.slotN; s++ {
@@ -728,7 +792,7 @@ func (pl *vecPlanner) finish() bool {
 			}
 		}
 	}
-	if p.reduceSlot >= 0 {
+	if len(p.reduces) > 0 {
 		if len(p.stores) != 0 {
 			pl.why = "reduction and stores"
 			return false
@@ -740,10 +804,12 @@ func (pl *vecPlanner) finish() bool {
 				return false
 			}
 		}
-		if !pl.onlyReads(p.reduceNode, p.reduceSlot) {
-			return false
+		for _, r := range p.reduces {
+			if !pl.onlyReads(r.slot) || !pl.selfPartners(r.node) {
+				return false
+			}
 		}
-		return pl.selfPartners(p.reduceNode)
+		return true
 	}
 	if len(p.stores) == 0 {
 		return false
@@ -751,15 +817,15 @@ func (pl *vecPlanner) finish() bool {
 	return pl.reroll()
 }
 
-// reduction accepts the local in slot s as the loop's reduction when its value at the end of an iteration
-// is its value at the start combined, by an integer operation that gives the same bits in any order, with
-// an element value that does not involve it.
+// reduction accepts the local in slot s as one of the loop's reductions when its value at the end of an
+// iteration is its value at the start combined, by an integer operation that gives the same bits in any
+// order, with an element value that does not involve it.
 func (pl *vecPlanner) reduction(s int, n uint8) bool {
 	p := &pl.p
-	if p.reduceSlot >= 0 || p.elem == wasm.ValueTypeF32 || p.elem == wasm.ValueTypeF64 || p.slotType[s] != p.elem {
+	nd := p.nodes[n]
+	if len(p.reduces) == vecMaxReduces || nd.typ != p.slotType[s] || nd.typ == wasm.ValueTypeF32 || nd.typ == wasm.ValueTypeF64 {
 		return false
 	}
-	nd := p.nodes[n]
 	switch nd.op {
 	case vecOpAdd, vecOpBand, vecOpBor, vecOpBxor:
 	default:
@@ -778,11 +844,49 @@ func (pl *vecPlanner) reduction(s int, n uint8) bool {
 	if pl.mentions(elem, s) {
 		return false
 	}
-	p.reduceSlot, p.reduceOp, p.reduceNode = s, nd.op, elem
+	p.reduces = append(p.reduces, vecReduction{slot: s, op: nd.op, node: elem})
 	return true
 }
 
-// mentions reports whether node n's tree reads slot s's starting value.
+// iotas turns each i32 node that reads a counter the loop moves, and no other local it writes, into an iota.
+func (pl *vecPlanner) iotas() {
+	p := &pl.p
+	for i, nd := range p.nodes {
+		var a vecAffine
+		switch nd.op {
+		case vecOpInv:
+			if p.slotType[nd.arg] != wasm.ValueTypeI32 {
+				continue
+			}
+			a.coeff[nd.arg] = 1
+		case vecOpInvAff:
+			a = p.invAffs[nd.arg]
+		default:
+			continue
+		}
+		moves := false
+		for s, c := range a.coeff {
+			if c != 0 && p.written[s] {
+				if !p.induction[s] {
+					moves = false
+					break
+				}
+				moves = true
+			}
+		}
+		if !moves {
+			continue
+		}
+		if nd.op == vecOpInv {
+			p.invAffs = append(p.invAffs, a)
+			p.nodes[i].arg = uint8(len(p.invAffs) - 1)
+		}
+		p.nodes[i].op = vecOpIota
+	}
+}
+
+// mentions reports whether node n's tree reads slot s's starting value, other than as the counter an iota
+// moves with.
 func (pl *vecPlanner) mentions(n uint8, s int) bool {
 	nd := pl.p.nodes[n]
 	switch {
@@ -790,6 +894,8 @@ func (pl *vecPlanner) mentions(n uint8, s int) bool {
 		return nd.arg == uint8(s)
 	case nd.op == vecOpInvAff:
 		return pl.p.invAffs[nd.arg].coeff[s] != 0
+	case nd.op == vecOpIota:
+		return pl.p.invAffs[nd.arg].coeff[s] != 0 && !pl.p.induction[s]
 	case vecBinaryOp(nd.op):
 		return pl.mentions(nd.a, s) || pl.mentions(nd.b, s)
 	case vecUnaryOp(nd.op):
@@ -798,24 +904,37 @@ func (pl *vecPlanner) mentions(n uint8, s int) bool {
 	return false
 }
 
-// onlyReads checks that nothing but the reduction reads the reduction local: no address, no exit
-// condition and no other node.
-func (pl *vecPlanner) onlyReads(elem uint8, s int) bool {
+// onlyReads checks that nothing but its own reduction reads the reduction local in slot s: no address, no
+// exit condition and no element value.
+func (pl *vecPlanner) onlyReads(s int) bool {
 	for _, a := range pl.affines() {
 		if a.coeff[s] != 0 {
 			return false
 		}
 	}
-	return !pl.mentions(elem, s)
+	for _, r := range pl.p.reduces {
+		if pl.mentions(r.node, s) {
+			return false
+		}
+	}
+	return true
 }
 
-// lanesOK refuses the operations a lane type has no vector instruction for.
+// lanesOK refuses the operations a lane type has no vector instruction for, and turns an i64 multiply of
+// factors below 2^32 into the one there is.
 func (pl *vecPlanner) lanesOK() bool {
 	p := &pl.p
-	for _, nd := range p.nodes {
-		switch p.elem {
+	for i, nd := range p.nodes {
+		switch nd.typ {
 		case wasm.ValueTypeI64:
-			if nd.op == vecOpMul || nd.op == vecOpShrS {
+			switch nd.op {
+			case vecOpMul:
+				if !pl.below32(nd.a) || !pl.below32(nd.b) {
+					pl.why = "i64 lane op"
+					return false
+				}
+				p.nodes[i].op = vecOpMulU
+			case vecOpShrS:
 				pl.why = "i64 lane op"
 				return false
 			}
@@ -826,6 +945,24 @@ func (pl *vecPlanner) lanesOK() bool {
 		}
 	}
 	return true
+}
+
+// below32 reports whether the i64 node n is always below 2^32.
+func (pl *vecPlanner) below32(n uint8) bool {
+	nd := pl.p.nodes[n]
+	switch nd.op {
+	case vecOpZext:
+		return true
+	case vecOpConst:
+		return nd.bits < 1<<32
+	case vecOpShrU:
+		return nd.arg >= 32
+	case vecOpBand:
+		return pl.below32(nd.a) || pl.below32(nd.b)
+	case vecOpBor, vecOpBxor:
+		return pl.below32(nd.a) && pl.below32(nd.b)
+	}
+	return false
 }
 
 // normalizeExit turns the exit test into the condition the loop goes round on: ne, lt_s or lt_u, on a left
@@ -975,6 +1112,8 @@ func (pl *vecPlanner) sameShifted(a, b uint8, shift int64) bool {
 		return d == shift && pl.pair(na.arg, nb.arg, shift)
 	case na.op == vecOpInvAff:
 		return p.invAffs[na.arg] == p.invAffs[nb.arg]
+	case na.op == vecOpIota:
+		return false // A copy's iota moves on from copy zero's.
 	case na.op == vecOpConst:
 		return na.bits == nb.bits
 	case vecUnaryOp(na.op):

@@ -1582,6 +1582,21 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "41c0234e", setup: func(i *instruction) {
 			i.asVecRRR(vecOpSmull2, v1VReg, operandNR(v2VReg), operandNR(v3VReg), vecArrangement8B)
 		}},
+		// umull v1.2d, v2.2s, v3.2s, as llvm-mc encodes it.
+		{want: "41c0a32e", setup: func(i *instruction) {
+			i.asVecRRR(vecOpUmull, v1VReg, operandNR(v2VReg), operandNR(v3VReg), vecArrangement4S)
+		}},
+		// mov v1.s[0], wzr and mov v1.d[0], xzr.
+		{want: "e11f044e", setup: func(i *instruction) {
+			i.asMovToVec(v1VReg, operandNR(xzrVReg), vecArrangementS, vecIndex(0))
+		}},
+		{want: "e11f084e", setup: func(i *instruction) {
+			i.asMovToVec(v1VReg, operandNR(xzrVReg), vecArrangementD, vecIndex(0))
+		}},
+		// xtn v1.2s, v2.2d
+		{want: "4128a10e", setup: func(i *instruction) {
+			i.asVecMisc(vecOpXtn, v1VReg, operandNR(v2VReg), vecArrangement2S)
+		}},
 		{want: "41c0634e", setup: func(i *instruction) {
 			i.asVecRRR(vecOpSmull2, v1VReg, operandNR(v2VReg), operandNR(v3VReg), vecArrangement8H)
 		}},

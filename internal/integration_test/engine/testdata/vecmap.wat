@@ -120,12 +120,77 @@
         (f64.add (f64.load (i32.add (local.get $a) (i32.shl (local.get $i) (i32.const 3)))) (f64.const 1)))
       (br_if $l (i32.lt_s (local.tee $i (i32.add (local.get $i) (i32.const 1))) (local.get $n)))))
 
-  ;; p[i] = x, x going down by two each iteration: the stored value is a counter, not an invariant, so
-  ;; the loop is not a vector map loop.
+  ;; p[i] = x, x going down by two each iteration: the stored value is a counter, which each lane holds
+  ;; as it is in that lane's iteration.
   (func (export "counter") (param $p i32) (param $x i32) (param $n i32)
     (loop $l
       (i32.store (local.get $p) (local.get $x))
       (local.set $x (i32.add (local.get $x) (i32.const -2)))
       (local.set $p (i32.add (local.get $p) (i32.const 4)))
       (br_if $l (local.tee $n (i32.add (local.get $n) (i32.const -1))))))
+;; The sums a linear regression of hashed samples takes: i32 values hashed from a counter, zero-extended,
+  ;; and four i64 totals, two of them of products.
+  (func (export "linreg") (param $n i32) (param $seed i32) (result i64)
+    (local $sx i64) (local $sy i64) (local $sxy i64) (local $sxx i64) (local $s i32) (local $t i32) (local $x i64) (local $y i64)
+    (local.set $s (local.get $seed))
+    (if (local.get $n) (then
+      (loop $l
+        (local.set $sy (i64.add (local.get $sy) (local.tee $y (i64.extend_i32_u (i32.and
+          (i32.xor (i32.shr_u (local.tee $t (i32.mul (i32.xor (i32.shr_u (local.tee $t (i32.add (local.get $s) (i32.const 1))) (i32.const 16)) (local.get $t)) (i32.const -2048144789))) (i32.const 13)) (local.get $t))
+          (i32.const 1023))))))
+        (local.set $x (i64.extend_i32_u (i32.and
+          (i32.xor (i32.shr_u (local.tee $t (i32.mul (i32.xor (i32.shr_u (local.get $s) (i32.const 16)) (local.get $s)) (i32.const -2048144789))) (i32.const 13)) (local.get $t))
+          (i32.const 1023))))
+        (local.set $sxy (i64.add (i64.mul (local.get $x) (local.get $y)) (local.get $sxy)))
+        (local.set $sx (i64.add (local.get $sx) (local.get $x)))
+        (local.set $sxx (i64.add (i64.mul (local.get $x) (local.get $x)) (local.get $sxx)))
+        (local.set $s (i32.add (local.get $s) (i32.const 2)))
+        (br_if $l (local.tee $n (i32.add (local.get $n) (i32.const -1)))))))
+    (i64.xor (i64.xor (local.get $sx) (i64.rotl (local.get $sy) (i64.const 16)))
+      (i64.xor (i64.rotl (local.get $sxy) (i64.const 32)) (i64.rotl (local.get $sxx) (i64.const 48)))))
+
+  ;; Like linreg, but the hashes are whole i32s, so the zero-extensions and the products are not trivial:
+  ;; the products reach 2^64 and the sums wrap.
+  (func (export "linregwide") (param $n i32) (param $seed i32) (result i64)
+    (local $sx i64) (local $sxy i64) (local $s i32) (local $t i32) (local $x i64) (local $y i64)
+    (local.set $s (local.get $seed))
+    (loop $l
+      (local.set $y (i64.extend_i32_u (i32.mul (i32.xor (local.get $s) (i32.shr_u (local.get $s) (i32.const 7))) (i32.const 0x9e3779b1))))
+      (local.set $x (i64.extend_i32_u (i32.xor (i32.shr_u (local.tee $t (i32.mul (i32.add (local.get $s) (i32.const 5)) (i32.const -2048144789))) (i32.const 13)) (local.get $t))))
+      (local.set $sxy (i64.add (local.get $sxy) (i64.mul (local.get $x) (local.get $y))))
+      (local.set $sx (i64.xor (local.get $sx) (i64.shl (local.get $x) (i64.const 17))))
+      (local.set $s (i32.add (local.get $s) (i32.const 3)))
+      (br_if $l (local.tee $n (i32.add (local.get $n) (i32.const -1)))))
+    (i64.xor (local.get $sx) (i64.rotl (local.get $sxy) (i64.const 7))))
+
+  ;; An i32 sum of a counter going up by three: four i32 lanes to a vector.
+  (func (export "iotasum32") (param $i i32) (param $end i32) (result i32)
+    (local $acc i32)
+    (loop $l
+      (local.set $acc (i32.add (local.get $acc)
+        (i32.xor (i32.mul (local.get $i) (i32.const 0x9e3779b1)) (i32.shr_u (local.get $i) (i32.const 3)))))
+      (br_if $l (i32.lt_s (local.tee $i (i32.add (local.get $i) (i32.const 3))) (local.get $end))))
+    (local.get $acc))
+
+  ;; A counter going down by five, an i32 xor total and an i64 sum of the same values.
+  (func (export "mixred") (param $i i32) (param $n i32) (result i64)
+    (local $x i32) (local $wide i64) (local $t i32)
+    (loop $l
+      (local.set $t (i32.sub (i32.mul (local.get $i) (local.get $i)) (local.get $n)))
+      (local.set $x (i32.xor (local.get $x) (local.get $t)))
+      (local.set $wide (i64.add (local.get $wide) (i64.extend_i32_u (local.get $t))))
+      (local.set $i (i32.sub (local.get $i) (i32.const 5)))
+      (br_if $l (local.tee $n (i32.add (local.get $n) (i32.const -1)))))
+    (i64.xor (local.get $wide) (i64.shl (i64.extend_i32_u (local.get $x)) (i64.const 40))))
+
+  ;; And and or totals of hashed counter values, one of them i64.
+  (func (export "andor") (param $i i32) (param $n i32) (result i64)
+    (local $a i32) (local $o i64)
+    (local.set $a (i32.const -1))
+    (loop $l
+      (local.set $a (i32.and (local.get $a) (i32.or (i32.mul (local.get $i) (i32.const 0x01000193)) (i32.const 0x10))))
+      (local.set $o (i64.or (local.get $o) (i64.shl (i64.extend_i32_u (i32.and (local.get $i) (i32.const 0xff))) (i64.const 24))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (local.tee $n (i32.add (local.get $n) (i32.const -1)))))
+    (i64.xor (local.get $o) (i64.extend_i32_u (local.get $a))))
 )

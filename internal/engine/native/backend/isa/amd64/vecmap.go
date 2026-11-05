@@ -2,6 +2,7 @@ package amd64
 
 import (
 	"fmt"
+	"math/bits"
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
@@ -11,18 +12,26 @@ import (
 
 // An OpcodeVecMap expands in place into a loop over its elements. Its operands arrive in fixed registers:
 // the pointers in vecMapPtrRegs, the element count in rcx, the invariants in xmm0 and up, which is also
-// where the expansion broadcasts them, and the next of xmm0-xmm7 hold its accumulator and temporaries.
+// where the expansion broadcasts them, and the next of xmm0-xmm15 hold its accumulators and temporaries.
 // The instruction uses every register it overwrites, so the register allocator keeps nothing it needs
-// afterwards in them, and nothing else: those are all caller-saved, so no prologue need save them. The
-// expansion advances the pointers and counts rcx down, leaves a reduction's total in rcx, and after
-// 256-bit instructions ends with vzeroupper, so code after it, and Go code it may lead to, pays no penalty
-// for the dirty upper halves.
+// afterwards in them, and nothing else; it defines those of xmm8-xmm15 it overwrites first, so the
+// prologue saves them. The expansion advances the pointers and counts rcx down, leaves its first total in
+// rcx and the others in the pointer registers past its pointers, and after 256-bit instructions ends with
+// vzeroupper, so code after it, and Go code it may lead to, pays no penalty for the dirty upper halves.
 var vecMapPtrRegs = [...]regalloc.RealReg{rax, rbx, rsi, rdi, r8, r9, r10, r11}
+
+// vecMapResultReg returns the register total k of p is left in.
+func vecMapResultReg(p *ssa.VecProgram, k int) regalloc.RealReg {
+	if k == 0 {
+		return rcx
+	}
+	return vecMapPtrRegs[p.Ptrs+k-1]
+}
 
 func (m *machine) lowerVecMap(instr *ssa.Instruction) {
 	n, args := instr.VecMapData()
 	prog := m.c.SSABuilder().VecProgram(n)
-	if prog.Ptrs > len(vecMapPtrRegs) || prog.Invs > ssa.VecMapRegs {
+	if prog.Ptrs > len(vecMapPtrRegs) || prog.Invs > ssa.VecMapRegs || prog.Ptrs+len(prog.Reduces)-1 > len(vecMapPtrRegs) {
 		panic("BUG: vector map program does not fit its registers")
 	}
 	var mask uint64
@@ -54,8 +63,16 @@ func (m *machine) lowerVecMap(instr *ssa.Instruction) {
 			}
 		}
 	}
-	if prog.Reduce != 0 {
-		mask |= 1<<(xmm0+regalloc.RealReg(prog.Invs)) | 1<<xmm0 | 1<<xmm1
+	for k := range prog.Reduces {
+		mask |= 1<<(xmm0+regalloc.RealReg(prog.Invs+k)) | 1<<vecMapResultReg(prog, k)
+	}
+	if prog.NeedsScratch() {
+		mask |= 1 << (xmm0 + regalloc.RealReg(prog.Scratch()))
+	}
+	for r := max(xmm8, xmm0+regalloc.RealReg(prog.Invs)); r <= xmm15; r++ {
+		if mask&(1<<r) != 0 {
+			m.insert(m.allocateInstr().asDefineUninitializedReg(regInfo.RealRegToVReg[r]))
+		}
 	}
 	vm := m.allocateInstr()
 	vm.kind = vecMap
@@ -68,8 +85,13 @@ func (m *machine) lowerVecMap(instr *ssa.Instruction) {
 	}
 	vm.vecProg = prog
 	m.insert(vm)
-	if prog.Reduce != 0 {
-		m.InsertMove(m.c.VRegOf(instr.Return()), rcxVReg, prog.Elem)
+	first, rest := instr.Returns()
+	for k := range prog.Reduces {
+		v := first
+		if k > 0 {
+			v = rest[k-1]
+		}
+		m.InsertMove(m.c.VRegOf(v), regInfo.RealRegToVReg[vecMapResultReg(prog, k)], prog.ReduceType(k))
 	}
 }
 
@@ -103,7 +125,9 @@ type vecEnc struct {
 	m, pp, opcode, ext byte
 }
 
-func vecEncOf(kind uint8, elem ssa.Type) vecEnc {
+// vecEncOf returns how an op of kind encodes in a program on lanes of elem, an integer one on lanes as
+// wide as its value, w bytes.
+func vecEncOf(kind, w uint8, elem ssa.Type) vecEnc {
 	if !elem.IsInt() {
 		pp := byte(0)
 		if elem == ssa.TypeF64 {
@@ -115,7 +139,7 @@ func vecEncOf(kind uint8, elem ssa.Type) vecEnc {
 		}[kind]
 		return vecEnc{m: 1, pp: pp, opcode: opcode}
 	}
-	q := elem == ssa.TypeI64
+	q := w == 8
 	switch kind {
 	case ssa.VecOpAdd:
 		if q {
@@ -129,6 +153,8 @@ func vecEncOf(kind uint8, elem ssa.Type) vecEnc {
 		return vecEnc{1, 1, 0xfa, 0}
 	case ssa.VecOpMul: // pmulld; there is no 64-bit lane multiply before AVX-512.
 		return vecEnc{2, 1, 0x40, 0}
+	case ssa.VecOpMulU: // pmuludq
+		return vecEnc{1, 1, 0xf4, 0}
 	case ssa.VecOpBand:
 		return vecEnc{1, 1, 0xdb, 0}
 	case ssa.VecOpBor:
@@ -143,6 +169,15 @@ func vecEncOf(kind uint8, elem ssa.Type) vecEnc {
 	ext := map[uint8]byte{ssa.VecOpShl: 6, ssa.VecOpShrU: 2, ssa.VecOpShrS: 4}[kind]
 	return vecEnc{1, 1, opcode, ext}
 }
+
+// Shifts of a whole vector by an immediate, 66 0F 73 /ext ib: pslldq by bytes, and psllq and psrlq.
+var (
+	vecEncPslldq = vecEnc{1, 1, 0x73, 7}
+	vecEncPsllq  = vecEnc{1, 1, 0x73, 6}
+	vecEncPsrlq  = vecEnc{1, 1, 0x73, 2}
+	vecEncPslld  = vecEnc{1, 1, 0x72, 6}
+	vecEncPaddd  = vecEnc{1, 1, 0xfe, 0}
+)
 
 // encodeVecMap emits the expansion.
 func (i *instruction) encodeVecMap(c backend.Compiler) {
@@ -195,11 +230,36 @@ func (i *instruction) encodeVecMap(c backend.Compiler) {
 			c.EmitByte(1)
 		}
 	}
-	acc := byte(p.Invs)
-	if p.Reduce != 0 {
-		// The accumulator starts at the identity: all ones for and, zero otherwise.
+	// An iota's register starts at the value of its invariant in every lane; lane j gets j steps more,
+	// added within each 128 bits from the step shifted a lane's width at a time, and onto the upper 128
+	// bits of a 256-bit vector as many steps as the lower holds lanes. Its step's register then holds the
+	// steps of a whole vector, which each copy of the program adds after it.
+	scratch := p.Scratch()
+	lanes := width / int(e)
+	for _, op := range p.Ops {
+		if op.Kind != ssa.VecOpIota {
+			continue
+		}
+		iota, step := op.Arg, op.B
+		for sh := e; sh < 16; sh += e {
+			vecShift(c, avx, vecEncPslldq, scratch, step, byte(sh))
+			vecBinary(c, avx, vecEncPaddd, iota, iota, scratch)
+		}
+		if avx {
+			vecShift(c, avx, vecEncPslld, scratch, step, byte(bits.TrailingZeros(uint(lanes/2))))
+			// vperm2i128 scratch, scratch, scratch, 0x08: VEX.256.66.0F3A 46 /r ib, the lower 128 bits zero
+			// and the upper the lower's.
+			vex(c, scratch, scratch, scratch, 3, true, 1, 0x46)
+			c.EmitByte(0x08)
+			vecBinary(c, avx, vecEncPaddd, iota, iota, scratch)
+		}
+		vecShift(c, avx, vecEncPslld, step, step, byte(bits.TrailingZeros(uint(lanes))))
+	}
+	// Each accumulator starts at the identity: all ones for and, zero otherwise.
+	for k, red := range p.Reduces {
+		acc := byte(p.Invs + k)
 		opcode := byte(0xef) // pxor
-		if p.Reduce == ssa.VecOpBand {
+		if red.Op == ssa.VecOpBand {
 			opcode = 0x76 // pcmpeqd
 		}
 		if avx {
@@ -238,7 +298,7 @@ func (i *instruction) encodeVecMap(c backend.Compiler) {
 
 	last := len(p.Ops) - 1
 	// A reduction of a load alone reads it straight into the accumulating instruction.
-	foldRoot := fold && p.Reduce != 0 && p.Ops[last].Kind == ssa.VecOpLoad
+	foldRoot := fold && len(p.Reduces) == 1 && int(p.Reduces[0].Root) == last && p.Ops[last].Kind == ssa.VecOpLoad
 	loopStart := len(*c.BufPtr())
 	// Two vectors' worth per iteration, the second width bytes further on.
 	for copyN := 0; copyN < 2; copyN++ {
@@ -246,36 +306,29 @@ func (i *instruction) encodeVecMap(c backend.Compiler) {
 		for idx, op := range p.Ops {
 			r := regs[idx]
 			switch op.Kind {
-			case ssa.VecOpInv:
+			case ssa.VecOpInv, ssa.VecOpIota:
 			case ssa.VecOpLoad:
 				if fold && p.Folded(idx) || foldRoot && idx == last {
 					continue
 				}
 				vecMem(c, avx, r, 0, vecMapPtrRegs[op.Arg], disp, 1, movPP, movLoad)
 			case ssa.VecOpSqrt:
-				enc := vecEncOf(op.Kind, p.Elem)
+				enc := vecEncOf(op.Kind, op.W, p.Elem)
 				if avx {
 					vex(c, r, regs[op.A], 0, 1, true, enc.pp, enc.opcode)
 				} else {
 					legacyRR(c, enc.pp, 1, enc.opcode, r, regs[op.A])
 				}
 			case ssa.VecOpShl, ssa.VecOpShrU, ssa.VecOpShrS:
-				enc := vecEncOf(op.Kind, p.Elem)
-				if avx {
-					// The destination is in VEX.vvvv, the source in ModRM.rm.
-					vex(c, enc.ext, regs[op.A], r, 1, true, 1, enc.opcode)
-				} else {
-					if r != regs[op.A] {
-						legacyRR(c, 0, 1, 0x28, r, regs[op.A]) // movaps
-					}
-					legacyRR(c, 1, 1, enc.opcode, enc.ext, r)
-				}
-				c.EmitByte(op.Arg)
+				vecShift(c, avx, vecEncOf(op.Kind, op.W, p.Elem), r, regs[op.A], op.Arg)
+			case ssa.VecOpZext:
+				vecShift(c, avx, vecEncPsllq, r, regs[op.A], 32)
+				vecShift(c, avx, vecEncPsrlq, r, r, 32)
 			case ssa.VecOpXor, ssa.VecOpAnd:
-				enc := vecEncOf(op.Kind, p.Elem)
+				enc := vecEncOf(op.Kind, op.W, p.Elem)
 				vecBinary(c, avx, enc, r, regs[op.A], op.Arg)
 			default:
-				enc := vecEncOf(op.Kind, p.Elem)
+				enc := vecEncOf(op.Kind, op.W, p.Elem)
 				if fold && p.Folded(int(op.B)) {
 					vecMem(c, true, r, regs[op.A], vecMapPtrRegs[p.Ops[op.B].Arg], disp, enc.m, enc.pp, enc.opcode)
 				} else {
@@ -283,14 +336,22 @@ func (i *instruction) encodeVecMap(c backend.Compiler) {
 				}
 			}
 		}
-		switch {
-		case p.Store >= 0:
+		if p.Store >= 0 {
 			vecMem(c, avx, regs[last], 0, vecMapPtrRegs[p.Store], disp, 1, movPP, movStore)
-		case foldRoot:
-			enc := vecEncOf(p.Reduce, p.Elem)
-			vecMem(c, true, acc, acc, vecMapPtrRegs[p.Ops[last].Arg], disp, enc.m, enc.pp, enc.opcode)
-		default:
-			vecBinary(c, avx, vecEncOf(p.Reduce, p.Elem), acc, acc, regs[last])
+		}
+		for k, red := range p.Reduces {
+			acc := byte(p.Invs + k)
+			enc := vecEncOf(red.Op, p.Ops[red.Root].W, p.Elem)
+			if foldRoot {
+				vecMem(c, true, acc, acc, vecMapPtrRegs[p.Ops[last].Arg], disp, enc.m, enc.pp, enc.opcode)
+			} else {
+				vecBinary(c, avx, enc, acc, acc, regs[red.Root])
+			}
+		}
+		for _, op := range p.Ops {
+			if op.Kind == ssa.VecOpIota {
+				vecBinary(c, avx, vecEncPaddd, op.Arg, op.Arg, op.B)
+			}
 		}
 	}
 	// add rcx, 2*width: REX.W 83 /0 ib
@@ -310,44 +371,71 @@ func (i *instruction) encodeVecMap(c backend.Compiler) {
 		c.Emit4Bytes(uint32(int32(rel)))
 	}
 
-	if p.Reduce == 0 {
-		if avx {
-			vzeroupper(c)
-		}
-		return
-	}
-	// Fold the accumulator's lanes into its lowest and move that to rcx.
-	enc := vecEncOf(p.Reduce, p.Elem)
-	t := byte(0)
-	if acc == 0 {
-		t = 1
-	}
+	// Fold each accumulator's lanes into its lowest and move that to its total's register: the upper 128
+	// bits onto the lower, the upper half of those onto the lower, and for packed 32-bit lanes the upper
+	// lane of that onto the lowest.
+	t := scratch
 	if avx {
-		// vextractf128 xmm_t, ymm_acc, 1: VEX.256.66.0F3A 19 /r ib, the source in ModRM.reg.
-		vex(c, acc, t, 0, 3, true, 1, 0x19)
-		c.EmitByte(1)
-		vex(c, acc, t, acc, 1, false, 1, enc.opcode)
+		for k, red := range p.Reduces {
+			acc := byte(p.Invs + k)
+			enc := vecEncOf(red.Op, p.Ops[red.Root].W, p.Elem)
+			// vextractf128 xmm_t, ymm_acc, 1: VEX.256.66.0F3A 19 /r ib, the source in ModRM.reg.
+			vex(c, acc, t, 0, 3, true, 1, 0x19)
+			c.EmitByte(1)
+			vex(c, acc, t, acc, 1, false, 1, enc.opcode)
+		}
 		vzeroupper(c)
 	}
-	// pshufd t, acc, imm: 66 0F 70 /r ib, then acc op= t: the upper half onto the lower, and for 32-bit
-	// lanes the upper lane of that onto the lowest.
 	imms := []byte{0x4e}
 	if e == 4 {
 		imms = append(imms, 0xb1)
 	}
-	for _, imm := range imms {
-		legacyRR(c, 1, 1, 0x70, t, acc)
-		c.EmitByte(imm)
-		legacyRR(c, 1, enc.m, enc.opcode, acc, t)
+	for k, red := range p.Reduces {
+		acc := byte(p.Invs + k)
+		enc := vecEncOf(red.Op, p.Ops[red.Root].W, p.Elem)
+		// pshufd t, acc, imm: 66 0F 70 /r ib, then acc op= t.
+		for _, imm := range imms {
+			legacyRR(c, 1, 1, 0x70, t, acc)
+			c.EmitByte(imm)
+			legacyRR(c, 1, enc.m, enc.opcode, acc, t)
+		}
+		// movd/movq dst, acc: 66 REX 0F 7E /r, the vector register in ModRM.reg.
+		dst := regEncodings[vecMapResultReg(p, k)]
+		c.EmitByte(0x66)
+		rex := byte(0x40)
+		if p.ReduceType(k) == ssa.TypeI64 {
+			rex |= 8
+		}
+		if acc&8 != 0 {
+			rex |= 4
+		}
+		if dst.rexBit() > 0 {
+			rex |= 1
+		}
+		if rex != 0x40 {
+			c.EmitByte(rex)
+		}
+		c.EmitByte(0x0f)
+		c.EmitByte(0x7e)
+		c.EmitByte(modRMRegReg(acc, byte(dst.encoding())))
 	}
-	// movd/movq rcx, acc: 66 (REX.W) 0F 7E /r, the vector register in ModRM.reg.
-	c.EmitByte(0x66)
-	if e == 8 {
-		c.EmitByte(0x48)
+	if len(p.Reduces) == 0 && avx {
+		vzeroupper(c)
 	}
-	c.EmitByte(0x0f)
-	c.EmitByte(0x7e)
-	c.EmitByte(modRMRegReg(acc, 1))
+}
+
+// vecShift emits dst = src shifted by imm, enc a shift by an immediate.
+func vecShift(c backend.Compiler, avx bool, enc vecEnc, dst, src, imm byte) {
+	if avx {
+		// The destination is in VEX.vvvv, the source in ModRM.rm.
+		vex(c, enc.ext, src, dst, 1, true, 1, enc.opcode)
+	} else {
+		if dst != src {
+			legacyRR(c, 0, 1, 0x28, dst, src) // movaps
+		}
+		legacyRR(c, 1, 1, enc.opcode, enc.ext, dst)
+	}
+	c.EmitByte(imm)
 }
 
 // vzeroupper: C5 F8 77
@@ -439,10 +527,13 @@ func emitEscape(c backend.Compiler, m byte) {
 	}
 }
 
-// legacyRR emits a legacy SSE instruction with a register-register ModRM; the registers are below xmm8.
+// legacyRR emits a legacy SSE instruction with a register-register ModRM, with a REX prefix for xmm8 and up.
 func legacyRR(c backend.Compiler, pp, m, opcode, reg, rm byte) {
 	if pfx := ppPrefix(pp); pfx != 0 {
 		c.EmitByte(pfx)
+	}
+	if reg&8 != 0 || rm&8 != 0 {
+		c.EmitByte(0x40 | reg>>3<<2 | rm>>3)
 	}
 	emitEscape(c, m)
 	c.EmitByte(opcode)
