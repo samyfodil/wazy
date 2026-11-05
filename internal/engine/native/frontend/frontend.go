@@ -127,6 +127,8 @@ type Compiler struct {
 	selfInlinable byte
 	// inlineResults is the block type of the frame inlineSelf lowers the body in.
 	inlineResults wasm.FunctionType
+	// vecSum is the vector sum being lowered, and where to look for the next.
+	vecSum vecSum
 	// lastStore is the last full-width store, while nothing that may write memory has run since in its
 	// block: a load of the same address and width takes its value instead of reading it back.
 	lastStore storedValue

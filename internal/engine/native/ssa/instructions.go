@@ -369,6 +369,9 @@ const (
 	// OpcodeVhighBits performs a lane-wise extract of the high bits: `v = VhighBits.lane a`.
 	OpcodeVhighBits
 
+	// OpcodeVIaddReduce sums the i32 lanes of a vector, wrapping: `v = VIaddReduce.i32x4 a`, an i32.
+	OpcodeVIaddReduce
+
 	// OpcodeIcmp compares two integer values with the given condition: `v = icmp Cond, x, y`.
 	OpcodeIcmp
 
@@ -944,6 +947,7 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeVanyTrue:                    sideEffectNone,
 	OpcodeVallTrue:                    sideEffectNone,
 	OpcodeVhighBits:                   sideEffectNone,
+	OpcodeVIaddReduce:                 sideEffectNone,
 	OpcodeVIadd:                       sideEffectNone,
 	OpcodeVSaddSat:                    sideEffectNone,
 	OpcodeVUaddSat:                    sideEffectNone,
@@ -1016,6 +1020,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeVanyTrue:                    returnTypesFnI32,
 	OpcodeVallTrue:                    returnTypesFnI32,
 	OpcodeVhighBits:                   returnTypesFnI32,
+	OpcodeVIaddReduce:                 returnTypesFnI32,
 	OpcodeVIadd:                       returnTypesFnV128,
 	OpcodeVSaddSat:                    returnTypesFnV128,
 	OpcodeVUaddSat:                    returnTypesFnV128,
@@ -2122,6 +2127,15 @@ func (i *Instruction) AsVhighBits(x Value, lane VecLane) *Instruction {
 	return i
 }
 
+// AsVIaddReduce initializes this instruction as the sum of x's i32 lanes with OpcodeVIaddReduce.
+func (i *Instruction) AsVIaddReduce(x Value) *Instruction {
+	i.opcode = OpcodeVIaddReduce
+	i.typ = TypeI32
+	i.v = x
+	i.u1 = uint64(VecLaneI32x4)
+	return i
+}
+
 // VconstData returns the operands of this vector constant instruction.
 func (i *Instruction) VconstData() (lo, hi uint64) {
 	return i.u1, i.u2
@@ -2887,7 +2901,7 @@ func (i *Instruction) Format(b Builder) string {
 		OpcodeVFmin, OpcodeVFmax, OpcodeVMinPseudo, OpcodeVMaxPseudo,
 		OpcodeSnarrow, OpcodeUnarrow, OpcodeSwizzle, OpcodeSqmulRoundSat:
 		instSuffix = fmt.Sprintf(".%s %s, %s", VecLane(i.u1), i.v.Format(b), i.v2.Format(b))
-	case OpcodeVIabs, OpcodeVIneg, OpcodeVIpopcnt, OpcodeVhighBits, OpcodeVallTrue, OpcodeVanyTrue,
+	case OpcodeVIabs, OpcodeVIneg, OpcodeVIpopcnt, OpcodeVhighBits, OpcodeVIaddReduce, OpcodeVallTrue, OpcodeVanyTrue,
 		OpcodeVFabs, OpcodeVFneg, OpcodeVSqrt, OpcodeVCeil, OpcodeVFloor, OpcodeVTrunc, OpcodeVNearest,
 		OpcodeVFcvtToUintSat, OpcodeVFcvtToSintSat, OpcodeVFcvtFromUint, OpcodeVFcvtFromSint,
 		OpcodeFvpromoteLow, OpcodeFvdemote, OpcodeSwidenLow, OpcodeUwidenLow, OpcodeSwidenHigh, OpcodeUwidenHigh,
@@ -3074,6 +3088,8 @@ func (o Opcode) String() (ret string) {
 		return "VallTrue"
 	case OpcodeVhighBits:
 		return "VhighBits"
+	case OpcodeVIaddReduce:
+		return "VIaddReduce"
 	case OpcodeIcmp:
 		return "Icmp"
 	case OpcodeIcmpImm:

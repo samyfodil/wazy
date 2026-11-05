@@ -776,6 +776,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerVallTrue(instr)
 	case ssa.OpcodeVhighBits:
 		m.lowerVhighBits(instr)
+	case ssa.OpcodeVIaddReduce:
+		m.lowerVIaddReduce(instr)
 	case ssa.OpcodeVbnot:
 		m.lowerVbnot(instr)
 	case ssa.OpcodeVband:
@@ -3810,6 +3812,21 @@ func (m *machine) lowerVallTrue(instr *ssa.Instruction) {
 	m.insert(and)
 
 	m.copyTo(tmp2, rd)
+}
+
+// lowerVIaddReduce adds the upper half of the vector onto the lower, then the second lane onto the first.
+func (m *machine) lowerVIaddReduce(instr *ssa.Instruction) {
+	x := m.c.VRegOf(instr.Arg())
+	// pshufd writes its destination without defining it, so each shuffles a copy in place.
+	halves := m.copyToTmp(x)
+	m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePshufd, 0b01_00_11_10, newOperandReg(halves), halves))
+	pairs := m.c.AllocateVReg(ssa.TypeV128)
+	m.insertXmmBinary(sseOpcodePaddd, newOperandReg(halves), x, pairs)
+	odd := m.copyToTmp(pairs)
+	m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePshufd, 0b10_11_00_01, newOperandReg(odd), odd))
+	sum := m.c.AllocateVReg(ssa.TypeV128)
+	m.insertXmmBinary(sseOpcodePaddd, newOperandReg(odd), pairs, sum)
+	m.insert(m.allocateInstr().asXmmToGpr(sseOpcodeMovd, sum, m.c.VRegOf(instr.Return()), false))
 }
 
 func (m *machine) lowerVhighBits(instr *ssa.Instruction) {

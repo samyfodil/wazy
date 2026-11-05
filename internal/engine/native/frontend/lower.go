@@ -236,7 +236,9 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 		followingBlock: c.ssaBuilder.ReturnBlock(),
 	})
 
+	c.vecSum = vecSum{cands: c.vecSum.cands[:0]}
 	for c.loweringState.pc < len(c.wasmFunctionBody) {
+		c.lowerVecSums()
 		blkBeforeLowering := c.ssaBuilder.CurrentBlock()
 		c.lowerCurrentOpcode()
 		blkAfterLowering := c.ssaBuilder.CurrentBlock()

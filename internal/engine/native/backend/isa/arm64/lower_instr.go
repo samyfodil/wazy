@@ -520,6 +520,15 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rd := m.compiler.VRegOf(instr.Return())
 		arr := ssaLaneToArrangement(lane)
 		m.lowerVhighBits(rm, rd, arr)
+	case ssa.OpcodeVIaddReduce:
+		rn := m.getOperand_NR(m.compiler.ValueDefinition(instr.Arg()), extModeNone)
+		sum := m.compiler.AllocateVReg(ssa.TypeV128)
+		addv := m.allocateInstr()
+		addv.asVecLanes(vecOpAddv, sum, rn, vecArrangement4S)
+		m.insert(addv)
+		mov := m.allocateInstr()
+		mov.asMovFromVec(m.compiler.VRegOf(instr.Return()), operandNR(sum), vecArrangementS, vecIndex(0), false)
+		m.insert(mov)
 	case ssa.OpcodeVIadd:
 		x, y, lane := instr.Arg2WithLane()
 		arr := ssaLaneToArrangement(lane)
