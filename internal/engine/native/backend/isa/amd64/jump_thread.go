@@ -85,6 +85,27 @@ func (m *machine) threadJumps() {
 			}
 		}
 	}
+	// A conditional jump over an unconditional one, to the code right after both, becomes the opposite
+	// conditional jump to where the unconditional one goes: a loop's back edge often falls through this
+	// way, one jump shorter.
+	for cur := m.rootInstr; cur != nil; cur = cur.next {
+		if cur.kind != jmpIf || cur.op1.kind != operandKindLabel {
+			continue
+		}
+		j := cur.next
+		if j == nil || j.kind != jmp || j.op1.kind != operandKindLabel {
+			continue
+		}
+		for next := j.next; next != nil && next.kind == nop0; next = next.next {
+			if l, ok := isLabel(next); ok && l == cur.op1.label() {
+				cur.u1 = uint64(cond(cur.u1).invert())
+				cur.op1 = j.op1
+				j.kind = nop0
+				j.u1 = uint64(labelInvalid)
+				break
+			}
+		}
+	}
 	m.copyReturns()
 }
 

@@ -79,6 +79,27 @@ func (m *machine) threadJumps() {
 			}
 		}
 	}
+	// A conditional branch over an unconditional one, to the code right after both, becomes the opposite
+	// conditional branch to where the unconditional one goes: a loop's back edge often falls through this
+	// way, one branch shorter.
+	for cur := m.rootInstr; cur != nil; cur = cur.next {
+		if cur.kind != condBr || cur.condBrOffsetResolved() {
+			continue
+		}
+		j := cur.next
+		if j == nil || j.kind != br {
+			continue
+		}
+		for next := j.next; next != nil && next.kind == nop0; next = next.next {
+			if l, ok := begins[next]; ok && l == cur.condBrLabel() {
+				cur.u1 = invertTrapCond(cur.condBrCond()).asUint64()
+				cur.u2 = cur.u2&^0xffffffff | uint64(j.brLabel())
+				j.kind = nop0
+				j.u1 = uint64(labelInvalid)
+				break
+			}
+		}
+	}
 	m.copyReturns()
 }
 

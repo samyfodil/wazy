@@ -859,11 +859,10 @@ L0 (SSA Block: blk0):
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
 	ldr x8, [x21]
-	tbnz x8, #63, #0x20 (L3)
+	tbnz x8, #63, #0x1c (L3)
 L7 (SSA Block: blk7):
 L4 (SSA Block: blk4):
-	cbnz w2, #0x8 (L8)
-	b #0x10 (L6)
+	cbz w2, #0x10 L6
 L8 (SSA Block: blk8):
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
@@ -871,10 +870,10 @@ L8 (SSA Block: blk8):
 L6 (SSA Block: blk6):
 	load_const_block_arg x2, 0x1
 	orr w2, wzr, #0x1
-	b #-0x20 (L1)
+	b #-0x1c (L1)
 L3 (SSA Block: blk3):
 	yield x0
-	b #-0x2c (L4)
+	b #-0x28 (L4)
 `,
 		},
 		{
