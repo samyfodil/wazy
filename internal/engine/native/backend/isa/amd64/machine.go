@@ -2054,9 +2054,16 @@ func (m *machine) lowerAluRmiROp(si *ssa.Instruction, op aluRmiROpcode) {
 	// (C7) and dropped: real producers canonicalize the constant to y, so the
 	// swap fired 0 times across Go/Rust/TinyGo modules -- it only ever helps
 	// hand-written wasm, for the cost of a Constant() check on every ALU op.
+	rd := m.c.VRegOf(si.Return())
+	if op == aluRmiROpcodeMul && yDef.IsFromInstr() && yDef.Instr.Constant() {
+		if k, ok := asImm32Operand(yDef.Instr.ConstantVal(), !_64); ok {
+			yDef.Instr.MarkLowered()
+			m.insert(m.allocateInstr().asImulImm(m.getOperand_Mem_Reg(xDef), k.imm32(), rd, _64))
+			return
+		}
+	}
 	rn := m.getOperand_Reg(xDef)
 	rm := m.getOperand_Mem_Imm32_Reg(yDef)
-	rd := m.c.VRegOf(si.Return())
 
 	// An add is what LEA computes, and LEA is three-operand: it reads rn and rm and
 	// writes rd, so neither the copy in nor the copy out below is needed. LEA leaves the

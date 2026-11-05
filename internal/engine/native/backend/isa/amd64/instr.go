@@ -61,6 +61,8 @@ func (i *instruction) String() string {
 		}
 	case xmmRmR:
 		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(false), i.op2.format(false))
+	case imulImm:
+		return fmt.Sprintf("imul $%d, %s, %s", int32(i.u1), i.op1.format(i.b1), i.op2.format(i.b1))
 	case xmmRmRVex:
 		src1 := newOperandReg(regalloc.VReg(i.u1))
 		return fmt.Sprintf("v%s %s, %s, %s", sseOpcode(i.u2), i.op1.format(false), src1.format(false), i.op2.format(false))
@@ -854,6 +856,10 @@ const (
 	// xmmRmRVex is xmmRmR's AVX form, which does not overwrite either operand: op2 = u1 op op1.
 	xmmRmRVex
 
+	// imulImm is the three-operand integer multiplication by an immediate: op2 = op1 * u1, op1 a
+	// register or memory.
+	imulImm
+
 	// XMM (scalar or vector) unary op: mov between XMM registers (32 64) (reg addr) reg.
 	//
 	// This differs from xmmRmR in that the dst register of xmmUnaryRmR is not used in the
@@ -1236,6 +1242,8 @@ func (k instructionKind) String() string {
 		return "xmmRmR"
 	case xmmRmRVex:
 		return "xmmRmRVex"
+	case imulImm:
+		return "imulImm"
 	case gprToXmm:
 		return "gprToXmm"
 	case xmmUnaryRmR:
@@ -1514,6 +1522,18 @@ func (i *instruction) asXmmRmRVex(op sseOpcode, src2 operand, src1, rd regalloc.
 	i.kind = xmmRmRVex
 	i.op1, i.op2 = src2, newOperandReg(rd)
 	i.u1, i.u2 = uint64(src1), uint64(op)
+	return i
+}
+
+func (i *instruction) asImulImm(rm operand, imm uint32, rd regalloc.VReg, _64 bool) *instruction {
+	if rm.kind != operandKindReg && rm.kind != operandKindMem {
+		panic("BUG")
+	}
+	i.kind = imulImm
+	i.op1 = rm
+	i.op2 = newOperandReg(rd)
+	i.u1 = uint64(imm)
+	i.b1 = _64
 	return i
 }
 
@@ -2617,6 +2637,7 @@ var defKinds = [instrMax]defKind{
 	xmmCmpRmR:              defKindNone,
 	xmmRmR:                 defKindNone,
 	xmmRmRVex:              defKindOp2,
+	imulImm:                defKindOp2,
 	xmmRmRImm:              defKindNone,
 	mov64MR:                defKindOp2,
 	movsxRmR:               defKindOp2,
@@ -2723,6 +2744,7 @@ var useKinds = [instrMax]useKind{
 	xmmCmpRmR:              useKindOp1Op2Reg,
 	xmmRmR:                 useKindOp1Op2Reg,
 	xmmRmRVex:              useKindOp1U1Reg,
+	imulImm:                useKindOp1,
 	xmmRmRImm:              useKindOp1Op2Reg,
 	mov64MR:                useKindOp1,
 	movzxRmR:               useKindOp1,

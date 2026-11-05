@@ -154,6 +154,37 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		}
 		encodeRegReg(c, legacyPrefixesNone, 0x89, 1, src, dst, rex)
 
+	case imulImm:
+		var rex rexInfo
+		if i.b1 {
+			rex = rex.setW()
+		} else {
+			rex = rex.clearW()
+		}
+		dst := regEncodings[i.op2.reg().RealReg()]
+		imm := uint32(i.u1)
+		imm8 := lower8willSignExtendTo32(imm)
+		opc := uint32(0x69)
+		if imm8 {
+			opc = 0x6b
+		}
+		switch i.op1.kind {
+		case operandKindReg:
+			encodeRegReg(c, legacyPrefixesNone, opc, 1, dst, regEncodings[i.op1.reg().RealReg()], rex)
+		case operandKindMem:
+			if i.op1.addressMode().kind() == amodeRipRel {
+				panic("BUG: a RIP-relative operand is resolved as if no immediate followed it")
+			}
+			encodeRegMem(c, legacyPrefixesNone, opc, 1, dst, i.op1.addressMode(), rex)
+		default:
+			panic("BUG: invalid operand kind")
+		}
+		if imm8 {
+			c.EmitByte(byte(imm))
+		} else {
+			c.Emit4Bytes(imm)
+		}
+
 	case xmmRmRVex:
 		pp, mapSel, opcode := vexEncoding(sseOpcode(i.u2))
 		dst := uint8(regEncodings[i.op2.reg().RealReg()])

@@ -63,6 +63,34 @@ func TestInstruction_format_encode(t *testing.T) {
 			wantFormat: "vaddsd (%rsp), %xmm0, %xmm15",
 			want:       "c57b583c24",
 		},
+		// Three-operand multiplication by an immediate, as llvm-mc encodes it.
+		{
+			setup:      func(i *instruction) { i.asImulImm(newOperandReg(r15VReg), uint32(0xfffffe78), r15VReg, false) },
+			wantFormat: "imul $-392, %r15d, %r15d",
+			want:       "4569ff78feffff",
+		},
+		{
+			setup:      func(i *instruction) { i.asImulImm(newOperandReg(raxVReg), 100000, rcxVReg, true) },
+			wantFormat: "imul $100000, %rax, %rcx",
+			want:       "4869c8a0860100",
+		},
+		{
+			setup:      func(i *instruction) { i.asImulImm(newOperandMem(newAmodeImmReg(32, rspVReg)), 7, r12VReg, false) },
+			wantFormat: "imul $7, 32(%rsp), %r12d",
+			want:       "446b64242007",
+		},
+		{
+			setup: func(i *instruction) {
+				i.asImulImm(newOperandMem(newAmodeRegRegShift(0x100, r13VReg, r10VReg, 2)), uint32(0xfffffc18), r9VReg, true)
+			},
+			wantFormat: "imul $-1000, 256(%r13,%r10,4), %r9",
+			want:       "4f698c950001000018fcffff",
+		},
+		{
+			setup:      func(i *instruction) { i.asImulImm(newOperandMem(newAmodeImmReg(0, rbpVReg)), 3, raxVReg, false) },
+			wantFormat: "imul $3, (%rbp), %eax",
+			want:       "6b450003",
+		},
 		{
 			setup:      func(i *instruction) { i.asXmmRmRVex(sseOpcodePshufb, newOperandReg(xmm3VReg), xmm2VReg, xmm1VReg) },
 			wantFormat: "vpshufb %xmm3, %xmm2, %xmm1",
