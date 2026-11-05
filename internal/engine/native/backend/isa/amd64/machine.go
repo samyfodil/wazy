@@ -2170,7 +2170,9 @@ func (m *machine) lowerXmmRmR(instr *ssa.Instruction) {
 	}
 
 	xDef, yDef := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
-	rn := m.getOperand_Reg(yDef)
+	// A scalar operation reads its second operand from memory as well as from a register, and a load
+	// only it uses folds into it.
+	rn := m.getOperand_Mem_Reg(yDef)
 	rm := m.getOperand_Reg(xDef)
 	rd := m.c.VRegOf(instr.Return())
 
