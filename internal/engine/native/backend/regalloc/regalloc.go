@@ -182,8 +182,6 @@ type (
 		// while nextUseBlockID is that block's ID. See state.nextUseOf.
 		nextUse        programCounter
 		nextUseBlockID int32
-		// useDepth is the deepest loop nesting of any block using this value.
-		useDepth uint8
 		// crosses is the fixed registers instructions overwrite while this value is live across them, other
 		// than a call's: in one of those, the value would be moved out of the way there.
 		crosses RegSet
@@ -293,7 +291,6 @@ func resetVrState[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) {
 	vs.lastUse = -1
 	vs.lastUseUpdatedAtBlockID = -1
 	vs.nextUseBlockID = -1
-	vs.useDepth = 0
 	vs.crosses = 0
 	vs.firstUseBlk, vs.distStamp, vs.ownStamp = -1, -1, -1
 	vs.homeReg = RealRegInvalid
@@ -640,9 +637,6 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 			for _, use = range instr.Uses(&a.vs) {
 				if !use.IsRealReg() {
 					st := s.getOrAllocateVRegState(use)
-					if d := a.depthOf(blkID); d > st.useDepth {
-						st.useDepth = d
-					}
 					st.firstUse, st.firstUseBlk = n, int32(blkID)
 					// Note: We use .spilled field to store the flag.
 					if st.spilled != flagLive { //nolint:gosimple
@@ -844,7 +838,7 @@ func (a *Allocator[I, B, F]) finalizeStartReg(f F, blk B) {
 		}
 		s.resetAt(predState)
 		if blk.LoopHeader() {
-			a.preloadLoopLiveIns(f, f.Pred(blk, currentBlkState.startFromPredIndex), currentBlkState, a.depthOf(bID), a.loopClobbers[int32(bID)])
+			a.preloadLoopLiveIns(f, f.Pred(blk, currentBlkState.startFromPredIndex), blk, currentBlkState, a.loopClobbers[int32(bID)])
 		}
 	}
 
@@ -1547,16 +1541,30 @@ func (a *Allocator[I, B, F]) computeNextUses(bID int32) {
 // where it uses them and drops them again at the back edge, since the back edge has to deliver the state
 // the header starts with; and a value the loop does not use, left in a register, is what the loop evicts
 // first and the back edge then reloads on every iteration. A value the loop does not use soon is what an
-// eviction inside the loop picks first, so a preload costs at most the reload it adds. depth is the
-// header's loop depth.
-func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState[I, B, F], depth uint8, clobbered RegSet) {
+// eviction inside the loop picks first, so a preload costs at most the reload it adds. Whether the loop
+// uses a value is whether it is used before an exit of this loop, blk, not of any loop as deep.
+func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *blockState[I, B, F], clobbered RegSet) {
 	s := &a.state
-	for _, vs := range a.liveIns(header) {
+	// A value the loop does not use is live into its header only to be used past one of its exits: its
+	// distance from there is that far. One not live into it at all is dead.
+	a.stamp++
+	live := a.liveIns(header)
+	for k, st := range live {
+		st.dist, st.distStamp = a.distBuf[header.distBegin+int32(k)], a.stamp
+	}
+	for k, st := range a.loopLiveIns(header) {
+		st.dist, st.distStamp = a.distBuf[header.distBegin+int32(len(live)+k)], a.stamp
+	}
+	unused := func(vs *vrState[I, B, F]) bool { return vs.distStamp != a.stamp || vs.dist >= loopExitDistance }
+	// A value that can go to the stack: not a parameter of the header, which the loop carries, nor a real
+	// register. An outer loop's parameter can, stored where that loop defines it.
+	movable := func(vs *vrState[I, B, F]) bool { return !(vs.isPhi && vs.defBlk == blk) && !vs.v.IsRealReg() }
+	for _, vs := range live {
 		if vs.isPhi || vs.v.IsRealReg() || (vs.r != RealRegInvalid && s.regsInUse.get(vs.r) == vs) {
 			continue
 		}
-		if vs.useDepth < depth {
-			continue // Nothing in the loop uses it.
+		if unused(vs) {
+			continue
 		}
 		regs := a.regInfo.AllocatableRegisters[vs.v.RegType()]
 		r := s.findAllocatable(regs, clobbered)
@@ -1566,7 +1574,7 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState
 		if r == RealRegInvalid {
 			for _, cand := range regs {
 				occ := s.regsInUse.get(cand)
-				if occ != nil && !occ.isPhi && !occ.v.IsRealReg() && occ.useDepth < depth {
+				if occ != nil && !occ.isPhi && movable(occ) && unused(occ) {
 					s.releaseRealReg(cand)
 					r = cand
 					break
@@ -1582,10 +1590,18 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState
 	}
 	// The loop needs registers for its own temporaries. Taking one from a value it does not use, which
 	// the header starts with, has the back edge reload that value on every iteration; leaving the value
-	// on the stack instead reloads it once, after the loop.
+	// on the stack instead reloads it once, after the loop. That value may be an outer loop's parameter,
+	// which is then stored where that loop defines it.
+	// The header's parameters take registers too, once it starts.
+	var phis [NumRegType]int
+	for _, vs := range live {
+		if vs.isPhi && vs.defBlk == blk && (vs.r == RealRegInvalid || s.regsInUse.get(vs.r) != vs) {
+			phis[vs.v.RegType()]++
+		}
+	}
 	for typ := RegType(0); typ < NumRegType; typ++ {
 		regs := a.regInfo.AllocatableRegisters[typ]
-		free := 0
+		free := -phis[typ]
 		for _, r := range regs {
 			if !s.regsInUse.has(r) {
 				free++
@@ -1593,7 +1609,7 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState
 		}
 		for i := len(regs) - 1; i >= 0 && free < loopFreeRegs; i-- {
 			occ := s.regsInUse.get(regs[i])
-			if occ != nil && !occ.isPhi && !occ.v.IsRealReg() && occ.useDepth < depth {
+			if occ != nil && movable(occ) && unused(occ) {
 				s.releaseRealReg(regs[i])
 				free++
 			}
@@ -1601,8 +1617,10 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState
 	}
 }
 
-// loopFreeRegs is how many registers of each type preloadLoopLiveIns leaves a loop for temporaries.
-const loopFreeRegs = 2
+// loopFreeRegs is how many registers of each type preloadLoopLiveIns leaves a loop for temporaries: as
+// many as a loop body's addressing and arithmetic typically needs at once. Fewer has the values the loop
+// does not use evicted inside it, and reloaded on every iteration.
+const loopFreeRegs = 4
 
 // moveAsideOccupant moves the value in r to a free register, ahead of instr taking r over for a value
 // that has to be there, such as a loop's carried value that its header expects in r. Dropping it
