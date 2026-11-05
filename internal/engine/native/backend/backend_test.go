@@ -202,8 +202,8 @@ L0 (SSA Block: blk0):
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
-	mov x1, xzr
 	mov x0, x2
+	mov x1, xzr
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
@@ -741,13 +741,13 @@ L3 (SSA Block: blk3):
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
-	cbz w2, #0x8 L2
+	mov x0, x2
+	cbz w0, #0x8 L2
 L1 (SSA Block: blk1):
 	b #0x8 (L3)
 L2 (SSA Block: blk2):
-	mov x2, x3
+	mov x0, x3
 L3 (SSA Block: blk3):
-	mov x0, x2
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
@@ -767,9 +767,9 @@ L4 (SSA Block: blk4):
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
+	mov x0, x2
 L1 (SSA Block: blk1):
 L4 (SSA Block: blk4):
-	mov x0, x2
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
@@ -904,17 +904,11 @@ L0 (SSA Block: blk0):
 	stp x0, x1, [sp, #0x10]
 	bl f1
 	mov x2, x0
-	ldr x8, [sp, #0x10]
-	mov x0, x8
-	ldr x9, [sp, #0x18]
-	mov x1, x9
+	ldp x0, x1, [sp, #0x10]
 	movz w3, #0x5, lsl 0
 	bl f2
 	mov x2, x0
-	ldr x8, [sp, #0x10]
-	mov x0, x8
-	ldr x8, [sp, #0x18]
-	mov x1, x8
+	ldp x0, x1, [sp, #0x10]
 	bl f3
 	add sp, sp, #0x10
 	add sp, sp, #0x10
@@ -987,25 +981,25 @@ L0 (SSA Block: blk0):
 	str x3, [sp, #0x18]
 	str s0, [sp, #0x20]
 	str d1, [sp, #0x28]
+	ldr w4, [sp, #0x10]
+	ldr x5, [sp, #0x18]
+	ldr s2, [sp, #0x20]
+	ldr d3, [sp, #0x28]
+	ldr w6, [sp, #0x10]
+	ldr x7, [sp, #0x18]
+	ldr s4, [sp, #0x20]
+	ldr d5, [sp, #0x28]
 	ldr w8, [sp, #0x10]
-	mov x4, x8
-	ldr x9, [sp, #0x18]
-	mov x5, x9
-	ldr s8, [sp, #0x20]
-	mov v2.8b, v8.8b
-	ldr d9, [sp, #0x28]
-	mov v3.8b, v9.8b
-	mov x6, x8
-	mov x7, x9
-	mov v4.8b, v8.8b
-	mov v5.8b, v9.8b
 	str w8, [sp, #-0xd0]
+	ldr x9, [sp, #0x18]
 	str x9, [sp, #-0xc8]
-	mov v6.8b, v8.8b
-	mov v7.8b, v9.8b
+	ldr s6, [sp, #0x20]
+	ldr d7, [sp, #0x28]
 	str w8, [sp, #-0xc0]
 	str x9, [sp, #-0xb8]
+	ldr s8, [sp, #0x20]
 	str s8, [sp, #-0xb0]
+	ldr d9, [sp, #0x28]
 	str d9, [sp, #-0xa8]
 	str w8, [sp, #-0xa0]
 	str x9, [sp, #-0x98]
@@ -1566,7 +1560,7 @@ L3:
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
-	fcvtzs x8, d0
+	fcvtzs x0, d0
 	fcvtzs x1, s1
 	fcvtzs w2, d0
 	fcvtzs w3, s1
@@ -1574,7 +1568,6 @@ L0 (SSA Block: blk0):
 	fcvtzu x5, s1
 	fcvtzu w6, d0
 	fcvtzu w7, s1
-	mov x0, x8
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
@@ -1885,14 +1878,13 @@ L0 (SSA Block: blk0):
 	str x27, [sp, #-0x10]!
 	str w2, [sp, #0x10]
 	ldr x8, [x21]
-	tbnz x8, #63, #0x2c (L1)
+	tbnz x8, #63, #0x28 (L1)
 L3 (SSA Block: blk3):
 L2 (SSA Block: blk2):
 	str x1, [x0, #0x8]
 	ldr x8, [x1, #0x8]
 	ldr x1, [x1, #0x10]
-	ldr w9, [sp, #0x10]
-	mov x3, x9
+	ldr w3, [sp, #0x10]
 	bl x8
 	add sp, sp, #0x10
 	add sp, sp, #0x10
@@ -1900,7 +1892,7 @@ L2 (SSA Block: blk2):
 	ret
 L1 (SSA Block: blk1):
 	yield x0
-	b #-0x38 (L2)
+	b #-0x34 (L2)
 `,
 		},
 		{
@@ -2038,8 +2030,7 @@ L0 (SSA Block: blk0):
 	cmpq %rsi, %rdx
 	jb L2
 	movq 8(%rbx), %rdx
-	movzx.lq (%rdx,%rcx,1), %rcx
-	movl %ecx, %eax
+	movzx.lq (%rdx,%rcx,1), %rax
 	add $16, %rsp
 	popq %rdx
 	movq %rbp, %rsp
@@ -2356,9 +2347,9 @@ L0 (SSA Block: blk0):
 	testq $3, %rdi
 	jnz L2
 	lock xadd.l %rsi, (%rdi)
-	lock xadd.b %r8, 24(%rdx)
-	movzx.bq %r8, %r8
 	movq %r8, %rdi
+	lock xadd.b %rdi, 24(%rdx)
+	movzx.bq %rdi, %rdi
 	movabsq $32, %r8
 	lea (%rdx,%r8,1), %r8
 	testq $1, %r8
@@ -2510,15 +2501,15 @@ L2 (SSA Block: blk2):
 	cmpl $0, %ecx
 	jnz L4
 L3 (SSA Block: blk3):
+	movl %edi, %eax
 	jmp L5
 L4 (SSA Block: blk4):
 	cmpl $1, %ecx
 	jnz L7
 L6 (SSA Block: blk6):
 L8 (SSA Block: blk8):
-	movl %esi, %edi
+	movl %esi, %eax
 L5 (SSA Block: blk5):
-	movl %edi, %eax
 	popq %rdx
 	movq %rbp, %rsp
 	popq %rbp
@@ -2545,17 +2536,17 @@ L0 (SSA Block: blk0):
 L9 (SSA Block: blk9):
 L2 (SSA Block: blk2):
 	subs wzr, w2, #0x0
-	b.ne #0x8, (L4)
+	b.ne #0xc, (L4)
 L3 (SSA Block: blk3):
+	mov x0, x3
 	b #0x10 (L5)
 L4 (SSA Block: blk4):
 	subs wzr, w2, #0x1
-	b.ne #0x18, (L7)
+	b.ne #0x14, (L7)
 L6 (SSA Block: blk6):
 L8 (SSA Block: blk8):
-	mov x3, x4
+	mov x0, x4
 L5 (SSA Block: blk5):
-	mov x0, x3
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
@@ -2695,8 +2686,7 @@ L0 (SSA Block: blk0):
 L4 (SSA Block: blk4):
 	str x1, [x0, #0x8]
 	ldr x8, [x0, #0x2a0]
-	mov x9, xzr
-	mov x1, x9
+	mov x1, xzr
 	bl x8
 	mov x1, x0
 	ldr x8, [sp, #0x10]
@@ -2732,20 +2722,15 @@ L3 (SSA Block: blk3):
 	ldr x10, [x9, #0x8]
 	ldr x11, [x8, #0x2c8]
 	subs xzr, x10, x11
-	b.ne #0x74, (L7)
+	b.ne #0x60, (L7)
 L6 (SSA Block: blk6):
 	ldr x8, [x8, #0x2b8]
-	ldr w9, [x8]
-	ldr w10, [x8, #0x8]
-	ldr w11, [x8, #0x10]
-	ldr w12, [x8, #0x18]
-	ldr w8, [x8, #0x20]
+	ldr w0, [x8]
+	ldr w1, [x8, #0x8]
+	ldr w2, [x8, #0x10]
+	ldr w3, [x8, #0x18]
+	ldr w4, [x8, #0x20]
 L1 (SSA Block: blk1):
-	mov x4, x8
-	mov x3, x12
-	mov x2, x11
-	mov x1, x10
-	mov x0, x9
 	add sp, sp, #0x10
 	add sp, sp, #0x30
 	ldp x19, x20, [sp]
@@ -2804,8 +2789,7 @@ L0 (SSA Block: blk0):
 L4 (SSA Block: blk4):
 	str x1, [x0, #0x8]
 	ldr x8, [x0, #0x2a0]
-	mov x9, xzr
-	mov x1, x9
+	mov x1, xzr
 	bl x8
 	mov x1, x0
 	ldr x8, [sp, #0x10]

@@ -73,6 +73,10 @@ type (
 		// so the second walk replays this instead of decoding Uses out of the encoding again.
 		useBuf  []VReg
 		useEnds []int32
+		// callPCs are the program counters of the calls in the block being allocated, and curPC that of
+		// the instruction being allocated. See evictionCost.
+		callPCs []programCounter
+		curPC   programCounter
 		// loopDepth is indexed by block ID: how many loops each block is nested in. See computeLoopDepths.
 		loopDepth []uint8
 		// nextUseAfter is parallel to useBuf: for each use, the program counter of the same value's next
@@ -153,6 +157,9 @@ type (
 		// feeds and feeds2 are values this one is copied into, if any; see homeOf. A loop variable
 		// typically feeds two: its loop header's parameter and a parameter of the block after the loop.
 		feeds, feeds2 *vrState[I, B, f]
+		// feedsReg is the fixed register this value is copied into, if any, such as a call's argument
+		// register.
+		feedsReg RealReg
 		// homeReg is, for a block parameter, the register its block starts with it in, once known.
 		// A value feeding it is best defined there, which makes the copy into it a no-op.
 		homeReg RealReg
@@ -248,6 +255,7 @@ func resetVrState[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) {
 	vs.nextUseBlockID = -1
 	vs.useDepth = 0
 	vs.homeReg = RealRegInvalid
+	vs.feedsReg = RealRegInvalid
 	if vs.feeds != nil {
 		vs.feeds, vs.feeds2 = nil, nil
 	}
@@ -330,12 +338,25 @@ func (a *Allocator[I, B, F]) recordReload(f F, vs *vrState[I, B, F], blk B) {
 
 func (a *Allocator[I, B, F]) findOrSpillAllocatable(s *state[I, B, F], allocatable []RealReg, forbiddenMask RegSet, preferred RealReg) (r RealReg) {
 	// First, check if the preferredMask has any allocatable register.
+	if preferred != RealRegInvalid && !a.allocatableSet.has(preferred) {
+		preferred = RealRegInvalid
+	}
 	if preferred != RealRegInvalid && !forbiddenMask.has(preferred) && !s.regsInUse.has(preferred) {
 		return preferred
 	}
 
-	// Evicting a value costs a spill and a reload, so a free register always wins, even over an occupied
-	// preferred one.
+	// An occupied preferred register still wins when evicting its value costs nothing, as when a call
+	// is about to take the register from it anyway: a reload into an argument register then needs no
+	// move after it.
+	if preferred != RealRegInvalid && !forbiddenMask.has(preferred) {
+		if occ := s.regsInUse.get(preferred); occ != nil && !occ.v.IsRealReg() && a.evictionCost(occ, preferred) >= 3<<32 {
+			s.releaseRealReg(preferred)
+			return preferred
+		}
+	}
+
+	// Otherwise evicting a value costs a spill and a reload, so a free register always wins, even over an
+	// occupied preferred one.
 	if r = s.findAllocatable(allocatable, forbiddenMask); r != RealRegInvalid {
 		return r
 	}
@@ -364,7 +385,7 @@ func (a *Allocator[I, B, F]) findOrSpillAllocatable(s *state[I, B, F], allocatab
 			continue
 		}
 
-		cost := a.evictionCost(using)
+		cost := a.evictionCost(using, candidateReal)
 		if r == RealRegInvalid || cost > bestCost || (cost == bestCost && candidateReal == preferred) {
 			bestCost = cost
 			r = candidateReal
@@ -777,9 +798,13 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 	// Update the last use of each VReg.
 	a.copies = a.copies[:0] // Stores the copy instructions.
 	a.useBuf, a.useEnds = a.useBuf[:0], a.useEnds[:0]
+	a.callPCs = a.callPCs[:0]
 	var pc programCounter
 	var nilInstr I
 	for instr := blk.InstrIteratorBegin(); instr != nilInstr; instr = blk.InstrIteratorNext() {
+		if instr.IsCall() || instr.IsIndirectCall() {
+			a.callPCs = append(a.callPCs, pc)
+		}
 		var useState *vrState[I, B, F]
 		uses := instr.Uses(&a.vs)
 		a.useBuf = append(a.useBuf, uses...)
@@ -866,6 +891,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 			fmt.Println(instr)
 		}
 
+		a.curPC = pc
 		var currentUsedSet RegSet
 		killSet := a.reals[:0]
 
@@ -895,9 +921,15 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 				r := vs.r
 
 				if r == RealRegInvalid {
-					r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[use.RegType()], currentUsedSet,
-						// Prefer the desired register if it's available.
-						vs.desiredLoc.realReg())
+					preferred := vs.desiredLoc.realReg()
+					if preferred == RealRegInvalid && instr.IsCopy() {
+						// Reloading straight into the register a copy fills, an argument register say,
+						// leaves the copy nothing to do.
+						if d := instr.Defs(&a.vs); len(d) == 1 && d[0].IsRealReg() && a.allocatableSet.has(d[0].RealReg()) {
+							preferred = d[0].RealReg()
+						}
+					}
+					r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[use.RegType()], currentUsedSet, preferred)
 					a.recordReload(f, vs, blk)
 					f.ReloadRegisterBefore(use.SetRealReg(r), instr)
 					s.useRealReg(r, vs)
@@ -1438,9 +1470,20 @@ func (a *Allocator[I, B, F]) moveAsideOccupant(f F, instr I, r RealReg, pc progr
 // used only after the block costs a reload somewhere later, and if no block at this loop depth uses
 // it, that reload is outside the loop rather than on every iteration. Otherwise, the later its next
 // use in the block, the cheaper.
-func (a *Allocator[I, B, F]) evictionCost(vs *vrState[I, B, F]) int64 {
+//
+// A value in a caller-saved register that a call comes before its next use costs nothing either: the
+// call takes the register from it anyway.
+func (a *Allocator[I, B, F]) evictionCost(vs *vrState[I, B, F], r RealReg) int64 {
 	s := &a.state
-	switch next := s.nextUseOf(vs); next {
+	next := s.nextUseOf(vs)
+	if next != -1 && a.regInfo.CallerSavedRegisters.has(r) {
+		for _, c := range a.callPCs {
+			if c >= a.curPC && (next == programCounterLiveOut || c < next) {
+				return 3 << 32
+			}
+		}
+	}
+	switch next {
 	case -1:
 		return 3 << 32
 	case programCounterLiveOut:
@@ -1504,7 +1547,7 @@ func (a *Allocator[I, B, F]) depthOf(id int32) uint8 {
 // see homeOf.
 func (a *Allocator[I, B, F]) recordFeed(instr I) {
 	defs := instr.Defs(&a.vs)
-	if len(defs) != 1 || defs[0].IsRealReg() {
+	if len(defs) != 1 {
 		return
 	}
 	def := defs[0] // Uses reuses the slice Defs returned.
@@ -1513,6 +1556,14 @@ func (a *Allocator[I, B, F]) recordFeed(instr I) {
 		return
 	}
 	s := &a.state
+	if def.IsRealReg() {
+		// Only an allocatable register: a reserved one, such as a backend's scratch register, is written
+		// behind the allocator's back.
+		if r := def.RealReg(); a.allocatableSet.has(r) {
+			s.getOrAllocateVRegState(uses[0]).feedsReg = r
+		}
+		return
+	}
 	src, dst := s.getOrAllocateVRegState(uses[0]), s.getOrAllocateVRegState(def)
 	switch {
 	case src.feeds == nil:
@@ -1522,13 +1573,19 @@ func (a *Allocator[I, B, F]) recordFeed(instr I) {
 	}
 }
 
-// homeOf returns the home register of the block parameter vs is copied into, directly or through
-// temporaries, or RealRegInvalid.
+// homeOf returns where vs is best defined: the fixed register it is copied into, or the home register of
+// the block parameter it is copied into, directly or through temporaries; RealRegInvalid if neither.
 func homeOf[I Instr, B Block[I], F Function[I, B]](vs *vrState[I, B, F]) RealReg {
+	if vs.feedsReg != RealRegInvalid {
+		return vs.feedsReg
+	}
 	for _, first := range [2]*vrState[I, B, F]{vs.feeds, vs.feeds2} {
 		for t, n := first, 0; t != nil && n < 4; t, n = t.feeds, n+1 {
 			if t.isPhi && t.homeReg != RealRegInvalid {
 				return t.homeReg
+			}
+			if t.feedsReg != RealRegInvalid {
+				return t.feedsReg
 			}
 			// A parameter whose block has not been allocated yet has no home, but where it goes next may.
 		}
