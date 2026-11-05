@@ -43,6 +43,13 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 	defBlk := b.licmDefBlk()
 	clobbers := b.licmContextClobbers(loopOf)
 	floatConsts, intConsts := make(map[*basicBlock]int), make(map[*basicBlock]int)
+	// How many blocks each loop has, its inner loops' outside them.
+	loopBlocks := make(map[*basicBlock]int)
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		if h := loopOf[blk.id]; h != nil && !blk.invalid {
+			loopBlocks[h]++
+		}
+	}
 
 	for _, blk := range b.reversePostOrderedBasicBlocks {
 		if blk.invalid || loopOf[blk.id] == nil {
@@ -64,7 +71,8 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 				}
 				target = b.floatConstTarget(loopOf[blk.id], floatConsts)
 			}
-			if cur.opcode == OpcodeIconst && hoistIntConsts && multiInstructionConst(cur) && b.everyIteration(blk, loopOf[blk.id]) {
+			if cur.opcode == OpcodeIconst && hoistIntConsts && multiInstructionConst(cur) &&
+				(constInstructions(cur) > 2 || loopBlocks[loopOf[blk.id]] <= smallLoopBlocks || b.everyIteration(blk, loopOf[blk.id])) {
 				// One register serves every use of a value: a copy already before the loop takes the rest.
 				if pre := b.dominators[loopOf[blk.id].id]; pre != nil {
 					if same := pre.pinnedConstLike(cur); same != nil {
@@ -468,6 +476,9 @@ var maxHoistedFloatConsts = func() int {
 
 const maxHoistedIntConsts = 16
 
+// smallLoopBlocks is the most blocks a loop has whose integer constants all go before it.
+const smallLoopBlocks = 16
+
 // intConstTarget is floatConstTarget for an integer constant.
 func (b *builder) intConstTarget(header *basicBlock, hoisted map[*basicBlock]int) *basicBlock {
 	preheader := b.dominators[header.id]
@@ -497,7 +508,8 @@ var hoistIntConsts = runtime.GOARCH == "arm64"
 // everyIteration reports whether blk, in the loop headed by header, runs on every iteration: it dominates
 // every block the loop branches back from, but for the path that yields to the runtime when it asks. A
 // constant used only in some of a dispatch loop's cases, kept in a register across the whole loop, costs
-// the other cases a register.
+// the other cases a register; one taking three instructions or more to make goes before the loop anyway,
+// and so does any constant of a loop of at most smallLoopBlocks blocks, which has no many cases.
 func (b *builder) everyIteration(blk, header *basicBlock) bool {
 	for _, p := range header.preds {
 		pred := p.blk
@@ -513,7 +525,12 @@ func (b *builder) everyIteration(blk, header *basicBlock) bool {
 // make on arm64: more than one of its 16-bit halfwords is neither all zeros nor, all at once, all ones.
 // A logical immediate takes one too, which this counts as more: one such kept in a register costs only
 // the register.
-func multiInstructionConst(instr *Instruction) bool {
+func multiInstructionConst(instr *Instruction) bool { return constInstructions(instr) > 1 }
+
+// constInstructions is how many movz, movn and movk instructions make the integer constant instr on
+// arm64: one for each of its 16-bit halfwords that is neither all zeros nor, where it takes fewer, all
+// ones, and at least one.
+func constInstructions(instr *Instruction) int {
 	v, chunks := instr.ConstantVal(), 4
 	if instr.typ == TypeI32 {
 		v, chunks = uint64(uint32(v)), 2
@@ -527,5 +544,5 @@ func multiInstructionConst(instr *Instruction) bool {
 			ones++
 		}
 	}
-	return zero < chunks-1 && ones < chunks-1
+	return max(1, chunks-max(zero, ones))
 }
