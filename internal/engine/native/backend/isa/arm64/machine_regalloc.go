@@ -338,6 +338,14 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 	}
 
 	if c, ok := m.remat[v.ID()]; ok {
+		if typ.IsInt() {
+			if typ == ssa.TypeI32 {
+				cur = m.lowerConstantI32AndInsert(cur, v, int32(c))
+			} else {
+				cur = m.lowerConstantI64AndInsert(cur, v, int64(c))
+			}
+			return linkInstr(cur, prevNext)
+		}
 		width := byte(typ.Bits())
 		if width < 64 {
 			c &= 1<<width - 1

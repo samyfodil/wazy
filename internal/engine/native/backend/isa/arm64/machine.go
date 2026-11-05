@@ -120,7 +120,7 @@ type (
 		// Also note that this is only known after register allocation.
 		spillSlotSize int64
 		spillSlots    map[regalloc.VRegID]int64 // regalloc.VRegID to offset.
-		// remat holds the bits of each float constant LICM pinned, by its VReg: spilling one stores
+		// remat holds the bits of each constant LICM pinned, by its VReg: spilling one stores
 		// nothing and reloading it loads the constant again. See insertReloadRegisterAt.
 		remat map[regalloc.VRegID]uint64
 		// clobberedRegs holds real-register backed VRegs saved at the function prologue, and restored at the epilogue.
@@ -314,13 +314,21 @@ func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
 	return 16, 24
 }
 
+// needsCtxSlot reports whether this function reserves the fixed exec-context slot at the bottom of the
+// spill region: for the EH path, and for the shared conditional-trap islands, which reload the execution
+// context from it rather than have every trap site copy it to a register (see lowerExitIfTrueWithCodeShared
+// and emitTrapIslands). Trap islands are created during lowering, so len(trapIslands) is final by RegAlloc.
+func (m *machine) needsCtxSlot() bool {
+	return m.hasEHContext || len(m.trapIslands) > 0
+}
+
 // RegAlloc implements backend.Machine Function.
 func (m *machine) RegAlloc() {
 	// Reserve the fixed execCtx/moduleCtx slots at the bottom of the
 	// spill-slot region before the allocator hands out any of its own slots,
 	// so the reserved offsets ([SP+16]/[SP+24]) are stable regardless of how
 	// many spill slots this function ends up needing.
-	if m.hasEHContext {
+	if m.needsCtxSlot() {
 		m.spillSlotSize = ehCtxReservedSlotSize
 	}
 	m.regAllocStarted = true

@@ -2981,9 +2981,7 @@ func (i *Instruction) addArgumentBranchInst(b *builder, v Value) {
 // A pinned float constant is not one: it is an ordinary value, defined where it stands.
 func (i *Instruction) Constant() bool {
 	switch i.opcode {
-	case OpcodeIconst:
-		return true
-	case OpcodeF32const, OpcodeF64const:
+	case OpcodeIconst, OpcodeF32const, OpcodeF64const:
 		return !i.pinned
 	}
 	return false

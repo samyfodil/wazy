@@ -112,6 +112,23 @@ func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID
 		return
 	}
 	lenOperand, end, cond := cmp.IcmpData()
+	if cond == IntegerCmpCondUnsignedGreaterThan {
+		// The form for an address with no offset: `zext(base) > memLen - ceil`.
+		sub := b.InstructionOfValue(b.resolveAlias(end))
+		if sub == nil || sub.opcode != OpcodeIsub {
+			return
+		}
+		memLenV, k := sub.Arg2()
+		constant := b.InstructionOfValue(b.resolveAlias(k))
+		extend := b.InstructionOfValue(b.resolveAlias(lenOperand))
+		if constant == nil || !constant.Constant() || extend == nil || extend.opcode != OpcodeUExtend {
+			return
+		}
+		if from, to, _ := extend.ExtendData(); from != 32 || to != 64 {
+			return
+		}
+		return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(memLenV).ID(), uint64(constant.ConstantVal()), true
+	}
 	if cond != IntegerCmpCondUnsignedLessThan {
 		return
 	}

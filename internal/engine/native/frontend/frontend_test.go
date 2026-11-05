@@ -1263,8 +1263,8 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	v4:i64 = Iconst_64 0x4
 	v5:i64 = UExtend v2, 32->64
 	v6:i64 = Load v1, 0x10
-	v7:i64 = Iadd v5, v4
-	v8:i32 = Icmp lt_u, v6, v7
+	v7:i64 = Isub v6, v4
+	v8:i32 = Icmp gt_u, v5, v7
 	ExitIfTrue v8, v0, memory_out_of_bounds
 	v9:i64 = Load v1, 0x8
 	v10:i64 = Iadd v9, v5
@@ -1280,8 +1280,8 @@ blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i64 = Iconst_64 0x4
 	v4:i64 = UExtend v2, 32->64
 	v5:i64 = Load v1, 0x10
-	v6:i64 = Iadd v4, v3
-	v7:i32 = Icmp lt_u, v5, v6
+	v6:i64 = Isub v5, v3
+	v7:i32 = Icmp gt_u, v4, v6
 	ExitIfTrue v7, v0, memory_out_of_bounds
 	v8:i64 = Load v1, 0x8
 	v9:i64 = Iadd v8, v4
@@ -1334,8 +1334,8 @@ blk3: () <-- (blk1,blk2)
 	v8:i64 = Iconst_64 0x4
 	v9:i64 = UExtend v2, 32->64
 	v10:i64 = Load v1, 0x10
-	v11:i64 = Iadd v9, v8
-	v12:i32 = Icmp lt_u, v10, v11
+	v11:i64 = Isub v10, v8
+	v12:i32 = Icmp gt_u, v9, v11
 	ExitIfTrue v12, v0, memory_out_of_bounds
 	v13:i64 = Load v1, 0x8
 	v14:i64 = Iadd v13, v9
@@ -1363,8 +1363,8 @@ blk3: () <-- (blk1,blk2)
 	v8:i64 = Iconst_64 0x4
 	v9:i64 = UExtend v2, 32->64
 	v10:i64 = Load v1, 0x10
-	v11:i64 = Iadd v9, v8
-	v12:i32 = Icmp lt_u, v10, v11
+	v11:i64 = Isub v10, v8
+	v12:i32 = Icmp gt_u, v9, v11
 	ExitIfTrue v12, v0, memory_out_of_bounds
 	v13:i64 = Load v1, 0x8
 	v14:i64 = Iadd v13, v9
@@ -1395,8 +1395,8 @@ blk3: () <-- (blk1,blk2)
 	v6:i64 = Iconst_64 0x4
 	v7:i64 = UExtend v2, 32->64
 	v8:i64 = Load v1, 0x10
-	v9:i64 = Iadd v7, v6
-	v10:i32 = Icmp lt_u, v8, v9
+	v9:i64 = Isub v8, v6
+	v10:i32 = Icmp gt_u, v7, v9
 	ExitIfTrue v10, v0, memory_out_of_bounds
 	v11:i64 = Load v1, 0x8
 	v12:i64 = Iadd v11, v7
@@ -1434,16 +1434,16 @@ blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i64 = Iconst_64 0x4
 	v4:i64 = UExtend v2, 32->64
 	v5:i64 = Load v1, 0x10
-	v6:i64 = Iadd v4, v3
-	v7:i32 = Icmp lt_u, v5, v6
+	v6:i64 = Isub v5, v3
+	v7:i32 = Icmp gt_u, v4, v6
 	ExitIfTrue v7, v0, memory_out_of_bounds
 	v8:i64 = Load v1, 0x8
 	v9:i64 = Iadd v8, v4
 	v10:i32 = Load v9, 0x0
 	v11:i64 = Iconst_64 0x8
 	v12:i64 = UExtend v2, 32->64
-	v13:i64 = Iadd v12, v11
-	v14:i32 = Icmp lt_u, v5, v13
+	v13:i64 = Isub v5, v11
+	v14:i32 = Icmp gt_u, v12, v13
 	ExitIfTrue v14, v0, memory_out_of_bounds
 	v15:i64 = Load v9, 0x0
 	v16:f32 = Load v9, 0x0

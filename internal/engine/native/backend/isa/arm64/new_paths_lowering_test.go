@@ -334,9 +334,8 @@ func TestMachine_lowerExitIfTrueWithCode_nonIcmpCondition(t *testing.T) {
 	t.Run("shared island", func(t *testing.T) {
 		ctx, b, m := newSetupWithMockContext()
 		c := setup(ctx, b, m)
-		m.lowerExitIfTrueWithCodeShared(intToVReg(1), c, nativeapi.ExitCodeUnreachable)
+		m.lowerExitIfTrueWithCodeShared(c, nativeapi.ExitCodeUnreachable)
 		require.Equal(t, `
-mov x27, x1?
 cbnz w2?, L1
 `, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 	})
@@ -388,11 +387,10 @@ func TestMachine_lowerExitIfTrueWithCode_icmpCondition(t *testing.T) {
 	t.Run("shared island", func(t *testing.T) {
 		ctx, b, m := newSetupWithMockContext()
 		c, icmp := setup(ctx, b, m)
-		m.lowerExitIfTrueWithCodeShared(intToVReg(3), c, nativeapi.ExitCodeUnreachable)
+		m.lowerExitIfTrueWithCodeShared(c, nativeapi.ExitCodeUnreachable)
 		require.True(t, icmp.Lowered())
 		require.Equal(t, `
 subs wzr, w1?, w2?
-mov x27, x3?
 b.eq L1
 `, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 	})

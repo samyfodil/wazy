@@ -5138,14 +5138,22 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 	// Note: memLen is already zero extended to 64-bit space at the load time.
 	memLen := c.getMemoryLenValue(memIndex, false)
 
-	// baseAddrPlusCeil = baseAddr + ceil
-	baseAddrPlusCeil := builder.AllocateInstruction()
-	baseAddrPlusCeil.AsIadd(extBaseAddr, ceilConst.Return())
-	builder.InsertInstruction(baseAddrPlusCeil)
-
-	// Check for out of bounds memory access: `memLen >= baseAddrPlusCeil`.
 	cmp := builder.AllocateInstruction()
-	cmp.AsIcmp(memLen, baseAddrPlusCeil.Return(), ssa.IntegerCmpCondUnsignedLessThan)
+	if constOffset == 0 && ceil <= memoryMinSizeInBytes {
+		// The address is the base itself: it is in bounds while `baseAddr <= memLen - ceil`, which the
+		// memory's minimum size keeps from wrapping. The limit is the same for every access of this size, and
+		// stays in a register across a loop that does not change the memory's length (see passLoopInvariantCodeMotionOpt).
+		limit := builder.AllocateInstruction().AsIsub(memLen, ceilConst.Return()).Insert(builder).Return()
+		cmp.AsIcmp(extBaseAddr, limit, ssa.IntegerCmpCondUnsignedGreaterThan)
+	} else {
+		// baseAddrPlusCeil = baseAddr + ceil
+		baseAddrPlusCeil := builder.AllocateInstruction()
+		baseAddrPlusCeil.AsIadd(extBaseAddr, ceilConst.Return())
+		builder.InsertInstruction(baseAddrPlusCeil)
+
+		// Check for out of bounds memory access: `memLen >= baseAddrPlusCeil`.
+		cmp.AsIcmp(memLen, baseAddrPlusCeil.Return(), ssa.IntegerCmpCondUnsignedLessThan)
+	}
 	builder.InsertInstruction(cmp)
 	exitIfNZ := builder.AllocateInstruction()
 	exitIfNZ.AsExitIfTrueWithCode(c.execCtxPtrValue, cmp.Return(), c.memoryOutOfBoundsCode())

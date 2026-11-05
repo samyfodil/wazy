@@ -20,6 +20,11 @@ func (q *Queue[T]) Empty() bool {
 	return q.index >= len(q.Data)
 }
 
+// Len returns how many values are queued.
+func (q *Queue[T]) Len() int {
+	return len(q.Data) - q.index
+}
+
 func (q *Queue[T]) Reset() {
 	q.index = 0
 	q.Data = q.Data[:0]

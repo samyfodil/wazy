@@ -192,6 +192,14 @@ func (m *machine) emitTrapIslands() {
 		pos.begin, pos.end = nop, nop
 		cur = linkInstr(cur, nop)
 
+		// Reload the execution context from the reserved ctx slot.
+		execOff, _ := m.EhCtxSlotOffsets()
+		reloadMode := m.amodePool.Allocate()
+		*reloadMode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: spVReg, imm: execOff}
+		reload := m.allocateInstr()
+		reload.asULoad(tmpRegVReg, reloadMode, 64)
+		cur = linkInstr(cur, reload)
+
 		// Set the exit code in the execution context.
 		movz := m.allocateInstr()
 		movz.asMOVZ(x17VReg, uint64(ti.code)&0xffff, 0, true)
@@ -402,10 +410,13 @@ func (m *machine) setupPrologue() {
 	// saveRequiredRegs), and x1 is saved/restored across that re-entry -- the
 	// same invariant that lets the function body read them after the prologue.
 	// Nothing reads these slots yet (P3.0), so runtime behavior is unchanged.
-	if m.hasEHContext {
+	// A function with trap islands stores the execution context too: they reload it from there.
+	if m.needsCtxSlot() {
 		execOff, modOff := m.EhCtxSlotOffsets()
 		cur = m.storeEhCtxSlot(cur, x0VReg, execOff)
-		cur = m.storeEhCtxSlot(cur, x1VReg, modOff)
+		if m.hasEHContext {
+			cur = m.storeEhCtxSlot(cur, x1VReg, modOff)
+		}
 	}
 
 	linkInstr(cur, prevInitInst)

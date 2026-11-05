@@ -1994,14 +1994,16 @@ L3:
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
-	str xzr, [sp, #-0x10]!
+	sub sp, sp, #0x10
+	orr x27, xzr, #0x10
+	str x27, [sp, #-0x10]!
+	str x0, [sp, #0x10]
 	orr w8, wzr, #0x400
 	uxtw x8, w8
 	uxtw x9, w2
 	ldr x10, [x1, #0x10]
 	add x11, x9, x8
 	subs xzr, x10, x11
-	mov x27, x0
 	b.lo #0x28, (L2)
 	ldr x10, [x1, #0x8]
 	add x9, x10, x9
@@ -2009,10 +2011,11 @@ L0 (SSA Block: blk0):
 	mov x0, x9
 	mov x1, x8
 	bl x10
-	add sp, sp, #0x10
+	add sp, sp, #0x20
 	ldr x30, [sp], #0x10
 	ret
 L2:
+	ldr x27, [sp, #0x10]
 	movz x17, #0x4, lsl 0
 	str w17, [x27]
 	mov x17, sp
@@ -2032,9 +2035,9 @@ L0 (SSA Block: blk0):
 	sub $16, %rsp
 	mov.q %rax, (%rsp)
 	movq 16(%rbx), %rdx
-	lea 4(%rcx), %rsi
-	cmpq %rsi, %rdx
-	jb L2
+	sub $4, %rdx
+	cmpq %rdx, %rcx
+	jnbe L2
 	movq 8(%rbx), %rdx
 	movzx.lq (%rdx,%rcx,1), %rax
 	add $16, %rsp
@@ -2060,33 +2063,33 @@ L0 (SSA Block: blk0):
 	mov x130?, x2
 	uxtw x132?, w130?
 	ldr x133?, [x129?, #0x10]
-	add x134?, x132?, #0x4
-	subs xzr, x133?, x134?
-	mov x27, x128?
-	b.lo L2
+	sub x134?, x133?, #0x4
+	subs xzr, x132?, x134?
+	b.hi L2
 	ldr x136?, [x129?, #0x8]
-	add x139?, x136?, x132?
-	ldr w138?, [x139?]
+	ldr w138?, [x136?, x132?]
 	mov x0, x138?
 	ret
 `,
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
-	str xzr, [sp, #-0x10]!
+	sub sp, sp, #0x10
+	orr x27, xzr, #0x10
+	str x27, [sp, #-0x10]!
+	str x0, [sp, #0x10]
 	uxtw x8, w2
 	ldr x9, [x1, #0x10]
-	add x10, x8, #0x4
-	subs xzr, x9, x10
-	mov x27, x0
-	b.lo #0x1c, (L2)
+	sub x9, x9, #0x4
+	subs xzr, x8, x9
+	b.hi #0x18, (L2)
 	ldr x9, [x1, #0x8]
-	add x8, x9, x8
-	ldr w0, [x8]
-	add sp, sp, #0x10
+	ldr w0, [x9, x8]
+	add sp, sp, #0x20
 	ldr x30, [sp], #0x10
 	ret
 L2:
+	ldr x27, [sp, #0x10]
 	movz x17, #0x4, lsl 0
 	str w17, [x27]
 	mov x17, sp
@@ -2399,51 +2402,49 @@ L0 (SSA Block: blk0):
 	orr x27, xzr, #0x10
 	sub sp, sp, x27
 	stp x30, x27, [sp, #-0x10]!
-	str xzr, [sp, #-0x10]!
-	ldr x8, [sp, #0x20]
+	sub sp, sp, #0x10
+	orr x27, xzr, #0x10
+	str x27, [sp, #-0x10]!
+	str x0, [sp, #0x10]
+	ldr x8, [sp, #0x30]
 	ldr x9, [x1, #0x8]
 	mov x10, xzr
 	add x10, x9, w10 UXTW
-	ldaddalb w2, w10, x10
-	orr w11, wzr, #0x8
-	add x11, x9, w11 UXTW
-	ands xzr, x11, #0x1
-	mov x27, x0
-	b.ne #0x88, (L2)
-	ldaddalh w3, w1, x11
-	orr w11, wzr, #0x10
-	add x11, x9, w11 UXTW
-	ands xzr, x11, #0x3
-	mov x27, x0
-	b.ne #0x70, (L2)
-	ldaddal w4, w2, x11
-	orr w11, wzr, #0x18
-	add x11, x9, w11 UXTW
-	ldaddalb w5, w3, x11
-	orr w11, wzr, #0x20
-	add x11, x9, w11 UXTW
-	ands xzr, x11, #0x1
-	mov x27, x0
-	b.ne #0x4c, (L2)
-	ldaddalh w6, w4, x11
-	movz w11, #0x28, lsl 0
-	add x11, x9, w11 UXTW
-	ands xzr, x11, #0x3
-	mov x27, x0
-	b.ne #0x34, (L2)
-	ldaddal w7, w5, x11
-	orr w11, wzr, #0x30
-	add x9, x9, w11 UXTW
+	ldaddalb w2, w0, x10
+	orr w10, wzr, #0x8
+	add x10, x9, w10 UXTW
+	ands xzr, x10, #0x1
+	b.ne #0x74, (L2)
+	ldaddalh w3, w1, x10
+	orr w10, wzr, #0x10
+	add x10, x9, w10 UXTW
+	ands xzr, x10, #0x3
+	b.ne #0x60, (L2)
+	ldaddal w4, w2, x10
+	orr w10, wzr, #0x18
+	add x10, x9, w10 UXTW
+	ldaddalb w5, w3, x10
+	orr w10, wzr, #0x20
+	add x10, x9, w10 UXTW
+	ands xzr, x10, #0x1
+	b.ne #0x40, (L2)
+	ldaddalh w6, w4, x10
+	movz w10, #0x28, lsl 0
+	add x10, x9, w10 UXTW
+	ands xzr, x10, #0x3
+	b.ne #0x2c, (L2)
+	ldaddal w7, w5, x10
+	orr w10, wzr, #0x30
+	add x9, x9, w10 UXTW
 	ands xzr, x9, #0x7
-	mov x27, x0
-	b.ne #0x1c, (L2)
+	b.ne #0x18, (L2)
 	ldaddal x8, x6, x9
-	mov x0, x10
-	add sp, sp, #0x10
+	add sp, sp, #0x20
 	ldr x30, [sp], #0x10
 	add sp, sp, #0x10
 	ret
 L2:
+	ldr x27, [sp, #0x10]
 	movz x17, #0x17, lsl 0
 	str w17, [x27]
 	mov x17, sp

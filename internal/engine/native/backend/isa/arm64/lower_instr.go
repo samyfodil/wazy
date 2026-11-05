@@ -247,7 +247,7 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 			// specific site.
 			m.lowerExitIfTrueWithCode(m.compiler.VRegOf(execCtx), c, code)
 		} else {
-			m.lowerExitIfTrueWithCodeShared(m.compiler.VRegOf(execCtx), c, code)
+			m.lowerExitIfTrueWithCodeShared(c, code)
 		}
 	case ssa.OpcodeStore, ssa.OpcodeIstore8, ssa.OpcodeIstore16, ssa.OpcodeIstore32:
 		m.lowerStore(instr)
@@ -447,6 +447,9 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 		rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 		rd := m.compiler.VRegOf(instr.Return())
+		if !instr.SourceOffset().Valid() {
+			ctxVReg = regalloc.VRegInvalid // Trap through the shared islands.
+		}
 		m.lowerIDiv(ctxVReg, rd, rn, rm, x.Type() == ssa.TypeI64, op == ssa.OpcodeSdiv)
 	case ssa.OpcodeSrem, ssa.OpcodeUrem:
 		x, y, ctx := instr.Arg3()
@@ -454,6 +457,9 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 		rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 		rd := m.compiler.VRegOf(instr.Return())
+		if !instr.SourceOffset().Valid() {
+			ctxVReg = regalloc.VRegInvalid // Trap through the shared islands.
+		}
 		m.lowerIRem(ctxVReg, rd, rn.nr(), rm, x.Type() == ssa.TypeI64, op == ssa.OpcodeSrem)
 	case ssa.OpcodeVconst:
 		result := m.compiler.VRegOf(instr.Return())
@@ -1405,14 +1411,17 @@ func (m *machine) lowerIRem(execCtxVReg regalloc.VReg, rd, rn regalloc.VReg, rm 
 	}
 	m.insert(div)
 
-	// Copy rd to a temp register to keep it after the exit sequence.
-	tmpReg := m.copyToTmp(rd)
+	// Copy rd to a temp register to keep it after an inline exit sequence.
+	quotient := rd
+	if execCtxVReg.Valid() {
+		quotient = m.copyToTmp(rd)
+	}
 
 	// Check if rm is zero:
 	m.exitIfNot(execCtxVReg, registerAsRegNotZeroCond(rm.nr()), _64bit, nativeapi.ExitCodeIntegerDivisionByZero)
 
 	msub := m.allocateInstr()
-	msub.asALURRRR(aluOpMSub, rd, operandNR(tmpReg), rm, rn, _64bit)
+	msub.asALURRRR(aluOpMSub, rd, operandNR(quotient), rm, rn, _64bit)
 	m.insert(msub)
 }
 
@@ -1448,8 +1457,15 @@ func (m *machine) lowerIDiv(execCtxVReg, rd regalloc.VReg, rn, rm operand, _64bi
 
 // exitIfNot emits a conditional branch to exit if the condition is not met.
 // If `c` (cond type) is a register, `cond64bit` must be chosen to indicate whether the register is 32-bit or 64-bit.
-// Otherwise, `cond64bit` is ignored.
+// Otherwise, `cond64bit` is ignored. With no execution context, it branches to the function's shared trap
+// island for code, which reloads the context itself.
 func (m *machine) exitIfNot(execCtxVReg regalloc.VReg, c cond, cond64bit bool, code nativeapi.ExitCode) {
+	if !execCtxVReg.Valid() {
+		cbr := m.allocateInstr()
+		cbr.asCondBr(invertTrapCond(c), m.getOrCreateTrapIsland(code), cond64bit)
+		m.insert(cbr)
+		return
+	}
 	execCtxTmp := m.copyToTmp(execCtxVReg)
 
 	cbr := m.allocateInstr()
@@ -2342,17 +2358,11 @@ func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Va
 // code, instead of inlining the whole exit sequence at each site. The hot
 // path falls through (the branch is taken only when trapping), and the
 // island is materialized once, after register allocation, by emitTrapIslands.
-func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
+func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.compiler.ValueDefinition(cond)
 	trapCond := m.lowerTrapCond(condDef)
 
-	// The island runs after register allocation, so it needs the execution
-	// context in a fixed register: the reserved tmp register, which is never
-	// allocated and holds no live value between lowered sequences.
-	mov := m.allocateInstr()
-	mov.asMove64(tmpRegVReg, execCtxVReg)
-	m.insert(mov)
-
+	// The island reloads the execution context from the slot the prologue fills: see needsCtxSlot.
 	cbr := m.allocateInstr()
 	cbr.asCondBr(trapCond, m.getOrCreateTrapIsland(code), false /* ignored */)
 	m.insert(cbr)

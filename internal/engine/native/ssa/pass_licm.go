@@ -1,5 +1,7 @@
 package ssa
 
+import "runtime"
+
 // passLoopInvariantCodeMotionOpt hoists loop-invariant instructions into the
 // block that dominates their loop.
 //
@@ -40,7 +42,7 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 	}
 	defBlk := b.licmDefBlk()
 	clobbers := b.licmContextClobbers(loopOf)
-	floatConsts := make(map[*basicBlock]int)
+	floatConsts, intConsts := make(map[*basicBlock]int), make(map[*basicBlock]int)
 
 	for _, blk := range b.reversePostOrderedBasicBlocks {
 		if blk.invalid || loopOf[blk.id] == nil {
@@ -52,9 +54,21 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 			if cur.opcode == OpcodeF32const || cur.opcode == OpcodeF64const {
 				target = b.floatConstTarget(loopOf[blk.id], floatConsts)
 			}
+			if cur.opcode == OpcodeIconst && hoistIntConsts && multiInstructionConst(cur) && b.everyIteration(blk, loopOf[blk.id]) {
+				target = b.floatConstTarget(loopOf[blk.id], intConsts)
+			}
 			if target != nil {
 				blk.removeInstruction(cur)
 				b.resolveArgumentAlias(cur)
+				if cur.opcode == OpcodeIsub {
+					if same := b.limitLike(target, cur); same != nil {
+						b.alias(cur.rValue, same.rValue)
+						defBlk[cur.rValue.ID()] = target
+						cur = next
+						continue
+					}
+					b.cloneConstOperand(target, cur)
+				}
 				if same := target.contextLoadLike(cur); same != nil {
 					// Every block of a loop reloads a memory's base, since none of them is on a linear
 					// path from the one before the loop; one load before the loop serves them all.
@@ -64,7 +78,7 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 					continue
 				}
 				target.insertBeforeTerminator(cur)
-				if cur.opcode == OpcodeF32const || cur.opcode == OpcodeF64const {
+				if cur.opcode == OpcodeF32const || cur.opcode == OpcodeF64const || cur.opcode == OpcodeIconst {
 					cur.pinned = true
 				}
 				// Later instructions in this block may now be invariant too,
@@ -222,8 +236,14 @@ func (b *builder) licmTarget(instr *Instruction, header *basicBlock, loopOf, def
 // invariantIn reports whether every operand of instr is defined outside the
 // loop headed by header. A natural loop is dominated by its header, so a value
 // is outside it exactly when its defining block strictly dominates the header.
+// A subtraction of a constant counts its constant as outside, which hoisting
+// clones: a memory's length less an access size is a bounds check's limit, the
+// same for every access of that size in the loop (see cloneConstOperand).
 func (b *builder) invariantIn(instr *Instruction, header *basicBlock, defBlk []*basicBlock) bool {
 	v1, v2, v3, vs := instr.Args()
+	if instr.opcode == OpcodeIsub && b.isConstValue(v2) {
+		return b.definedOutside(v1, header, defBlk)
+	}
 	for _, v := range [...]Value{v1, v2, v3} {
 		if v.Valid() && !b.definedOutside(v, header, defBlk) {
 			return false
@@ -350,6 +370,47 @@ func clobbersContext(instr *Instruction, moduleCtx Value) bool {
 }
 
 // contextLoadLike returns a context load already in blk that reads what instr does, or nil.
+// isConstValue reports whether v is an integer constant.
+func (b *builder) isConstValue(v Value) bool {
+	def := b.InstructionOfValue(b.resolveAlias(v))
+	return def != nil && def.opcode == OpcodeIconst
+}
+
+// cloneConstOperand gives sub, a subtraction of a constant being hoisted into target, a copy of the constant
+// there, since the constant itself stays where it is defined.
+func (b *builder) cloneConstOperand(target *basicBlock, sub *Instruction) {
+	k := b.InstructionOfValue(b.resolveAlias(sub.v2))
+	if k == nil || k.opcode != OpcodeIconst {
+		return
+	}
+	clone := b.AllocateInstruction()
+	if k.typ == TypeI32 {
+		clone.AsIconst32(uint32(k.ConstantVal()))
+	} else {
+		clone.AsIconst64(k.ConstantVal())
+	}
+	clone.rValue = b.allocateValue(k.typ).setInstructionID(clone.id)
+	target.insertBeforeTerminator(clone)
+	sub.v2 = clone.rValue
+}
+
+// limitLike returns the subtraction already in blk of the same constant from the same value as sub, if any.
+func (b *builder) limitLike(blk *basicBlock, sub *Instruction) *Instruction {
+	k := b.InstructionOfValue(b.resolveAlias(sub.v2))
+	if k == nil || k.opcode != OpcodeIconst {
+		return nil
+	}
+	for cur := blk.rootInstr; cur != nil; cur = cur.next {
+		if cur.opcode != OpcodeIsub || cur == sub || b.resolveAlias(cur.v) != b.resolveAlias(sub.v) {
+			continue
+		}
+		if c := b.InstructionOfValue(b.resolveAlias(cur.v2)); c != nil && c.opcode == OpcodeIconst && c.ConstantVal() == k.ConstantVal() && c.typ == k.typ {
+			return cur
+		}
+	}
+	return nil
+}
+
 func (blk *basicBlock) contextLoadLike(instr *Instruction) *Instruction {
 	for cur := blk.rootInstr; cur != nil; cur = cur.next {
 		if cur.contextLoad && cur.opcode == instr.opcode && cur.v == instr.v && cur.u1 == instr.u1 && cur.typ == instr.typ {
@@ -376,5 +437,57 @@ func (b *builder) floatConstTarget(header *basicBlock, hoisted map[*basicBlock]i
 }
 
 // maxHoistedFloatConsts is how many float constants floatConstTarget moves out of one loop: half the
-// vector registers amd64 has.
+// vector registers amd64 has. It counts integer constants separately.
 const maxHoistedFloatConsts = 8
+
+// hoistIntConsts is whether a loop's integer constants that take more than one instruction to make are
+// computed before the loop, pinned like float ones: on arm64, whose instructions take only small
+// immediates, a 32-bit hash multiplier is a movz and a movk at each use otherwise. amd64 takes 32-bit
+// immediates in place.
+var hoistIntConsts = runtime.GOARCH == "arm64"
+
+// everyIteration reports whether blk, in the loop headed by header, runs on every iteration: it dominates
+// every block the loop branches back from, but for the path that yields to the runtime when it asks. A
+// constant used only in some of a dispatch loop's cases, kept in a register across the whole loop, costs
+// the other cases a register.
+func (b *builder) everyIteration(blk, header *basicBlock) bool {
+	for _, p := range header.preds {
+		pred := p.blk
+		if !b.isDominatedBy(pred, header) || b.isDominatedBy(pred, blk) || yields(pred) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// yields reports whether blk yields to the runtime: the slow path of a loop's preemption check.
+func yields(blk *basicBlock) bool {
+	for cur := blk.rootInstr; cur != nil; cur = cur.next {
+		if cur.opcode == OpcodeYield {
+			return true
+		}
+	}
+	return false
+}
+
+// multiInstructionConst reports whether the integer constant instr takes more than one instruction to
+// make on arm64: more than one of its 16-bit halfwords is neither all zeros nor, all at once, all ones.
+// A logical immediate takes one too, which this counts as more: one such kept in a register costs only
+// the register.
+func multiInstructionConst(instr *Instruction) bool {
+	v, chunks := instr.ConstantVal(), 4
+	if instr.typ == TypeI32 {
+		v, chunks = uint64(uint32(v)), 2
+	}
+	zero, ones := 0, 0
+	for k := 0; k < chunks; k++ {
+		switch uint16(v >> (16 * k)) {
+		case 0:
+			zero++
+		case 0xffff:
+			ones++
+		}
+	}
+	return zero < chunks-1 && ones < chunks-1
+}
