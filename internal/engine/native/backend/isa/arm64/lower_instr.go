@@ -9,6 +9,7 @@ package arm64
 import (
 	"fmt"
 	"math"
+	"math/bits"
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
@@ -2051,6 +2052,9 @@ func (m *machine) lowerVfpuFromInt(rd regalloc.VReg, rn operand, arr vecArrangem
 
 func (m *machine) lowerShifts(si *ssa.Instruction, ext extMode, aluOp aluOp) {
 	x, amount := si.Arg2()
+	if (aluOp == aluOpAsr || aluOp == aluOpLsr) && m.lowerLowBitfield(si, aluOp == aluOpAsr) {
+		return
+	}
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), ext)
 	rm := m.getOperand_ShiftImm_NR(m.compiler.ValueDefinition(amount), ext, x.Type().Bits())
 	rd := m.compiler.VRegOf(si.Return())
@@ -2090,6 +2094,9 @@ func (m *machine) lowerBitwiseAluOp(si *ssa.Instruction, op aluOp, ignoreResult 
 			return
 		}
 	}
+	if op == aluOpAnd && m.lowerBitfieldExtract(xDef, yDef, rd, _64) {
+		return
+	}
 	if instr := yDef.Instr; instr != nil && instr.Constant() {
 		c := instr.ConstantVal()
 		if isBitMaskImmediate(c, _64) {
@@ -2100,9 +2107,100 @@ func (m *machine) lowerBitwiseAluOp(si *ssa.Instruction, op aluOp, ignoreResult 
 		}
 	}
 
+	// The operations are commutative: a shift as the first operand folds as well as the second.
+	if isConstShift(m, xDef) && !isConstShift(m, yDef) {
+		rn = m.getOperand_NR(yDef, extModeNone)
+		yDef = xDef
+	}
 	rm := m.getOperand_SR_NR(yDef, extModeNone)
 	alu.asALU(op, rd, rn, rm, _64)
 	m.insert(alu)
+}
+
+// lowerLowBitfield lowers si, a right shift by a constant k of a left shift by k used only here, as the
+// extract of the low width-k bits, sign- or zero-extended: sxtb, sxth or sxtw where they fit. It reports
+// false, emitting nothing, otherwise.
+func (m *machine) lowerLowBitfield(si *ssa.Instruction, signed bool) bool {
+	x, amount := si.Arg2()
+	width := uint64(x.Type().Bits())
+	xDef, aDef := m.compiler.ValueDefinition(x), m.compiler.ValueDefinition(amount)
+	if !aDef.IsFromInstr() || !aDef.Instr.Constant() || !m.compiler.MatchInstr(xDef, ssa.OpcodeIshl) {
+		return false
+	}
+	k := aDef.Instr.ConstantVal() & (width - 1)
+	target, inner := xDef.Instr.Arg2()
+	iDef := m.compiler.ValueDefinition(inner)
+	if k == 0 || !iDef.IsFromInstr() || !iDef.Instr.Constant() || iDef.Instr.ConstantVal()&(width-1) != k {
+		return false
+	}
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(target), extModeNone)
+	xDef.Instr.MarkLowered()
+	for _, c := range [2]backend.SSAValueDefinition{aDef, iDef} {
+		if m.compiler.MatchInstr(c, ssa.OpcodeIconst) {
+			c.Instr.MarkLowered()
+		}
+	}
+	op := aluOpUbfx
+	if signed {
+		op = aluOpSbfx
+	}
+	bfx := m.allocateInstr()
+	bfx.asALUShift(op, m.compiler.VRegOf(si.Return()), rn, operandBitfield(0, byte(width-k)), width == 64)
+	m.insert(bfx)
+	return true
+}
+
+// isConstShift reports whether def is a shift by a constant that getOperand_SR_NR folds.
+func isConstShift(m *machine, def backend.SSAValueDefinition) bool {
+	if !m.compiler.MatchInstr(def, ssa.OpcodeIshl) && !m.compiler.MatchInstr(def, ssa.OpcodeUshr) && !m.compiler.MatchInstr(def, ssa.OpcodeSshr) {
+		return false
+	}
+	_, amount := def.Instr.Arg2()
+	a := m.compiler.ValueDefinition(amount)
+	return a.IsFromInstr() && a.Instr.Constant()
+}
+
+// lowerBitfieldExtract lowers the and of x and y into rd as a ubfx where one is a logical right shift by
+// a constant k, used only here, and the other a constant of the n lowest bits set: the field of n bits
+// from bit k on, or of what is left above k. It reports false, emitting nothing, otherwise.
+func (m *machine) lowerBitfieldExtract(x, y backend.SSAValueDefinition, rd regalloc.VReg, _64 bool) bool {
+	if !m.compiler.MatchInstr(y, ssa.OpcodeIconst) {
+		x, y = y, x
+	}
+	if !m.compiler.MatchInstr(y, ssa.OpcodeIconst) || !m.compiler.MatchInstr(x, ssa.OpcodeUshr) {
+		return false
+	}
+	width := uint64(32)
+	if _64 {
+		width = 64
+	}
+	mask := y.Instr.ConstantVal()
+	if !_64 {
+		mask = uint64(uint32(mask))
+	}
+	n := uint64(bits.TrailingZeros64(^mask))
+	if mask == 0 || mask&(mask+1) != 0 {
+		return false
+	}
+	target, amount := x.Instr.Arg2()
+	a := m.compiler.ValueDefinition(amount)
+	if !a.IsFromInstr() || !a.Instr.Constant() {
+		return false
+	}
+	k := a.Instr.ConstantVal() & (width - 1)
+	if k == 0 {
+		return false
+	}
+	// The shift leaves width-k bits: a mask of more keeps them all.
+	n = min(n, width-k)
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(target), extModeNone)
+	x.Instr.MarkLowered()
+	a.Instr.MarkLowered()
+	y.Instr.MarkLowered()
+	ubfx := m.allocateInstr()
+	ubfx.asALUShift(aluOpUbfx, rd, rn, operandBitfield(byte(k), byte(n)), _64)
+	m.insert(ubfx)
+	return true
 }
 
 // allOnes reports whether def is the constant with every bit of its width set.

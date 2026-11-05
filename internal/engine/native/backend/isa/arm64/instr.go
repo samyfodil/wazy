@@ -1191,6 +1191,10 @@ func (i *instruction) String() (str string) {
 		}
 	case aluRRImmShift:
 		size := is64SizeBitToSize(i.u2 >> 32)
+		if op := aluOp(i.u1); op == aluOpUbfx || op == aluOpSbfx {
+			str = fmt.Sprintf("%s %s, %s, #%d, #%d", op, formatVRegSized(i.rd, size), formatVRegSized(i.rn.nr(), size), byte(i.rm.data), byte(i.rm.data>>8))
+			break
+		}
 		str = fmt.Sprintf("%s %s, %s, %#x",
 			aluOp(i.u1).String(),
 			formatVRegSized(i.rd, size),
@@ -2131,6 +2135,10 @@ func (a aluOp) String() string {
 		return "bics"
 	case aluOpEon:
 		return "eon"
+	case aluOpUbfx:
+		return "ubfx"
+	case aluOpSbfx:
+		return "sbfx"
 	case aluOpEor:
 		return "eor"
 	case aluOpAddS:
@@ -2207,6 +2215,9 @@ const (
 	aluOpBics
 	// 32/64-bit Bitwise XOR NOT.
 	aluOpEon
+	// 32/64-bit Unsigned and signed bitfield extract, only for aluRRImmShift: see operandBitfield.
+	aluOpUbfx
+	aluOpSbfx
 )
 
 // vecOp determines the type of vector operation. Instructions whose kind is one of

@@ -171,7 +171,7 @@ func (i *instruction) encode(m *machine) {
 			aluOp(i.u1),
 			regNumberInEncoding[i.rd.RealReg()],
 			regNumberInEncoding[i.rn.realReg()],
-			uint32(i.rm.shiftImm()),
+			uint32(i.rm.data),
 			uint32(i.u2>>32),
 		))
 	case aluRRR:
@@ -2077,6 +2077,15 @@ func encodeAluRRImm(op aluOp, rd, rn, amount, _64bit uint32) uint32 {
 		// https://developer.arm.com/documentation/ddi0596/2020-12/Base-Instructions/SBFM--Signed-Bitfield-Move-?lang=en
 		opc = 0b00
 		imms, immr = 0b011111|_64bit<<5, amount
+	case aluOpUbfx, aluOpSbfx:
+		// UBFX and SBFX are aliases for UBFM and SBFM, of the field's lowest bit and its last:
+		// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/UBFX--Unsigned-Bitfield-Extract--an-alias-of-UBFM-?lang=en
+		lsb, width := amount&0xff, amount>>8
+		opc = 0b10
+		if op == aluOpSbfx {
+			opc = 0b00
+		}
+		immr, imms = lsb, lsb+width-1
 	default:
 		panic(op.String())
 	}
