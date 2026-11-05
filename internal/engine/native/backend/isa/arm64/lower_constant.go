@@ -142,7 +142,32 @@ func (m *machine) insertInlineFpuConst(rd regalloc.VReg, lo, hi uint64, width by
 	m.insert(i)
 }
 
+// fpImm8 returns the immediate of the fmov that sets a float of the given width to v, if one does:
+// v is ±(16+f)/16 × 2^e with f and e+3 from 0 to 15 and 0 to 7, VFPExpandImm's floats.
+func fpImm8(v uint64, bits byte) (uint32, bool) {
+	var sign, exp, frac uint64
+	var expBits, fracBits uint
+	if bits == 64 {
+		sign, exp, frac, expBits, fracBits = v>>63, v>>52&0x7ff, v&(1<<52-1), 11, 52
+	} else {
+		sign, exp, frac, expBits, fracBits = v>>31&1, v>>23&0xff, v&(1<<23-1), 8, 23
+	}
+	if frac&(1<<(fracBits-4)-1) != 0 {
+		return 0, false
+	}
+	b := exp >> (expBits - 2) & 1
+	mid := exp >> 2 & (1<<(expBits-3) - 1) // all b
+	if exp>>(expBits-1) == b || mid != b*(1<<(expBits-3)-1) {
+		return 0, false
+	}
+	return uint32(sign<<7 | b<<6 | (exp&3)<<4 | frac>>(fracBits-4)), true
+}
+
 func (m *machine) lowerFpuConst32(rd regalloc.VReg, v uint64) {
+	if _, ok := fpImm8(v, 32); ok {
+		m.insertInlineFpuConst(rd, v, 0, 32)
+		return
+	}
 	if v == 0 {
 		m.insertInlineFpuConst(rd, 0, 0, 32)
 		return
@@ -163,6 +188,10 @@ func (m *machine) lowerFpuConst32(rd regalloc.VReg, v uint64) {
 }
 
 func (m *machine) lowerFpuConst64(rd regalloc.VReg, v uint64) {
+	if _, ok := fpImm8(v, 64); ok {
+		m.insertInlineFpuConst(rd, v, 0, 64)
+		return
+	}
 	if v == 0 {
 		m.insertInlineFpuConst(rd, 0, 0, 64)
 		return

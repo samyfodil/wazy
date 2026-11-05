@@ -1367,9 +1367,17 @@ func (i *instruction) String() (str string) {
 	case fpuStore128:
 		str = fmt.Sprintf("str %s, %s", formatVRegSized(i.rn.nr(), 128), i.getAmode().format(64))
 	case loadFpuConst32:
-		str = fmt.Sprintf("ldr %s, #8; b 8; data.f32 %f", formatVRegSized(i.rd, 32), math.Float32frombits(uint32(i.u1)))
+		if _, ok := fpImm8(i.u1, 32); ok {
+			str = fmt.Sprintf("fmov %s, #%g", formatVRegSized(i.rd, 32), math.Float32frombits(uint32(i.u1)))
+		} else {
+			str = fmt.Sprintf("ldr %s, #8; b 8; data.f32 %f", formatVRegSized(i.rd, 32), math.Float32frombits(uint32(i.u1)))
+		}
 	case loadFpuConst64:
-		str = fmt.Sprintf("ldr %s, #8; b 16; data.f64 %f", formatVRegSized(i.rd, 64), math.Float64frombits(i.u1))
+		if _, ok := fpImm8(i.u1, 64); ok {
+			str = fmt.Sprintf("fmov %s, #%g", formatVRegSized(i.rd, 64), math.Float64frombits(i.u1))
+		} else {
+			str = fmt.Sprintf("ldr %s, #8; b 16; data.f64 %f", formatVRegSized(i.rd, 64), math.Float64frombits(i.u1))
+		}
 	case loadFpuConst128:
 		str = fmt.Sprintf("ldr %s, #8; b 32; data.v128  %016x %016x",
 			formatVRegSized(i.rd, 128), i.u1, i.u2)
@@ -2740,13 +2748,13 @@ func (i *instruction) size() int64 {
 	case emitSourceOffsetInfo:
 		return 0
 	case loadFpuConst32:
-		if i.u1 == 0 {
-			return 4 // zero loading can be encoded as a single instruction.
+		if _, ok := fpImm8(i.u1, 32); ok || i.u1 == 0 {
+			return 4 // zero, or an fmov immediate, is a single instruction.
 		}
 		return 4 + 4 + 4
 	case loadFpuConst64:
-		if i.u1 == 0 {
-			return 4 // zero loading can be encoded as a single instruction.
+		if _, ok := fpImm8(i.u1, 64); ok || i.u1 == 0 {
+			return 4 // zero, or an fmov immediate, is a single instruction.
 		}
 		return 4 + 4 + 8
 	case loadFpuConst128:

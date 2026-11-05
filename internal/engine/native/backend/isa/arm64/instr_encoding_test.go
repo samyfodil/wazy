@@ -1106,12 +1106,12 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "30000010", setup: func(i *instruction) { i.asAdr(v16VReg, 4) }},
 		{want: "50050030", setup: func(i *instruction) { i.asAdr(v16VReg, 169) }},
 		{want: "101e302e", setup: func(i *instruction) { i.asLoadFpuConst32(v16VReg, uint64(math.Float32bits(0))) }},
-		{want: "5000001c020000140000803f", setup: func(i *instruction) {
-			i.asLoadFpuConst32(v16VReg, uint64(math.Float32bits(1.0)))
+		{want: "5000001c02000014cdcc8c3f", setup: func(i *instruction) {
+			i.asLoadFpuConst32(v16VReg, uint64(math.Float32bits(1.1)))
 		}},
 		{want: "101e302e", setup: func(i *instruction) { i.asLoadFpuConst64(v16VReg, uint64(math.Float32bits(0))) }},
-		{want: "5000005c03000014000000000000f03f", setup: func(i *instruction) {
-			i.asLoadFpuConst64(v16VReg, math.Float64bits(1.0))
+		{want: "5000005c030000149a9999999999f13f", setup: func(i *instruction) {
+			i.asLoadFpuConst64(v16VReg, math.Float64bits(1.1))
 		}},
 		{want: "101e306e", setup: func(i *instruction) { i.asLoadFpuConst128(v16VReg, 0, 0) }},
 		{want: "5000009c05000014ffffffffffffffffaaaaaaaaaaaaaaaa", setup: func(i *instruction) { i.asLoadFpuConst128(v16VReg, 0xffffffff_ffffffff, 0xaaaaaaaa_aaaaaaaa) }},
@@ -1593,6 +1593,12 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "e11f084e", setup: func(i *instruction) {
 			i.asMovToVec(v1VReg, operandNR(xzrVReg), vecArrangementD, vecIndex(0))
 		}},
+		// fmov d3, #3.0; fmov d3, #0.5; fmov s3, #-1.5; fmov d7, #31.0; fmov d7, #0.125
+		{want: "0310611e", setup: func(i *instruction) { i.asLoadFpuConst64(v3VReg, math.Float64bits(3)) }},
+		{want: "03106c1e", setup: func(i *instruction) { i.asLoadFpuConst64(v3VReg, math.Float64bits(0.5)) }},
+		{want: "03103f1e", setup: func(i *instruction) { i.asLoadFpuConst32(v3VReg, uint64(math.Float32bits(-1.5))) }},
+		{want: "07f0671e", setup: func(i *instruction) { i.asLoadFpuConst64(v7VReg, math.Float64bits(31)) }},
+		{want: "0710681e", setup: func(i *instruction) { i.asLoadFpuConst64(v7VReg, math.Float64bits(0.125)) }},
 		// uadalp v1.2d, v2.4s
 		{want: "4168a06e", setup: func(i *instruction) {
 			i.asVecMisc(vecOpUadalp, v1VReg, operandNR(v2VReg), vecArrangement4S)
@@ -2396,4 +2402,30 @@ func Test_encodeUnconditionalBranch(t *testing.T) {
 	actual = encodeUnconditionalBranch(false, 4*1024)
 	binary.LittleEndian.PutUint32(buf, actual)
 	require.Equal(t, "0x00040014", fmt.Sprintf("%#x", buf))
+}
+
+// Test_fpImm8 checks fpImm8 against VFPExpandImm: every immediate's float, at both widths, encodes
+// as that immediate, and its neighbours by one unit in the last place do not encode.
+func Test_fpImm8(t *testing.T) {
+	for imm := uint64(0); imm < 256; imm++ {
+		a, b, cd, efgh := imm>>7&1, imm>>6&1, imm>>4&3, imm&15
+		f64 := a<<63 | ((1-b)<<10|b*0xff<<2|cd)<<52 | efgh<<48
+		f32 := a<<31 | ((1-b)<<7|b*0x1f<<2|cd)<<23 | efgh<<19
+		for _, c := range []struct {
+			v    uint64
+			bits byte
+		}{{f64, 64}, {f32, 32}} {
+			got, ok := fpImm8(c.v, c.bits)
+			require.True(t, ok, "%#x", c.v)
+			require.Equal(t, uint32(imm), got)
+			_, ok = fpImm8(c.v+1, c.bits)
+			require.False(t, ok)
+			_, ok = fpImm8(c.v-1, c.bits)
+			require.False(t, ok)
+		}
+	}
+	for _, v := range []float64{0, 1.1, 32, 0.0625, math.Inf(1), math.NaN()} {
+		_, ok := fpImm8(math.Float64bits(v), 64)
+		require.False(t, ok, "%v", v)
+	}
 }

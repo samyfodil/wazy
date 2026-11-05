@@ -52,6 +52,16 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 			next := cur.next
 			target := b.licmTarget(cur, loopOf[blk.id], loopOf, defBlk, clobbers)
 			if cur.opcode == OpcodeF32const || cur.opcode == OpcodeF64const {
+				// A copy already before the loop takes every use of the value.
+				if pre := b.dominators[loopOf[blk.id].id]; pre != nil && !pre.invalid {
+					if same := pre.pinnedConstLike(cur); same != nil {
+						blk.removeInstruction(cur)
+						b.alias(cur.rValue, same.rValue)
+						defBlk[cur.rValue.ID()] = pre
+						cur = next
+						continue
+					}
+				}
 				target = b.floatConstTarget(loopOf[blk.id], floatConsts)
 			}
 			if cur.opcode == OpcodeIconst && hoistIntConsts && multiInstructionConst(cur) && b.everyIteration(blk, loopOf[blk.id]) {
@@ -446,13 +456,17 @@ func (b *builder) floatConstTarget(header *basicBlock, hoisted map[*basicBlock]i
 	return preheader
 }
 
-// maxHoistedFloatConsts is how many float constants floatConstTarget moves out of one loop: half the
-// vector registers amd64 has. maxHoistedIntConsts is how many distinct integer ones intConstTarget does:
-// arm64, the only one that does, allocates 27 general registers.
-const (
-	maxHoistedFloatConsts = 8
-	maxHoistedIntConsts   = 16
-)
+// maxHoistedFloatConsts is how many distinct float constants floatConstTarget moves out of one loop: half
+// the vector registers there are, 16 on amd64 and 32 on arm64. maxHoistedIntConsts is how many distinct
+// integer ones intConstTarget does: arm64, the only one that does, allocates 27 general registers.
+var maxHoistedFloatConsts = func() int {
+	if runtime.GOARCH == "arm64" {
+		return 16
+	}
+	return 8
+}()
+
+const maxHoistedIntConsts = 16
 
 // intConstTarget is floatConstTarget for an integer constant.
 func (b *builder) intConstTarget(header *basicBlock, hoisted map[*basicBlock]int) *basicBlock {
@@ -464,10 +478,10 @@ func (b *builder) intConstTarget(header *basicBlock, hoisted map[*basicBlock]int
 	return preheader
 }
 
-// pinnedConstLike returns the integer constant already pinned in blk with instr's value and type, if any.
+// pinnedConstLike returns the constant already pinned in blk with instr's value and type, if any.
 func (blk *basicBlock) pinnedConstLike(instr *Instruction) *Instruction {
 	for cur := blk.rootInstr; cur != nil; cur = cur.next {
-		if cur.pinned && cur.opcode == OpcodeIconst && cur.typ == instr.typ && cur.u1 == instr.u1 {
+		if cur.pinned && cur.opcode == instr.opcode && cur.typ == instr.typ && cur.u1 == instr.u1 {
 			return cur
 		}
 	}

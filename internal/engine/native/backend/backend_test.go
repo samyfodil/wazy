@@ -1343,220 +1343,118 @@ L0 (SSA Block: blk0):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
-	str xzr, [sp, #-0x10]!
-	msr fpsr, xzr
-	fcvtzs x8, d0
-	mrs x9 fpsr
-	mov x10, x0
-	mov v8.16b, v0.16b
-	subs xzr, x9, #0x1
-	b.ne #0x70, (L17)
-	fcmp d8, d8
-	mov x9, x10
-	b.vc #0x34, (L16)
-	movz x11, #0xc, lsl 0
-	str w11, [x9]
-	mov x11, sp
-	str x11, [x9, #0x38]
-	adr x11, #0x0
-	str x11, [x9, #0x30]
-	exit_sequence x9
-L16:
-	movz x9, #0xb, lsl 0
-	str w9, [x10]
-	mov x9, sp
-	str x9, [x10, #0x38]
-	adr x9, #0x0
-	str x9, [x10, #0x30]
-	exit_sequence x10
-L17:
-	msr fpsr, xzr
+	sub sp, sp, #0x10
+	orr x27, xzr, #0x10
+	str x27, [sp, #-0x10]!
+	str x0, [sp, #0x10]
+	fcmp d0, d0
+	b.vs #0x164, (L2)
+	movz x8, #0xc3e0, lsl 48
+	fmov d8, x8
+	fcmp d0, d8
+	b.lt #0x188, (L3)
+	movz x8, #0x43e0, lsl 48
+	fmov d8, x8
+	fcmp d0, d8
+	b.ge #0x178, (L3)
+	fcvtzs x0, d0
+	fcmp s1, s1
+	b.vs #0x138, (L2)
+	movz w8, #0xdf00, lsl 16
+	fmov s8, w8
+	fcmp s1, s8
+	b.lt #0x15c, (L3)
+	movz w8, #0x5f00, lsl 16
+	fmov s8, w8
+	fcmp s1, s8
+	b.ge #0x14c, (L3)
 	fcvtzs x1, s1
-	mrs x9 fpsr
-	mov x10, x0
-	mov v8.16b, v1.16b
-	subs xzr, x9, #0x1
-	b.ne #0x70, (L15)
-	fcmp s8, s8
-	mov x9, x10
-	b.vc #0x34, (L14)
-	movz x11, #0xc, lsl 0
-	str w11, [x9]
-	mov x11, sp
-	str x11, [x9, #0x38]
-	adr x11, #0x0
-	str x11, [x9, #0x30]
-	exit_sequence x9
-L14:
-	movz x9, #0xb, lsl 0
-	str w9, [x10]
-	mov x9, sp
-	str x9, [x10, #0x38]
-	adr x9, #0x0
-	str x9, [x10, #0x30]
-	exit_sequence x10
-L15:
-	msr fpsr, xzr
+	fcmp d0, d0
+	b.vs #0x10c, (L2)
+	movz x8, #0x20, lsl 16
+	movk x8, #0xc1e0, lsl 48
+	fmov d8, x8
+	fcmp d0, d8
+	b.le #0x12c, (L3)
+	movz x8, #0x41e0, lsl 48
+	fmov d8, x8
+	fcmp d0, d8
+	b.ge #0x11c, (L3)
 	fcvtzs w2, d0
-	mrs x9 fpsr
-	mov x10, x0
-	mov v8.16b, v0.16b
-	subs xzr, x9, #0x1
-	b.ne #0x70, (L13)
-	fcmp d8, d8
-	mov x9, x10
-	b.vc #0x34, (L12)
-	movz x11, #0xc, lsl 0
-	str w11, [x9]
-	mov x11, sp
-	str x11, [x9, #0x38]
-	adr x11, #0x0
-	str x11, [x9, #0x30]
-	exit_sequence x9
-L12:
-	movz x9, #0xb, lsl 0
-	str w9, [x10]
-	mov x9, sp
-	str x9, [x10, #0x38]
-	adr x9, #0x0
-	str x9, [x10, #0x30]
-	exit_sequence x10
-L13:
-	msr fpsr, xzr
+	fcmp s1, s1
+	b.vs #0xdc, (L2)
+	movz w8, #0xcf00, lsl 16
+	fmov s8, w8
+	fcmp s1, s8
+	b.lt #0x100, (L3)
+	movz w8, #0x4f00, lsl 16
+	fmov s8, w8
+	fcmp s1, s8
+	b.ge #0xf0, (L3)
 	fcvtzs w3, s1
-	mrs x9 fpsr
-	mov x10, x0
-	mov v8.16b, v1.16b
-	subs xzr, x9, #0x1
-	b.ne #0x70, (L11)
-	fcmp s8, s8
-	mov x9, x10
-	b.vc #0x34, (L10)
-	movz x11, #0xc, lsl 0
-	str w11, [x9]
-	mov x11, sp
-	str x11, [x9, #0x38]
-	adr x11, #0x0
-	str x11, [x9, #0x30]
-	exit_sequence x9
-L10:
-	movz x9, #0xb, lsl 0
-	str w9, [x10]
-	mov x9, sp
-	str x9, [x10, #0x38]
-	adr x9, #0x0
-	str x9, [x10, #0x30]
-	exit_sequence x10
-L11:
-	msr fpsr, xzr
+	fcmp d0, d0
+	b.vs #0xb0, (L2)
+	fmov d8, #-1
+	fcmp d0, d8
+	b.le #0xd8, (L3)
+	movz x8, #0x43f0, lsl 48
+	fmov d8, x8
+	fcmp d0, d8
+	b.ge #0xc8, (L3)
 	fcvtzu x4, d0
-	mrs x9 fpsr
-	mov x10, x0
-	mov v8.16b, v0.16b
-	subs xzr, x9, #0x1
-	b.ne #0x70, (L9)
-	fcmp d8, d8
-	mov x9, x10
-	b.vc #0x34, (L8)
-	movz x11, #0xc, lsl 0
-	str w11, [x9]
-	mov x11, sp
-	str x11, [x9, #0x38]
-	adr x11, #0x0
-	str x11, [x9, #0x30]
-	exit_sequence x9
-L8:
-	movz x9, #0xb, lsl 0
-	str w9, [x10]
-	mov x9, sp
-	str x9, [x10, #0x38]
-	adr x9, #0x0
-	str x9, [x10, #0x30]
-	exit_sequence x10
-L9:
-	msr fpsr, xzr
+	fcmp s1, s1
+	b.vs #0x88, (L2)
+	fmov s8, #-1
+	fcmp s1, s8
+	b.le #0xb0, (L3)
+	movz w8, #0x5f80, lsl 16
+	fmov s8, w8
+	fcmp s1, s8
+	b.ge #0xa0, (L3)
 	fcvtzu x5, s1
-	mrs x9 fpsr
-	mov x10, x0
-	mov v8.16b, v1.16b
-	subs xzr, x9, #0x1
-	b.ne #0x70, (L7)
-	fcmp s8, s8
-	mov x9, x10
-	b.vc #0x34, (L6)
-	movz x11, #0xc, lsl 0
-	str w11, [x9]
-	mov x11, sp
-	str x11, [x9, #0x38]
-	adr x11, #0x0
-	str x11, [x9, #0x30]
-	exit_sequence x9
-L6:
-	movz x9, #0xb, lsl 0
-	str w9, [x10]
-	mov x9, sp
-	str x9, [x10, #0x38]
-	adr x9, #0x0
-	str x9, [x10, #0x30]
-	exit_sequence x10
-L7:
-	msr fpsr, xzr
+	fcmp d0, d0
+	b.vs #0x60, (L2)
+	fmov d8, #-1
+	fcmp d0, d8
+	b.le #0x88, (L3)
+	movz x8, #0x41f0, lsl 48
+	fmov d8, x8
+	fcmp d0, d8
+	b.ge #0x78, (L3)
 	fcvtzu w6, d0
-	mrs x9 fpsr
-	mov x10, x0
-	mov v8.16b, v0.16b
-	subs xzr, x9, #0x1
-	b.ne #0x70, (L5)
-	fcmp d8, d8
-	mov x9, x10
-	b.vc #0x34, (L4)
-	movz x11, #0xc, lsl 0
-	str w11, [x9]
-	mov x11, sp
-	str x11, [x9, #0x38]
-	adr x11, #0x0
-	str x11, [x9, #0x30]
-	exit_sequence x9
-L4:
-	movz x9, #0xb, lsl 0
-	str w9, [x10]
-	mov x9, sp
-	str x9, [x10, #0x38]
-	adr x9, #0x0
-	str x9, [x10, #0x30]
-	exit_sequence x10
-L5:
-	msr fpsr, xzr
+	fcmp s1, s1
+	b.vs #0x38, (L2)
+	fmov s8, #-1
+	fcmp s1, s8
+	b.le #0x60, (L3)
+	movz w8, #0x4f80, lsl 16
+	fmov s8, w8
+	fcmp s1, s8
+	b.ge #0x50, (L3)
 	fcvtzu w7, s1
-	mrs x9 fpsr
-	mov v8.16b, v1.16b
-	subs xzr, x9, #0x1
-	b.ne #0x70, (L3)
-	fcmp s8, s8
-	mov x9, x0
-	b.vc #0x34, (L2)
-	movz x10, #0xc, lsl 0
-	str w10, [x9]
-	mov x10, sp
-	str x10, [x9, #0x38]
-	adr x10, #0x0
-	str x10, [x9, #0x30]
-	exit_sequence x9
-L2:
-	movz x9, #0xb, lsl 0
-	str w9, [x0]
-	mov x9, sp
-	str x9, [x0, #0x38]
-	adr x9, #0x0
-	str x9, [x0, #0x30]
-	exit_sequence x0
-L3:
 	fcvt s0, d0
 	fcvt d1, s1
-	mov x0, x8
-	add sp, sp, #0x10
+	add sp, sp, #0x20
 	ldr x30, [sp], #0x10
 	ret
+L2:
+	ldr x27, [sp, #0x10]
+	movz x17, #0xc, lsl 0
+	str w17, [x27]
+	mov x17, sp
+	str x17, [x27, #0x38]
+	adr x17, #0x0
+	str x17, [x27, #0x30]
+	exit_sequence x27
+L3:
+	ldr x27, [sp, #0x10]
+	movz x17, #0xb, lsl 0
+	str w17, [x27]
+	mov x17, sp
+	str x17, [x27, #0x38]
+	adr x17, #0x0
+	str x17, [x27, #0x30]
+	exit_sequence x27
 `,
 		},
 		{
@@ -1586,105 +1484,85 @@ L0 (SSA Block: blk0):
 L0 (SSA Block: blk0):
 	mov x130?, x2
 	mov v131?.8b, v0.8b
-	movz w309?, #0x13, lsl 0
-	madd w169?, w130?, w309?, wzr
-	movz w308?, #0x14, lsl 0
-	madd w172?, w130?, w308?, w169?
-	movz w307?, #0x12, lsl 0
-	madd w173?, w130?, w307?, w172?
-	movz w306?, #0x11, lsl 0
-	madd w174?, w130?, w306?, w173?
-	orr w305?, wzr, #0x10
-	madd w175?, w130?, w305?, w174?
-	orr w304?, wzr, #0xf
-	madd w176?, w130?, w304?, w175?
-	orr w303?, wzr, #0xe
-	madd w177?, w130?, w303?, w176?
-	movz w302?, #0xd, lsl 0
-	madd w178?, w130?, w302?, w177?
-	orr w301?, wzr, #0xc
-	madd w179?, w130?, w301?, w178?
-	movz w300?, #0xb, lsl 0
-	madd w180?, w130?, w300?, w179?
-	movz w299?, #0xa, lsl 0
-	madd w181?, w130?, w299?, w180?
-	movz w298?, #0x9, lsl 0
-	madd w182?, w130?, w298?, w181?
-	orr w297?, wzr, #0x8
-	madd w183?, w130?, w297?, w182?
-	orr w296?, wzr, #0x7
-	madd w184?, w130?, w296?, w183?
-	orr w295?, wzr, #0x6
-	madd w185?, w130?, w295?, w184?
-	movz w294?, #0x5, lsl 0
-	madd w186?, w130?, w294?, w185?
-	orr w293?, wzr, #0x4
-	madd w187?, w130?, w293?, w186?
-	orr w292?, wzr, #0x3
-	madd w188?, w130?, w292?, w187?
-	orr w291?, wzr, #0x2
-	madd w189?, w130?, w291?, w188?
-	orr w290?, wzr, #0x1
-	madd w190?, w130?, w290?, w189?
-	movz w289?, #0x3f80, lsl 16
-	fmov s288?, w289?
-	fmul s192?, s131?, s288?
-	movz w287?, #0x4000, lsl 16
-	fmov s286?, w287?
-	fmul s194?, s131?, s286?
-	movz w285?, #0x4040, lsl 16
-	fmov s284?, w285?
-	fmul s196?, s131?, s284?
-	movz w283?, #0x4080, lsl 16
-	fmov s282?, w283?
-	fmul s198?, s131?, s282?
-	movz w281?, #0x40a0, lsl 16
-	fmov s280?, w281?
-	fmul s200?, s131?, s280?
-	movz w279?, #0x40c0, lsl 16
-	fmov s278?, w279?
-	fmul s202?, s131?, s278?
-	movz w277?, #0x40e0, lsl 16
-	fmov s276?, w277?
-	fmul s204?, s131?, s276?
-	movz w275?, #0x4100, lsl 16
-	fmov s274?, w275?
-	fmul s206?, s131?, s274?
-	movz w273?, #0x4110, lsl 16
-	fmov s272?, w273?
-	fmul s208?, s131?, s272?
-	movz w271?, #0x4120, lsl 16
-	fmov s270?, w271?
-	fmul s210?, s131?, s270?
-	movz w269?, #0x4130, lsl 16
-	fmov s268?, w269?
-	fmul s212?, s131?, s268?
-	movz w267?, #0x4140, lsl 16
-	fmov s266?, w267?
-	fmul s214?, s131?, s266?
-	movz w265?, #0x4150, lsl 16
-	fmov s264?, w265?
-	fmul s216?, s131?, s264?
-	movz w263?, #0x4160, lsl 16
-	fmov s262?, w263?
-	fmul s218?, s131?, s262?
-	movz w261?, #0x4170, lsl 16
-	fmov s260?, w261?
-	fmul s220?, s131?, s260?
-	movz w259?, #0x4180, lsl 16
-	fmov s258?, w259?
-	fmul s222?, s131?, s258?
-	movz w257?, #0x4188, lsl 16
-	fmov s256?, w257?
-	fmul s224?, s131?, s256?
-	movz w255?, #0x4190, lsl 16
-	fmov s254?, w255?
-	fmul s226?, s131?, s254?
-	movz w253?, #0x4198, lsl 16
-	fmov s252?, w253?
-	fmul s228?, s131?, s252?
-	movz w251?, #0x41a0, lsl 16
-	fmov s250?, w251?
+	movz w289?, #0x13, lsl 0
+	madd w169?, w130?, w289?, wzr
+	movz w288?, #0x14, lsl 0
+	madd w172?, w130?, w288?, w169?
+	movz w287?, #0x12, lsl 0
+	madd w173?, w130?, w287?, w172?
+	movz w286?, #0x11, lsl 0
+	madd w174?, w130?, w286?, w173?
+	orr w285?, wzr, #0x10
+	madd w175?, w130?, w285?, w174?
+	orr w284?, wzr, #0xf
+	madd w176?, w130?, w284?, w175?
+	orr w283?, wzr, #0xe
+	madd w177?, w130?, w283?, w176?
+	movz w282?, #0xd, lsl 0
+	madd w178?, w130?, w282?, w177?
+	orr w281?, wzr, #0xc
+	madd w179?, w130?, w281?, w178?
+	movz w280?, #0xb, lsl 0
+	madd w180?, w130?, w280?, w179?
+	movz w279?, #0xa, lsl 0
+	madd w181?, w130?, w279?, w180?
+	movz w278?, #0x9, lsl 0
+	madd w182?, w130?, w278?, w181?
+	orr w277?, wzr, #0x8
+	madd w183?, w130?, w277?, w182?
+	orr w276?, wzr, #0x7
+	madd w184?, w130?, w276?, w183?
+	orr w275?, wzr, #0x6
+	madd w185?, w130?, w275?, w184?
+	movz w274?, #0x5, lsl 0
+	madd w186?, w130?, w274?, w185?
+	orr w273?, wzr, #0x4
+	madd w187?, w130?, w273?, w186?
+	orr w272?, wzr, #0x3
+	madd w188?, w130?, w272?, w187?
+	orr w271?, wzr, #0x2
+	madd w189?, w130?, w271?, w188?
+	orr w270?, wzr, #0x1
+	madd w190?, w130?, w270?, w189?
+	fmov s269?, #1
+	fmul s192?, s131?, s269?
+	fmov s268?, #2
+	fmul s194?, s131?, s268?
+	fmov s267?, #3
+	fmul s196?, s131?, s267?
+	fmov s266?, #4
+	fmul s198?, s131?, s266?
+	fmov s265?, #5
+	fmul s200?, s131?, s265?
+	fmov s264?, #6
+	fmul s202?, s131?, s264?
+	fmov s263?, #7
+	fmul s204?, s131?, s263?
+	fmov s262?, #8
+	fmul s206?, s131?, s262?
+	fmov s261?, #9
+	fmul s208?, s131?, s261?
+	fmov s260?, #10
+	fmul s210?, s131?, s260?
+	fmov s259?, #11
+	fmul s212?, s131?, s259?
+	fmov s258?, #12
+	fmul s214?, s131?, s258?
+	fmov s257?, #13
+	fmul s216?, s131?, s257?
+	fmov s256?, #14
+	fmul s218?, s131?, s256?
+	fmov s255?, #15
+	fmul s220?, s131?, s255?
+	fmov s254?, #16
+	fmul s222?, s131?, s254?
+	fmov s253?, #17
+	fmul s224?, s131?, s253?
+	fmov s252?, #18
+	fmul s226?, s131?, s252?
+	fmov s251?, #19
+	fmul s228?, s131?, s251?
+	fmov s250?, #20
 	fmul s230?, s131?, s250?
 	fadd s231?, s228?, s230?
 	fadd s232?, s226?, s231?
@@ -1760,65 +1638,45 @@ L0 (SSA Block: blk0):
 	madd w8, w2, w9, w8
 	orr w9, wzr, #0x1
 	madd w0, w2, w9, w8
-	movz w8, #0x3f80, lsl 16
-	fmov s8, w8
+	fmov s8, #1
 	fmul s8, s0, s8
-	movz w8, #0x4000, lsl 16
-	fmov s9, w8
+	fmov s9, #2
 	fmul s9, s0, s9
-	movz w8, #0x4040, lsl 16
-	fmov s10, w8
+	fmov s10, #3
 	fmul s10, s0, s10
-	movz w8, #0x4080, lsl 16
-	fmov s11, w8
+	fmov s11, #4
 	fmul s11, s0, s11
-	movz w8, #0x40a0, lsl 16
-	fmov s12, w8
+	fmov s12, #5
 	fmul s12, s0, s12
-	movz w8, #0x40c0, lsl 16
-	fmov s13, w8
+	fmov s13, #6
 	fmul s13, s0, s13
-	movz w8, #0x40e0, lsl 16
-	fmov s14, w8
+	fmov s14, #7
 	fmul s14, s0, s14
-	movz w8, #0x4100, lsl 16
-	fmov s15, w8
+	fmov s15, #8
 	fmul s15, s0, s15
-	movz w8, #0x4110, lsl 16
-	fmov s16, w8
+	fmov s16, #9
 	fmul s16, s0, s16
-	movz w8, #0x4120, lsl 16
-	fmov s17, w8
+	fmov s17, #10
 	fmul s17, s0, s17
-	movz w8, #0x4130, lsl 16
-	fmov s18, w8
+	fmov s18, #11
 	fmul s18, s0, s18
-	movz w8, #0x4140, lsl 16
-	fmov s19, w8
+	fmov s19, #12
 	fmul s19, s0, s19
-	movz w8, #0x4150, lsl 16
-	fmov s20, w8
+	fmov s20, #13
 	fmul s20, s0, s20
-	movz w8, #0x4160, lsl 16
-	fmov s21, w8
+	fmov s21, #14
 	fmul s21, s0, s21
-	movz w8, #0x4170, lsl 16
-	fmov s22, w8
+	fmov s22, #15
 	fmul s22, s0, s22
-	movz w8, #0x4180, lsl 16
-	fmov s23, w8
+	fmov s23, #16
 	fmul s23, s0, s23
-	movz w8, #0x4188, lsl 16
-	fmov s24, w8
+	fmov s24, #17
 	fmul s24, s0, s24
-	movz w8, #0x4190, lsl 16
-	fmov s25, w8
+	fmov s25, #18
 	fmul s25, s0, s25
-	movz w8, #0x4198, lsl 16
-	fmov s26, w8
+	fmov s26, #19
 	fmul s26, s0, s26
-	movz w8, #0x41a0, lsl 16
-	fmov s27, w8
+	fmov s27, #20
 	fmul s27, s0, s27
 	fadd s26, s26, s27
 	fadd s25, s25, s26
@@ -2184,15 +2042,13 @@ L0 (SSA Block: blk0):
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
 	mov x129?, x1
-	orr w139?, wzr, #0x1
-	str w139?, [x129?, #0x10]
-	orr x138?, xzr, #0x2
-	str x138?, [x129?, #0x20]
-	movz w137?, #0x4040, lsl 16
-	fmov s136?, w137?
-	str s136?, [x129?, #0x30]
-	movz x135?, #0x4010, lsl 48
-	fmov d134?, x135?
+	orr w137?, wzr, #0x1
+	str w137?, [x129?, #0x10]
+	orr x136?, xzr, #0x2
+	str x136?, [x129?, #0x20]
+	fmov s135?, #3
+	str s135?, [x129?, #0x30]
+	fmov d134?, #4
 	str d134?, [x129?, #0x40]
 	ret
 `,
@@ -2204,11 +2060,9 @@ L0 (SSA Block: blk0):
 	str w8, [x1, #0x10]
 	orr x8, xzr, #0x2
 	str x8, [x1, #0x20]
-	movz w8, #0x4040, lsl 16
-	fmov s8, w8
+	fmov s8, #3
 	str s8, [x1, #0x30]
-	movz x8, #0x4010, lsl 48
-	fmov d8, x8
+	fmov d8, #4
 	str d8, [x1, #0x40]
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10

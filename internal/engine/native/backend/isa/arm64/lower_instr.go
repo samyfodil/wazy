@@ -366,6 +366,9 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 		rd := m.compiler.VRegOf(result)
 		ctxVReg := m.compiler.VRegOf(ctx)
+		if !instr.SourceOffset().Valid() {
+			ctxVReg = regalloc.VRegInvalid // Trap through the shared islands.
+		}
 		m.lowerFpuToInt(rd, rn, ctxVReg, true, x.Type() == ssa.TypeF64,
 			result.Type().Bits() == 64, op == ssa.OpcodeFcvtToSintSat)
 	case ssa.OpcodeFcvtToUint, ssa.OpcodeFcvtToUintSat:
@@ -374,6 +377,9 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 		rd := m.compiler.VRegOf(result)
 		ctxVReg := m.compiler.VRegOf(ctx)
+		if !instr.SourceOffset().Valid() {
+			ctxVReg = regalloc.VRegInvalid // Trap through the shared islands.
+		}
 		m.lowerFpuToInt(rd, rn, ctxVReg, false, x.Type() == ssa.TypeF64,
 			result.Type().Bits() == 64, op == ssa.OpcodeFcvtToUintSat)
 	case ssa.OpcodeFcvtFromSint:
@@ -1592,53 +1598,59 @@ func (m *machine) lowerFpuUniOp(op fpuUniOp, in, out ssa.Value) {
 
 func (m *machine) lowerFpuToInt(rd regalloc.VReg, rn operand, ctx regalloc.VReg, signed, src64bit, dst64bit, nonTrapping bool) {
 	if !nonTrapping {
-		// First of all, we have to clear the FPU flags.
-		flagClear := m.allocateInstr()
-		flagClear.asMovToFPSR(xzrVReg)
-		m.insert(flagClear)
+		// A NaN traps as an invalid conversion, and a value whose truncation the integer cannot hold as an
+		// overflow. Comparisons tell both, where reading the FPSR after the conversion would wait for every
+		// float instruction before it.
+		fcmp := func(y operand) {
+			c := m.allocateInstr()
+			c.asFpuCmp(rn, y, src64bit)
+			m.insert(c)
+		}
+		fcmp(rn)
+		m.exitIfNot(ctx, vc.asCond(), false, nativeapi.ExitCodeInvalidConversionToInteger)
+		lo, loInclusive, hi := fpuToIntBounds(signed, src64bit, dst64bit)
+		for _, b := range [2]struct {
+			v    float64
+			cond condFlag
+		}{{lo, gt}, {hi, lt}} {
+			if b.cond == gt && loInclusive {
+				b.cond = ge
+			}
+			var bound regalloc.VReg
+			if src64bit {
+				bound = m.compiler.AllocateVReg(ssa.TypeF64)
+				m.lowerFpuConst64(bound, math.Float64bits(b.v))
+			} else {
+				bound = m.compiler.AllocateVReg(ssa.TypeF32)
+				m.lowerFpuConst32(bound, uint64(math.Float32bits(float32(b.v))))
+			}
+			fcmp(operandNR(bound))
+			m.exitIfNot(ctx, b.cond.asCond(), false, nativeapi.ExitCodeIntegerOverflow)
+		}
 	}
 
-	// Then, do the conversion which doesn't trap inherently.
 	cvt := m.allocateInstr()
 	cvt.asFpuToInt(rd, rn, signed, src64bit, dst64bit)
 	m.insert(cvt)
+}
 
-	if !nonTrapping {
-		tmpReg := m.compiler.AllocateVReg(ssa.TypeI64)
-
-		// After the conversion, check the FPU flags.
-		getFlag := m.allocateInstr()
-		getFlag.asMovFromFPSR(tmpReg)
-		m.insert(getFlag)
-
-		execCtx := m.copyToTmp(ctx)
-		_rn := operandNR(m.copyToTmp(rn.nr()))
-
-		// Check if the conversion was undefined by comparing the status with 1.
-		// See https://developer.arm.com/documentation/ddi0595/2020-12/AArch64-Registers/FPSR--Floating-point-Status-Register
-		alu := m.allocateInstr()
-		alu.asALU(aluOpSubS, xzrVReg, operandNR(tmpReg), operandImm12(1, 0), true)
-		m.insert(alu)
-
-		// If it is not undefined, we can return the result.
-		ok := m.allocateInstr()
-		m.insert(ok)
-
-		// Otherwise, we have to choose the status depending on it is overflow or NaN conversion.
-
-		// Comparing itself to check if it is a NaN.
-		fpuCmp := m.allocateInstr()
-		fpuCmp.asFpuCmp(_rn, _rn, src64bit)
-		m.insert(fpuCmp)
-		// If the VC flag is not set (== VS flag is set), it is a NaN.
-		m.exitIfNot(execCtx, vc.asCond(), false, nativeapi.ExitCodeInvalidConversionToInteger)
-		// Otherwise, it is an overflow.
-		m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerOverflow)
-
-		// Conditional branch target is after exit.
-		l := m.insertBrTargetLabel()
-		ok.asCondBr(ne.asCond(), l, false /* ignored */)
+// fpuToIntBounds returns the floats a value converted to an integer must lie between: above lo, or at lo
+// where loInclusive, and below hi. Each is the end of the range the integer holds where a float of the
+// source's width is that end, and otherwise the nearest such float outside it, so that every value
+// whose truncation the integer holds passes.
+func fpuToIntBounds(signed, src64bit, dst64bit bool) (lo float64, loInclusive bool, hi float64) {
+	bits := 32
+	if dst64bit {
+		bits = 64
 	}
+	if !signed {
+		return -1, false, math.Ldexp(1, bits)
+	}
+	hi = math.Ldexp(1, bits-1)
+	if bits == 32 && src64bit {
+		return -hi - 1, false, hi
+	}
+	return -hi, true, hi
 }
 
 func (m *machine) lowerIntToFpu(rd regalloc.VReg, rn operand, signed, src64bit, dst64bit bool) {

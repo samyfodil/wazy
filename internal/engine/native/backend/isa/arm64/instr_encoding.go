@@ -115,14 +115,18 @@ func (i *instruction) encode(m *machine) {
 		}
 	case loadFpuConst32:
 		rd := regNumberInEncoding[i.rd.RealReg()]
-		if i.u1 == 0 {
+		if imm, ok := fpImm8(i.u1, 32); ok {
+			c.Emit4Bytes(0x1e201000 | imm<<13 | rd) // fmov sd, #imm
+		} else if i.u1 == 0 {
 			c.Emit4Bytes(encodeVecRRR(vecOpEOR, rd, rd, rd, vecArrangement8B))
 		} else {
 			encodeLoadFpuConst32(c, rd, i.u1)
 		}
 	case loadFpuConst64:
 		rd := regNumberInEncoding[i.rd.RealReg()]
-		if i.u1 == 0 {
+		if imm, ok := fpImm8(i.u1, 64); ok {
+			c.Emit4Bytes(0x1e601000 | imm<<13 | rd) // fmov dd, #imm
+		} else if i.u1 == 0 {
 			c.Emit4Bytes(encodeVecRRR(vecOpEOR, rd, rd, rd, vecArrangement8B))
 		} else {
 			encodeLoadFpuConst64(c, regNumberInEncoding[i.rd.RealReg()], i.u1)
