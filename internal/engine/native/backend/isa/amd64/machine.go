@@ -21,6 +21,7 @@ func NewBackend() backend.Machine {
 		regAlloc:                            regalloc.NewAllocator[*instruction, *labelPosition, *regAllocFn](regInfo),
 		spillSlots:                          map[regalloc.VRegID]int64{},
 		threadBegins:                        map[*instruction]label{},
+		remat:                               map[regalloc.VRegID]uint64{},
 		amodePool:                           nativeapi.NewPool[amode](nil),
 		labelPositionPool:                   nativeapi.NewIDedPool[labelPosition](resetLabelPosition),
 		instrPool:                           nativeapi.NewPool[instruction](resetInstruction),
@@ -95,6 +96,9 @@ type (
 
 		labelResolutionPends []labelResolutionPend
 
+		// remat holds the bits of each float constant LICM pinned, by its VReg: spilling one stores
+		// nothing and reloading it loads the constant again. See insertReloadRegisterAt.
+		remat map[regalloc.VRegID]uint64
 		// threadTargets and threadBegins are threadJumps' scratch.
 		threadTargets []label
 		threadBegins  map[*instruction]label
@@ -240,6 +244,7 @@ func (m *machine) getOrCreateTrapIsland(code nativeapi.ExitCode) label {
 
 // Reset implements backend.Machine.
 func (m *machine) Reset() {
+	clear(m.remat)
 	m.consts = m.consts[:0]
 	m.trapIslands = m.trapIslands[:0]
 	m.preemptIslands = m.preemptIslands[:0]
@@ -650,7 +655,13 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		panic("BUG: " + op.String() + " must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
-	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.
+	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const:
+		// A constant is computed where it is used, but one LICM pinned is an ordinary value.
+		if !instr.Constant() {
+			vr := m.c.VRegOf(instr.Return())
+			m.InsertLoadConstantBlockArg(instr, vr)
+			m.remat[vr.ID()] = instr.ConstantVal()
+		}
 	case ssa.OpcodeCall, ssa.OpcodeCallIndirect:
 		m.lowerCall(instr)
 	case ssa.OpcodeYield:

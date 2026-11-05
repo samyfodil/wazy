@@ -309,6 +309,9 @@ func (m *machine) insertStoreRegisterAt(v regalloc.VReg, instr *instruction, aft
 		cur, prevNext = instr.prev, instr
 	}
 
+	if _, ok := m.remat[v.ID()]; ok {
+		return linkInstr(cur, prevNext) // Its reload loads the constant again.
+	}
 	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), bits/8)
 	var amode *addressMode
 	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, bits, spVReg, true)
@@ -334,6 +337,23 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 		cur, prevNext = instr.prev, instr
 	}
 
+	if c, ok := m.remat[v.ID()]; ok {
+		width := byte(typ.Bits())
+		if width < 64 {
+			c &= 1<<width - 1
+		}
+		load := m.allocateInstr()
+		switch {
+		case c != 0 && m.fpPoolingEnabled():
+			load.asLoadFpuConstPooled(v, c, 0, width, m.getOrAddFpConst(c, 0, width))
+		case width == 32:
+			load.asLoadFpuConst32(v, c)
+		default:
+			load.asLoadFpuConst64(v, c)
+		}
+		cur = linkInstr(cur, load)
+		return linkInstr(cur, prevNext)
+	}
 	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), bits/8)
 	var amode *addressMode
 	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, bits, spVReg, true)

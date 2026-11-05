@@ -46,6 +46,9 @@ type Instruction struct {
 	// contextLoad marks a load of module state that only a call or a store to the module context can
 	// change. See MarkContextLoad.
 	contextLoad bool
+	// pinned marks a float constant LICM moved out of a loop: it is computed once where it now stands,
+	// into a register the loop reads, rather than at each use. See Constant.
+	pinned bool
 }
 
 // SourceOffset represents the offset of the source of an instruction.
@@ -2948,10 +2951,14 @@ func (i *Instruction) addArgumentBranchInst(b *builder, v Value) {
 }
 
 // Constant returns true if this instruction is a constant instruction.
+//
+// A pinned float constant is not one: it is an ordinary value, defined where it stands.
 func (i *Instruction) Constant() bool {
 	switch i.opcode {
-	case OpcodeIconst, OpcodeF32const, OpcodeF64const:
+	case OpcodeIconst:
 		return true
+	case OpcodeF32const, OpcodeF64const:
+		return !i.pinned
 	}
 	return false
 }

@@ -229,7 +229,13 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerSubOrAdd(instr, op == ssa.OpcodeIadd)
 	case ssa.OpcodeFadd, ssa.OpcodeFsub, ssa.OpcodeFmul, ssa.OpcodeFdiv, ssa.OpcodeFmax, ssa.OpcodeFmin:
 		m.lowerFpuBinOp(instr)
-	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.
+	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const:
+		// A constant is computed where it is used, but one LICM pinned is an ordinary value.
+		if !instr.Constant() {
+			vr := m.compiler.VRegOf(instr.Return())
+			m.InsertLoadConstantBlockArg(instr, vr)
+			m.remat[vr.ID()] = instr.ConstantVal()
+		}
 	case ssa.OpcodeExitWithCode:
 		execCtx, code := instr.ExitWithCodeData()
 		m.lowerExitWithCode(m.compiler.VRegOf(execCtx), code)

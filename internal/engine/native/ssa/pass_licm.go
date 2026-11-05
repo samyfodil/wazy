@@ -40,6 +40,7 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 	}
 	defBlk := b.licmDefBlk()
 	clobbers := b.licmContextClobbers(loopOf)
+	floatConsts := make(map[*basicBlock]int)
 
 	for _, blk := range b.reversePostOrderedBasicBlocks {
 		if blk.invalid || loopOf[blk.id] == nil {
@@ -47,7 +48,11 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 		}
 		for cur := blk.rootInstr; cur != nil; {
 			next := cur.next
-			if target := b.licmTarget(cur, loopOf[blk.id], loopOf, defBlk, clobbers); target != nil {
+			target := b.licmTarget(cur, loopOf[blk.id], loopOf, defBlk, clobbers)
+			if cur.opcode == OpcodeF32const || cur.opcode == OpcodeF64const {
+				target = b.floatConstTarget(loopOf[blk.id], floatConsts)
+			}
+			if target != nil {
 				blk.removeInstruction(cur)
 				b.resolveArgumentAlias(cur)
 				if same := target.contextLoadLike(cur); same != nil {
@@ -59,6 +64,9 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 					continue
 				}
 				target.insertBeforeTerminator(cur)
+				if cur.opcode == OpcodeF32const || cur.opcode == OpcodeF64const {
+					cur.pinned = true
+				}
 				// Later instructions in this block may now be invariant too,
 				// since one of their operands just moved out of the loop.
 				if first, rest := cur.Returns(); first.Valid() {
@@ -258,7 +266,8 @@ func hoistableFromLoop(instr *Instruction) bool {
 	// not a correctness rule.
 	case OpcodeIcmp, OpcodeFcmp:
 		return false
-	// A constant is rematerialized at each use by the backend.
+	// A constant is rematerialized at each use by the backend. A float one is a load from the constant
+	// pool there, so it is hoisted, but by passLoopInvariantCodeMotionOpt itself; see floatConstTarget.
 	case OpcodeIconst, OpcodeF32const, OpcodeF64const, OpcodeVconst:
 		return false
 	// Address arithmetic folds into a load or store's addressing mode.
@@ -349,3 +358,23 @@ func (blk *basicBlock) contextLoadLike(instr *Instruction) *Instruction {
 	}
 	return nil
 }
+
+// floatConstTarget returns where a float constant in the loop headed by header goes: the block before
+// the loop, where it is computed once into a register the loop reads instead of loaded from the constant
+// pool at each use. Where the loop needs that register for something else, the allocator rematerializes
+// the constant rather than spilling it. It goes no further out, since a constant live across a whole
+// loop nest measured worse than one live across its own loop, and it stays put once maxHoistedFloatConsts
+// went before it: a loop using more constants than there are registers keeps few of them in one, and
+// loads the rest before the loop for nothing. hoisted counts them by header.
+func (b *builder) floatConstTarget(header *basicBlock, hoisted map[*basicBlock]int) *basicBlock {
+	preheader := b.dominators[header.id]
+	if preheader == nil || preheader == header || preheader.invalid || hoisted[header] == maxHoistedFloatConsts {
+		return nil
+	}
+	hoisted[header]++
+	return preheader
+}
+
+// maxHoistedFloatConsts is how many float constants floatConstTarget moves out of one loop: half the
+// vector registers amd64 has.
+const maxHoistedFloatConsts = 8

@@ -117,6 +117,9 @@ type (
 		// Also note that this is only known after register allocation.
 		spillSlotSize int64
 		spillSlots    map[regalloc.VRegID]int64 // regalloc.VRegID to offset.
+		// remat holds the bits of each float constant LICM pinned, by its VReg: spilling one stores
+		// nothing and reloading it loads the constant again. See insertReloadRegisterAt.
+		remat map[regalloc.VRegID]uint64
 		// clobberedRegs holds real-register backed VRegs saved at the function prologue, and restored at the epilogue.
 		clobberedRegs []regalloc.VReg
 
@@ -204,6 +207,7 @@ func resetLabelPosition(l *labelPosition) {
 func NewBackend() backend.Machine {
 	m := &machine{
 		spillSlots:        make(map[regalloc.VRegID]int64),
+		remat:             map[regalloc.VRegID]uint64{},
 		regAlloc:          regalloc.NewAllocator[*instruction, *labelPosition, *regAllocFn](regInfo),
 		amodePool:         nativeapi.NewPool[addressMode](resetAddressMode),
 		instrPool:         nativeapi.NewPool[instruction](resetInstruction),
@@ -323,6 +327,7 @@ func (m *machine) RegAlloc() {
 
 // Reset implements backend.Machine.
 func (m *machine) Reset() {
+	clear(m.remat)
 	m.clobberedRegs = m.clobberedRegs[:0]
 	for key := range m.spillSlots {
 		m.clobberedRegs = append(m.clobberedRegs, regalloc.VReg(key))
