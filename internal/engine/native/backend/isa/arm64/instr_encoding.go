@@ -41,6 +41,9 @@ func (i *instruction) encode(m *machine) {
 		// We still don't know the exact address of the function to call, so we emit a placeholder.
 		c.AddRelocationInfo(i.callFuncRef(), false)
 		c.Emit4Bytes(encodeUnconditionalBranch(true, 0)) // 0 = placeholder
+		if i.inlinedCall {
+			c.Emit4Bytes(InlinedCallMarker)
+		}
 	case callInd:
 		c.Emit4Bytes(encodeUnconditionalBranchReg(regNumberInEncoding[i.rn.realReg()], true))
 	case store8, store16, store32, store64, fpuStore32, fpuStore64, fpuStore128:

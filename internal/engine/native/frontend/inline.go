@@ -7,8 +7,12 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-// inlineLeafMaxBody is the largest function body, in bytes, inlineLeaf copies into a caller.
-const inlineLeafMaxBody = 160
+// inlineLeafMaxBody is the largest function body, in bytes, inlineLeaf copies into a caller, and
+// inlineSelfMaxBody the largest inlineSelf copies into the function itself.
+const (
+	inlineLeafMaxBody = 160
+	inlineSelfMaxBody = 64
+)
 
 const (
 	leafUnknown byte = iota
@@ -32,18 +36,19 @@ func (c *Compiler) isInlinableLeaf(fnIndex uint32) bool {
 	}
 	if c.leafKinds[i] == leafUnknown {
 		c.leafKinds[i] = leafNo
-		if code := &c.m.CodeSection[i]; code.GoFunc == nil && straightLineBody(code.Body) {
+		if code := &c.m.CodeSection[i]; code.GoFunc == nil && inlinableBody(code.Body, inlineLeafMaxBody, false, 0) {
 			c.leafKinds[i] = leafYes
 		}
 	}
 	return c.leafKinds[i] == leafYes
 }
 
-// straightLineBody reports whether body is at most inlineLeafMaxBody bytes of local, constant,
-// non-trapping numeric, single-memory load and store, drop, select and global.get instructions,
-// closed by its one end. The only trap such a body can raise is an out-of-bounds memory access.
-func straightLineBody(body []byte) bool {
-	if len(body) > inlineLeafMaxBody {
+// inlinableBody reports whether body is at most maxLen bytes of local, constant, non-trapping numeric,
+// single-memory load and store, drop, select and global.get instructions, closed by its end. With control,
+// it may also have blocks, ifs, branches, returns and calls of local functions, those numbered from
+// imports up. The only trap such a body can raise itself is an out-of-bounds memory access.
+func inlinableBody(body []byte, maxLen int, control bool, imports uint32) bool {
+	if len(body) > maxLen {
 		return false
 	}
 	for pc := 0; pc < len(body); pc++ {
@@ -52,7 +57,22 @@ func straightLineBody(body []byte) bool {
 		var err error
 		switch {
 		case op == wasm.OpcodeEnd:
-			return pc == len(body)-1
+			if pc == len(body)-1 {
+				return true
+			}
+			if !control {
+				return false
+			}
+		case control && (op == wasm.OpcodeBlock || op == wasm.OpcodeIf):
+			_, n, err = leb128.LoadInt33AsInt64(body[pc+1:])
+		case control && (op == wasm.OpcodeElse || op == wasm.OpcodeReturn || op == wasm.OpcodeNop):
+		case control && (op == wasm.OpcodeBr || op == wasm.OpcodeBrIf):
+			_, n, err = leb128.LoadUint32(body[pc+1:])
+		case control && op == wasm.OpcodeCall:
+			var f uint32
+			if f, n, err = leb128.LoadUint32(body[pc+1:]); f < imports {
+				return false // A host call exits to Go from where the unwinder sees no copy.
+			}
 		case op == wasm.OpcodeLocalGet, op == wasm.OpcodeLocalSet, op == wasm.OpcodeLocalTee, op == wasm.OpcodeGlobalGet:
 			_, n, err = leb128.LoadUint32(body[pc+1:])
 		case op == wasm.OpcodeI32Const:
@@ -122,6 +142,73 @@ func (c *Compiler) inlineLeaf(fnIndex uint32) {
 
 	c.inlineLocals = c.wasmLocalToVariable
 	c.wasmFunctionBody, state.pc, c.wasmLocalToVariable = body, pc, locals
+}
+
+// isInlinableSelf reports whether a call of the function being compiled to itself can be lowered as a
+// copy of its body: a small body of the code inlinableBody accepts with control, not in a copy itself. The copy's own calls stay calls, so a recursion runs half as many of them, and
+// a backtrace through one has a frame for the copy (see ssa.Instruction.MarkInlinedCall).
+func (c *Compiler) isInlinableSelf(fnIndex uint32) bool {
+	if !c.inlineLeaves || c.needListener || c.needSourceOffsetInfo || c.inlinedCallee != 0 || c.inlineBase != 0 ||
+		fnIndex != c.m.ImportFunctionCount+c.wasmLocalFunctionIndex {
+		return false
+	}
+	if c.selfInlinable == leafUnknown {
+		c.selfInlinable = leafNo
+		if code := &c.m.CodeSection[c.wasmLocalFunctionIndex]; code.GoFunc == nil &&
+			inlinableBody(code.Body, inlineSelfMaxBody, true, c.m.ImportFunctionCount) {
+			c.selfInlinable = leafYes
+		}
+	}
+	return c.selfInlinable == leafYes
+}
+
+// inlineSelf lowers a call of the function being compiled to itself, which isInlinableSelf accepted, as
+// its body: the arguments on the stack become the copy's parameters, and the body lowers inside a block
+// that leaves its results where the call's would be.
+func (c *Compiler) inlineSelf(fnIndex uint32) {
+	i := fnIndex - c.m.ImportFunctionCount
+	code := &c.m.CodeSection[i]
+	typ := &c.m.TypeSection[c.m.FunctionSection[i]]
+	builder := c.ssaBuilder
+	state := c.state()
+
+	locals := c.wasmLocalToVariable
+	c.wasmLocalToVariable = c.inlineLocals[:0]
+	args := state.values[len(state.values)-len(typ.Params):]
+	for j, t := range typ.Params {
+		v := builder.DeclareVariable(WasmTypeToSSAType(t))
+		builder.DefineVariableInCurrentBB(v, args[j])
+		c.setWasmLocalVariable(wasm.Index(j), v)
+	}
+	state.values = state.values[:len(state.values)-len(typ.Params)]
+	for j, t := range code.LocalTypes {
+		st := WasmTypeToSSAType(t)
+		v := builder.DeclareVariable(st)
+		builder.DefineVariableInCurrentBB(v, zeroOf(builder, st))
+		c.setWasmLocalVariable(wasm.Index(len(typ.Params)+j), v)
+	}
+
+	followingBlk := builder.AllocateBasicBlock()
+	c.addBlockParamsFromWasmTypes(typ.Results, followingBlk)
+	c.inlineResults = wasm.FunctionType{Results: typ.Results}
+	state.ctrlPush(controlFrame{
+		kind:                         controlFrameKindBlock,
+		originalStackLenWithoutParam: len(state.values),
+		followingBlock:               followingBlk,
+		blockType:                    &c.inlineResults,
+	})
+
+	pc, hintAt := state.pc, c.branchHintAt
+	c.branchHintAt = 0
+	c.inlinedCallee, c.inlineBase = i+1, len(state.controlFrames)
+	for state.pc = 0; state.pc < len(code.Body); {
+		c.lowerCurrentOpcode()
+	}
+	c.inlinedCallee, c.inlineBase = 0, 0
+	state.pc, c.branchHintAt = pc, hintAt
+
+	c.inlineLocals = c.wasmLocalToVariable
+	c.wasmLocalToVariable = locals
 }
 
 func zeroOf(b ssa.Builder, t ssa.Type) ssa.Value {

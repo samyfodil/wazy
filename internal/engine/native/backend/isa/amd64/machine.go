@@ -2374,6 +2374,7 @@ func (m *machine) lowerCall(si *ssa.Instruction) {
 	if isDirectCall {
 		call := m.allocateInstr().asCall(directCallee, calleeABI)
 		call.mayThrow = si.MayThrow()
+		call.b1 = si.InlinedCall()
 		m.insert(call)
 	} else {
 		ptrOp := m.getOperand_Mem_Reg(m.c.ValueDefinition(indirectCalleePtr))

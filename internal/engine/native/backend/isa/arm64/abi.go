@@ -281,6 +281,7 @@ func (m *machine) lowerCall(si *ssa.Instruction) {
 		call := m.allocateInstr()
 		call.asCall(directCallee, calleeABI)
 		call.mayThrow = si.MayThrow()
+		call.inlinedCall = si.InlinedCall()
 		m.insert(call)
 	} else {
 		ptr := m.compiler.VRegOf(indirectCalleePtr)

@@ -263,6 +263,9 @@ func (i *instruction) String() string {
 	case ud2:
 		return "ud2"
 	case call:
+		if i.b1 {
+			return fmt.Sprintf("call %s; nopl %#x(%%rax)", ssa.FuncRef(i.u1), InlinedCallMarker)
+		}
 		return fmt.Sprintf("call %s", ssa.FuncRef(i.u1))
 	case callIndirect:
 		return fmt.Sprintf("callq *%s", i.op1.format(true))

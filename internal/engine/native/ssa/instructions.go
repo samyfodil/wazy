@@ -49,6 +49,9 @@ type Instruction struct {
 	// pinned marks a float constant LICM moved out of a loop: it is computed once where it now stands,
 	// into a register the loop reads, rather than at each use. See Constant.
 	pinned bool
+	// inlinedCall marks a call made from a copy of a function's body lowered in place of a call to it.
+	// See MarkInlinedCall.
+	inlinedCall bool
 }
 
 // SourceOffset represents the offset of the source of an instruction.
@@ -112,6 +115,19 @@ func (i *Instruction) MarkContextLoad() *Instruction {
 // MayThrow reports whether MarkMayThrow was called on this call.
 func (i *Instruction) MayThrow() bool {
 	return i.mayThrow
+}
+
+// MarkInlinedCall marks this call as made from a copy of a function's body the frontend lowered in place
+// of a call to that function. The function holding the call is the one the copy is of, so a backtrace
+// through the call has a frame for the copy, and one for the function: the backend marks such a call
+// where the unwinder sees it.
+func (i *Instruction) MarkInlinedCall() {
+	i.inlinedCall = true
+}
+
+// InlinedCall reports whether MarkInlinedCall was called on this call.
+func (i *Instruction) InlinedCall() bool {
+	return i.inlinedCall
 }
 
 // resetInstruction resets this instruction to the initial state.

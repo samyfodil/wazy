@@ -1406,6 +1406,14 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		c.AddRelocationInfo(ssa.FuncRef(i.u1), false)
 		// Note that this is zero as a placeholder for the call target if it's a function value.
 		c.Emit4Bytes(uint32(i.u2))
+		if i.b1 {
+			// A call from a copy of a function's body is followed, where it returns to, by a nop the
+			// unwinder recognizes: nopl InlinedCallMarker(%rax), 0F 1F 80 disp32.
+			c.EmitByte(0x0f)
+			c.EmitByte(0x1f)
+			c.EmitByte(0x80)
+			c.Emit4Bytes(InlinedCallMarker)
+		}
 
 	case callIndirect:
 		op := i.op1

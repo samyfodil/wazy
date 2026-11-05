@@ -32,6 +32,8 @@ type (
 		// mayThrow is set on a call a caught exception resumes after; see
 		// ClobbersAllRegisters.
 		mayThrow bool
+		// inlinedCall is set on a call from a copy of a function's body; see InlinedCallMarker.
+		inlinedCall bool
 	}
 
 	// instructionKind represents the kind of instruction.
@@ -1595,6 +1597,9 @@ func (i *instruction) String() (str string) {
 		str = fmt.Sprintf("mrs %s fpsr", formatVRegSized(i.rd, 64))
 	case call:
 		str = fmt.Sprintf("bl %s", ssa.FuncRef(i.u1))
+		if i.inlinedCall {
+			str += "; orr xzr, x19, x23, lsl #42"
+		}
 	case callInd:
 		str = fmt.Sprintf("bl %s", formatVRegSized(i.rn.nr(), 64))
 	case ret:
@@ -2720,6 +2725,11 @@ const exitSequenceSize = 6 * 4 // 6 instructions as in encodeExitSequence.
 // size returns the size of the instruction in encoded bytes.
 func (i *instruction) size() int64 {
 	switch i.kind {
+	case call:
+		if i.inlinedCall {
+			return 8
+		}
+		return 4
 	case exitSequence:
 		return exitSequenceSize // 5 instructions as in encodeExitSequence.
 	case nop0, loadConstBlockArg:

@@ -117,9 +117,16 @@ type Compiler struct {
 	inlineLeaves bool
 	// vecMap turns vector map loops on; see SetVecMap.
 	vecMap bool
-	// inlinedCallee is one more than the local index of the function inlineLeaf is lowering, and zero
-	// outside one. See memoryOutOfBoundsCode.
+	// inlinedCallee is one more than the local index of the function inlineLeaf or inlineSelf is
+	// lowering, and zero outside one. See memoryOutOfBoundsCode.
 	inlinedCallee uint32
+	// inlineBase is, while inlineSelf lowers the function's body in place of a call to itself, how many
+	// control frames there are with the body's own; a return in it branches to that frame.
+	inlineBase int
+	// selfInlinable caches isInlinableSelf's verdict on the body of the function being compiled.
+	selfInlinable byte
+	// inlineResults is the block type of the frame inlineSelf lowers the body in.
+	inlineResults wasm.FunctionType
 
 	knownSafeBoundsAtTheEndOfBlocks   [] /* ssa.BlockID to */ knownSafeBoundsAtTheEndOfBlock
 	varLengthKnownSafeBoundWithIDPool nativeapi.VarLengthPool[knownSafeBoundWithID]
@@ -460,6 +467,7 @@ func (c *Compiler) Init(idx, typIndex wasm.Index, typ *wasm.FunctionType, localT
 		c.branchHints = c.m.CodeSection[idx].BranchHints
 	}
 	c.needListener = needListener
+	c.selfInlinable = leafUnknown
 	c.pendingEhEntries = c.pendingEhEntries[:0]
 	c.clearSafeBounds()
 	c.varLengthKnownSafeBoundWithIDPool.Reset()

@@ -9,13 +9,15 @@ import (
 	"github.com/samyfodil/wazy/internal/wasm"
 )
 
-func Test_straightLineBody(t *testing.T) {
+func Test_inlinableBody(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		body []byte
 		ok   bool
+		// control is what inlinableBody reports with control flow and calls allowed, past function 1.
+		control bool
 	}{
-		{name: "empty", body: []byte{wasm.OpcodeEnd}, ok: true},
+		{name: "empty", body: []byte{wasm.OpcodeEnd}, ok: true, control: true},
 		{
 			name: "locals, constants, numerics, memory, drop, select, global.get",
 			body: []byte{
@@ -27,23 +29,39 @@ func Test_straightLineBody(t *testing.T) {
 				wasm.OpcodeI32Load, 2, 0x80, 0x01, wasm.OpcodeI64Store32, 2, 8,
 				wasm.OpcodeEnd,
 			},
-			ok: true,
+			ok: true, control: true,
 		},
 		{name: "memory index", body: []byte{wasm.OpcodeI32Load, 0x42, 1, 0, wasm.OpcodeEnd}},
 		{name: "division", body: []byte{wasm.OpcodeI32DivU, wasm.OpcodeEnd}},
 		{name: "remainder", body: []byte{wasm.OpcodeI64RemS, wasm.OpcodeEnd}},
 		{name: "truncation", body: []byte{wasm.OpcodeI64TruncF64U, wasm.OpcodeEnd}},
-		{name: "call", body: []byte{wasm.OpcodeCall, 0, wasm.OpcodeEnd}},
-		{name: "block", body: []byte{wasm.OpcodeBlock, 0x40, wasm.OpcodeEnd, wasm.OpcodeEnd}},
+		{name: "call of an import", body: []byte{wasm.OpcodeCall, 0, wasm.OpcodeEnd}},
+		{name: "call", body: []byte{wasm.OpcodeCall, 1, wasm.OpcodeEnd}, control: true},
+		{name: "block", body: []byte{wasm.OpcodeBlock, 0x40, wasm.OpcodeEnd, wasm.OpcodeEnd}, control: true},
+		{
+			name: "if, else, branches and return",
+			body: []byte{
+				wasm.OpcodeLocalGet, 0, wasm.OpcodeIf, 0x7f, wasm.OpcodeI32Const, 1, wasm.OpcodeElse,
+				wasm.OpcodeLocalGet, 0, wasm.OpcodeBrIf, 0, wasm.OpcodeNop, wasm.OpcodeReturn, wasm.OpcodeEnd,
+				wasm.OpcodeBr, 0, wasm.OpcodeEnd,
+			},
+			control: true,
+		},
+		{name: "loop", body: []byte{wasm.OpcodeLoop, 0x40, wasm.OpcodeEnd, wasm.OpcodeEnd}},
+		{name: "br_table", body: []byte{wasm.OpcodeI32Const, 0, wasm.OpcodeBrTable, 0, 0, wasm.OpcodeEnd}},
+		{name: "call_indirect", body: []byte{wasm.OpcodeI32Const, 0, wasm.OpcodeCallIndirect, 0, 0, wasm.OpcodeEnd}},
+		{name: "unreachable", body: []byte{wasm.OpcodeUnreachable, wasm.OpcodeEnd}},
 		{name: "global.set", body: []byte{wasm.OpcodeI32Const, 0, wasm.OpcodeGlobalSet, 0, wasm.OpcodeEnd}},
 		{name: "bytes after end", body: []byte{wasm.OpcodeEnd, wasm.OpcodeNop}},
 		{name: "no end", body: []byte{wasm.OpcodeDrop}},
 		{name: "truncated immediate", body: []byte{wasm.OpcodeLocalGet, 0x80}},
 		{name: "truncated offset", body: []byte{wasm.OpcodeI32Load, 2, 0x80}},
-		{name: "too large", body: append(bytes.Repeat([]byte{wasm.OpcodeDrop}, inlineLeafMaxBody), wasm.OpcodeEnd)},
+		{name: "too large to copy into itself", body: append(bytes.Repeat([]byte{wasm.OpcodeDrop}, inlineSelfMaxBody), wasm.OpcodeEnd), ok: true},
+		{name: "too large for a leaf", body: append(bytes.Repeat([]byte{wasm.OpcodeDrop}, inlineLeafMaxBody), wasm.OpcodeEnd)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.ok, straightLineBody(tc.body))
+			require.Equal(t, tc.ok, inlinableBody(tc.body, inlineLeafMaxBody, false, 0))
+			require.Equal(t, tc.control, inlinableBody(tc.body, inlineSelfMaxBody, true, 1))
 		})
 	}
 }

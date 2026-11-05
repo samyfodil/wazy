@@ -138,3 +138,16 @@ func GoCallStackView(stackPointerBeforeGoCall *uint64) []uint64 {
 	size := *(*uint64)(unsafe.Add(ptr, 8))
 	return unsafe.Slice(data, size)
 }
+
+// InlinedCallMarker follows, where it returns to, a call from a copy of a function's body lowered in
+// place of a call to it: orr xzr, x19, x23, lsl #42, which writes nothing and nothing else emits. See
+// ssa.Instruction.MarkInlinedCall.
+const InlinedCallMarker = 0xaa17aa7f
+
+// InlinedCallAt reports whether the call returning to retAddr is from such a copy.
+func InlinedCallAt(retAddr uintptr) bool {
+	var code []byte // Read as the stack is.
+	hdr := (*sliceHeader)(unsafe.Pointer(&code))
+	hdr.Data, hdr.Len, hdr.Cap = retAddr, 4, 4
+	return binary.LittleEndian.Uint32(code) == InlinedCallMarker
+}

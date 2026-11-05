@@ -1769,6 +1769,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		if state.unreachable {
 			break
 		}
+		if c.inlineBase > 0 { // Out of a body inlineSelf lowers: to the end of its frame.
+			targetBlk, argNum := state.brTargetArgNumFor(uint32(len(state.controlFrames) - c.inlineBase))
+			c.insertJumpToBlock(c.nPeekDup(argNum), targetBlk)
+			state.unreachable = true
+			break
+		}
 		if c.needListener {
 			c.callListenerAfter()
 		}
@@ -1809,6 +1815,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 		c.addLoopWork(c.callWork(fnIndex))
 		if c.isInlinableLeaf(fnIndex) {
 			c.inlineLeaf(fnIndex)
+			break
+		}
+		if c.isInlinableSelf(fnIndex) {
+			c.inlineSelf(fnIndex)
 			break
 		}
 		c.lowerCall(fnIndex)
@@ -4244,6 +4254,9 @@ func (c *Compiler) lowerCall(fnIndex uint32) {
 		call.AsCallIndirect(ssa.Value(funcRefOrPtrValue), sig, args)
 	} else {
 		call.AsCall(ssa.FuncRef(funcRefOrPtrValue), sig, args)
+	}
+	if c.inlineBase > 0 {
+		call.MarkInlinedCall()
 	}
 	builder.InsertInstruction(call)
 	// A callee that provably cannot throw (wasm.Module.FunctionMayThrow) is not a point a throw resumes at.
