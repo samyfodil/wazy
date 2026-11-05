@@ -1459,6 +1459,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 			blockType:                    bt,
 		})
 	case wasm.OpcodeLoop:
+		if !state.unreachable && c.inlinedCallee == 0 && c.lowerPopcountLoop() {
+			break
+		}
 		loopStart := state.pc
 		bt := c.readBlockType()
 
