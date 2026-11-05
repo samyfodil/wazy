@@ -151,7 +151,7 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 			cc = cc.invert()
 		}
 
-		if !m.tryLowerBandToFlag(x, y) {
+		if !m.tryLowerBandToFlag(x, y, c) {
 			m.lowerIcmpToFlag(x, y, signed)
 		}
 		cbr := m.allocateInstr()
@@ -273,19 +273,20 @@ func satisfyingFlags(c condFlag) byte {
 	panic("BUG: no flags satisfy " + c.String())
 }
 
-func (m *machine) tryLowerBandToFlag(x, y ssa.Value) (ok bool) {
+// tryLowerBandToFlag sets the flags for comparing x, an and, with y, zero, under c, with an ands of
+// the and's operands. It reports false, emitting nothing, for any other comparison: one of zero with an
+// and, whose condition the flags would answer for the operands the other way round, and an unsigned one,
+// as ands clears the carry a comparison with zero sets.
+func (m *machine) tryLowerBandToFlag(x, y ssa.Value, c ssa.IntegerCmpCond) (ok bool) {
 	xx := m.compiler.ValueDefinition(x)
 	yy := m.compiler.ValueDefinition(y)
-	if xx.IsFromInstr() && xx.Instr.Constant() && xx.Instr.ConstantVal() == 0 {
-		if m.compiler.MatchInstr(yy, ssa.OpcodeBand) {
-			bandInstr := yy.Instr
-			m.lowerBitwiseAluOp(bandInstr, aluOpAnds, true)
-			ok = true
-			bandInstr.MarkLowered()
-			return
-		}
+	switch c {
+	case ssa.IntegerCmpCondEqual, ssa.IntegerCmpCondNotEqual,
+		ssa.IntegerCmpCondSignedLessThan, ssa.IntegerCmpCondSignedGreaterThanOrEqual,
+		ssa.IntegerCmpCondSignedGreaterThan, ssa.IntegerCmpCondSignedLessThanOrEqual:
+	default:
+		return false
 	}
-
 	if yy.IsFromInstr() && yy.Instr.Constant() && yy.Instr.ConstantVal() == 0 {
 		if m.compiler.MatchInstr(xx, ssa.OpcodeBand) {
 			bandInstr := xx.Instr
@@ -2511,7 +2512,7 @@ func (m *machine) lowerTrapCond(condDef backend.SSAValueDefinition) cond {
 	}
 	condDef.Instr.MarkLowered()
 	x, y, c := condDef.Instr.IcmpData()
-	if !m.tryLowerBandToFlag(x, y) {
+	if !m.tryLowerBandToFlag(x, y, c) {
 		m.lowerIcmpToFlag(x, y, c.Signed())
 	}
 	return condFlagFromSSAIntegerCmpCond(c).asCond()

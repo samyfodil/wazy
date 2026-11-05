@@ -1960,16 +1960,12 @@ func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.E
 	m.insert(jmpIf)
 }
 
+// tryLowerBandToFlag sets the flags for comparing x, an and, with y, zero, with a test of the and's
+// operands. It reports false, emitting nothing, for any other comparison: in particular one of zero with
+// an and, whose condition the test's flags would answer for the operands the other way round.
 func (m *machine) tryLowerBandToFlag(x, y backend.SSAValueDefinition) (ok bool) {
 	var target backend.SSAValueDefinition
 	var got bool
-	if x.IsFromInstr() && x.Instr.Constant() && x.Instr.ConstantVal() == 0 {
-		if m.c.MatchInstr(y, ssa.OpcodeBand) {
-			target = y
-			got = true
-		}
-	}
-
 	if y.IsFromInstr() && y.Instr.Constant() && y.Instr.ConstantVal() == 0 {
 		if m.c.MatchInstr(x, ssa.OpcodeBand) {
 			target = x
