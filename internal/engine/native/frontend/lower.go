@@ -6599,9 +6599,19 @@ func (c *Compiler) lowerBrTable(labels []uint32, index ssa.Value) {
 	if len(labels) <= brTableChainMax {
 		for i, l := range labels[:len(labels)-1] {
 			targetBlk, _ := state.brTargetArgNumFor(l)
+			args := c.nPeekDup(numArgs)
+			if c.needListener && targetBlk.ReturnBlock() {
+				// A return calls the listener first, which insertJumpToBlock does: in a block of its own.
+				current, ret := builder.CurrentBlock(), builder.AllocateBasicBlock()
+				builder.SetCurrentBlock(ret)
+				c.insertJumpToBlock(args, targetBlk)
+				builder.SetCurrentBlock(current)
+				targetBlk, args = ret, ssa.ValuesNil
+				defer builder.Seal(ret)
+			}
 			k := builder.AllocateInstruction().AsIconst32(uint32(i)).Insert(builder).Return()
 			eq := builder.AllocateInstruction().AsIcmp(index, k, ssa.IntegerCmpCondEqual).Insert(builder).Return()
-			builder.AllocateInstruction().AsBrnz(eq, c.nPeekDup(numArgs), targetBlk).Insert(builder)
+			builder.AllocateInstruction().AsBrnz(eq, args, targetBlk).Insert(builder)
 			next := builder.AllocateBasicBlock()
 			c.insertJumpToBlock(ssa.ValuesNil, next)
 			c.finalizeKnownSafeBoundsAtTheEndOfBlock(builder.CurrentBlock().ID())
