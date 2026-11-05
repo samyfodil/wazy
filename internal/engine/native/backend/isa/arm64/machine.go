@@ -15,9 +15,13 @@ import (
 type (
 	// machine implements backend.Machine.
 	machine struct {
-		compiler   backend.Compiler
-		currentABI *backend.FunctionABI
-		instrPool  nativeapi.Pool[instruction]
+		compiler backend.Compiler
+		// paramBlocks is the block each block parameter belongs to, indexed by value ID, and zextVisiting
+		// zeroExtendedParam's scratch.
+		paramBlocks  []ssa.BasicBlock
+		zextVisiting []ssa.Value
+		currentABI   *backend.FunctionABI
+		instrPool    nativeapi.Pool[instruction]
 		// labelPositionPool is the pool of labelPosition. The id is the label where
 		// if the label is less than the maxSSABlockID, it's the ssa.BasicBlockID.
 		labelPositionPool nativeapi.IDedPool[labelPosition]
@@ -413,6 +417,18 @@ func (m *machine) getOrCreateTrapIsland(code nativeapi.ExitCode) label {
 func (m *machine) StartLoweringFunction(maxBlockID ssa.BasicBlockID) {
 	m.maxSSABlockID = label(maxBlockID)
 	m.nextLabel = label(maxBlockID) + 1
+	clear(m.paramBlocks)
+	m.paramBlocks = m.paramBlocks[:0]
+	builder := m.compiler.SSABuilder()
+	for blk := builder.BlockIteratorBegin(); blk != nil; blk = builder.BlockIteratorNext() {
+		for i := range blk.Params() {
+			id := int(blk.Param(i).ID())
+			for len(m.paramBlocks) <= id {
+				m.paramBlocks = append(m.paramBlocks, nil)
+			}
+			m.paramBlocks[id] = blk
+		}
+	}
 }
 
 // SetCurrentABI implements backend.Machine SetCurrentABI.

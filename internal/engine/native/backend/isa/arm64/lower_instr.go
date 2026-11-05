@@ -2241,10 +2241,87 @@ func (m *machine) aliasZeroExtended32(blk ssa.BasicBlock) {
 		if from, _ := cur.ExtendFromToBits(); from != 32 {
 			continue
 		}
-		if arg := cur.Arg(); zeroExtends32(builder.InstructionOfValue(arg)) {
+		arg := cur.Arg()
+		def := builder.InstructionOfValue(arg)
+		if zeroExtends32(def) || def == nil && m.zeroExtendedParam(builder, arg) {
 			m.compiler.AliasVReg(cur.Return(), arg)
 		}
 	}
+}
+
+// zeroExtendedParam reports whether v, a block parameter, is zero-extended where it is: every edge into
+// its block passes a value that zeroExtends32, an i32 constant, which is built with a W write, or a
+// parameter that is so too. Copies between parameters keep all 64 bits, so a cycle of them is
+// zero-extended where everything coming into it is. The entry block's parameters, the function's, are
+// not known to be.
+func (m *machine) zeroExtendedParam(builder ssa.Builder, v ssa.Value) bool {
+	if v.Type() != ssa.TypeI32 {
+		return false
+	}
+	m.zextVisiting = m.zextVisiting[:0]
+	return m.zeroExtendedParamIn(builder, v)
+}
+
+func (m *machine) zeroExtendedParamIn(builder ssa.Builder, v ssa.Value) bool {
+	for _, p := range m.zextVisiting {
+		if p == v {
+			return true
+		}
+	}
+	blk := m.paramBlockOf(v)
+	if blk == nil || blk.EntryBlock() || len(m.zextVisiting) == zeroExtendedParamDepth {
+		return false
+	}
+	idx := -1
+	for i := range blk.Params() {
+		if blk.Param(i) == v {
+			idx = i
+		}
+	}
+	m.zextVisiting = append(m.zextVisiting, v)
+	for i := range blk.Preds() {
+		found := false
+		for br := blk.Pred(i).Tail(); br != nil; br = br.Prev() {
+			op := br.Opcode()
+			if op != ssa.OpcodeJump && op != ssa.OpcodeBrz && op != ssa.OpcodeBrnz {
+				break
+			}
+			_, args, target := br.BranchData()
+			if target != blk.ID() {
+				continue
+			}
+			if idx < 0 || idx >= len(args) {
+				return false
+			}
+			found = true
+			a := args[idx]
+			def := builder.InstructionOfValue(a)
+			switch {
+			case def == nil:
+				if !m.zeroExtendedParamIn(builder, a) {
+					return false
+				}
+			case zeroExtends32(def), def.Opcode() == ssa.OpcodeIconst:
+			default:
+				return false
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// zeroExtendedParamDepth is how many parameters deep zeroExtendedParam looks.
+const zeroExtendedParamDepth = 8
+
+// paramBlockOf returns the block v is a parameter of, or nil.
+func (m *machine) paramBlockOf(v ssa.Value) ssa.BasicBlock {
+	if id := int(v.ID()); id < len(m.paramBlocks) {
+		return m.paramBlocks[id]
+	}
+	return nil
 }
 
 func (m *machine) lowerExtend(arg, ret ssa.Value, from, to byte, signed bool) {
