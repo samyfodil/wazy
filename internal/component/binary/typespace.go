@@ -438,7 +438,15 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 				// attempt that fails must not grow the table it exists to
 				// keep bounded.
 				mark := len(c.extraTypes)
-				global, gerr := c.globalizeLocalRef(instDesc.Types, exp, map[uint32]uint32{})
+				// A slot the instance type aliases out of this component (`alias outer 1 N`,
+				// how wit-component encodes `use iface.{T}`) is this component's type N.
+				memo := make(map[uint32]uint32, len(instDesc.Outer))
+				for local, o := range instDesc.Outer {
+					if o.Count == 1 {
+						memo[local] = o.Index
+					}
+				}
+				global, gerr := c.globalizeLocalRef(instDesc.Types, exp, memo)
 				if gerr != nil {
 					c.extraTypes = c.extraTypes[:mark]
 					return nil, fmt.Errorf("type index %d: alias exports %q from instance %d: %w", idx, al.Name, al.InstanceIdx, gerr)
