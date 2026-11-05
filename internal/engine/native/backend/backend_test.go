@@ -1474,107 +1474,69 @@ L0 (SSA Block: blk0):
 L0 (SSA Block: blk0):
 	mov x130?, x2
 	mov v131?.8b, v0.8b
-	movz w289?, #0x13, lsl 0
-	madd w169?, w130?, w289?, wzr
-	movz w288?, #0x14, lsl 0
-	madd w172?, w130?, w288?, w169?
-	movz w287?, #0x12, lsl 0
-	madd w173?, w130?, w287?, w172?
-	movz w286?, #0x11, lsl 0
-	madd w174?, w130?, w286?, w173?
-	orr w285?, wzr, #0x10
-	madd w175?, w130?, w285?, w174?
-	orr w284?, wzr, #0xf
-	madd w176?, w130?, w284?, w175?
-	orr w283?, wzr, #0xe
-	madd w177?, w130?, w283?, w176?
-	movz w282?, #0xd, lsl 0
-	madd w178?, w130?, w282?, w177?
-	orr w281?, wzr, #0xc
-	madd w179?, w130?, w281?, w178?
-	movz w280?, #0xb, lsl 0
-	madd w180?, w130?, w280?, w179?
-	movz w279?, #0xa, lsl 0
-	madd w181?, w130?, w279?, w180?
-	movz w278?, #0x9, lsl 0
-	madd w182?, w130?, w278?, w181?
-	orr w277?, wzr, #0x8
-	madd w183?, w130?, w277?, w182?
-	orr w276?, wzr, #0x7
-	madd w184?, w130?, w276?, w183?
-	orr w275?, wzr, #0x6
-	madd w185?, w130?, w275?, w184?
-	movz w274?, #0x5, lsl 0
-	madd w186?, w130?, w274?, w185?
-	orr w273?, wzr, #0x4
-	madd w187?, w130?, w273?, w186?
-	orr w272?, wzr, #0x3
-	madd w188?, w130?, w272?, w187?
-	orr w271?, wzr, #0x2
-	madd w189?, w130?, w271?, w188?
-	orr w270?, wzr, #0x1
-	madd w190?, w130?, w270?, w189?
-	fmov s269?, #1
-	fmul s192?, s131?, s269?
-	fmov s268?, #2
-	fmul s194?, s131?, s268?
-	fmov s267?, #3
-	fmul s196?, s131?, s267?
-	fmov s266?, #4
-	fmul s198?, s131?, s266?
-	fmov s265?, #5
-	fmul s200?, s131?, s265?
-	fmov s264?, #6
-	fmul s202?, s131?, s264?
-	fmov s263?, #7
-	fmul s204?, s131?, s263?
-	fmov s262?, #8
-	fmul s206?, s131?, s262?
-	fmov s261?, #9
-	fmul s208?, s131?, s261?
-	fmov s260?, #10
-	fmul s210?, s131?, s260?
-	fmov s259?, #11
-	fmul s212?, s131?, s259?
-	fmov s258?, #12
-	fmul s214?, s131?, s258?
-	fmov s257?, #13
-	fmul s216?, s131?, s257?
-	fmov s256?, #14
-	fmul s218?, s131?, s256?
-	fmov s255?, #15
-	fmul s220?, s131?, s255?
-	fmov s254?, #16
-	fmul s222?, s131?, s254?
-	fmov s253?, #17
-	fmul s224?, s131?, s253?
-	fmov s252?, #18
-	fmul s226?, s131?, s252?
-	fmov s251?, #19
-	fmul s228?, s131?, s251?
-	fmov s250?, #20
-	fmul s230?, s131?, s250?
-	fadd s231?, s228?, s230?
-	fadd s232?, s226?, s231?
-	fadd s233?, s224?, s232?
-	fadd s234?, s222?, s233?
-	fadd s235?, s220?, s234?
-	fadd s236?, s218?, s235?
-	fadd s237?, s216?, s236?
-	fadd s238?, s214?, s237?
-	fadd s239?, s212?, s238?
-	fadd s240?, s210?, s239?
-	fadd s241?, s208?, s240?
-	fadd s242?, s206?, s241?
-	fadd s243?, s204?, s242?
-	fadd s244?, s202?, s243?
-	fadd s245?, s200?, s244?
-	fadd s246?, s198?, s245?
-	fadd s247?, s196?, s246?
-	fadd s248?, s194?, s247?
-	fadd s249?, s192?, s248?
-	mov v0.8b, v249?.8b
-	mov x0, x190?
+	movz w213?, #0xd2, lsl 0
+	madd w133?, w130?, w213?, wzr
+	fmov s212?, #1
+	fmul s135?, s131?, s212?
+	fmov s211?, #2
+	fmul s137?, s131?, s211?
+	fmov s210?, #3
+	fmul s139?, s131?, s210?
+	fmov s209?, #4
+	fmul s141?, s131?, s209?
+	fmov s208?, #5
+	fmul s143?, s131?, s208?
+	fmov s207?, #6
+	fmul s145?, s131?, s207?
+	fmov s206?, #7
+	fmul s147?, s131?, s206?
+	fmov s205?, #8
+	fmul s149?, s131?, s205?
+	fmov s204?, #9
+	fmul s151?, s131?, s204?
+	fmov s203?, #10
+	fmul s153?, s131?, s203?
+	fmov s202?, #11
+	fmul s155?, s131?, s202?
+	fmov s201?, #12
+	fmul s157?, s131?, s201?
+	fmov s200?, #13
+	fmul s159?, s131?, s200?
+	fmov s199?, #14
+	fmul s161?, s131?, s199?
+	fmov s198?, #15
+	fmul s163?, s131?, s198?
+	fmov s197?, #16
+	fmul s165?, s131?, s197?
+	fmov s196?, #17
+	fmul s167?, s131?, s196?
+	fmov s195?, #18
+	fmul s169?, s131?, s195?
+	fmov s194?, #19
+	fmul s171?, s131?, s194?
+	fmov s193?, #20
+	fmul s173?, s131?, s193?
+	fadd s174?, s171?, s173?
+	fadd s175?, s169?, s174?
+	fadd s176?, s167?, s175?
+	fadd s177?, s165?, s176?
+	fadd s178?, s163?, s177?
+	fadd s179?, s161?, s178?
+	fadd s180?, s159?, s179?
+	fadd s181?, s157?, s180?
+	fadd s182?, s155?, s181?
+	fadd s183?, s153?, s182?
+	fadd s184?, s151?, s183?
+	fadd s185?, s149?, s184?
+	fadd s186?, s147?, s185?
+	fadd s187?, s145?, s186?
+	fadd s188?, s143?, s187?
+	fadd s189?, s141?, s188?
+	fadd s190?, s139?, s189?
+	fadd s191?, s137?, s190?
+	fadd s192?, s135?, s191?
+	mov v0.8b, v192?.8b
+	mov x0, x133?
 	ret
 `,
 			afterFinalizeARM64: `
@@ -1588,46 +1550,8 @@ L0 (SSA Block: blk0):
 	stp q26, q27, [sp, #0x80]
 	movz x27, #0xa0, lsl 0
 	str x27, [sp, #-0x10]!
-	movz w8, #0x13, lsl 0
-	madd w8, w2, w8, wzr
-	movz w9, #0x14, lsl 0
-	madd w8, w2, w9, w8
-	movz w9, #0x12, lsl 0
-	madd w8, w2, w9, w8
-	movz w9, #0x11, lsl 0
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0x10
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0xf
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0xe
-	madd w8, w2, w9, w8
-	movz w9, #0xd, lsl 0
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0xc
-	madd w8, w2, w9, w8
-	movz w9, #0xb, lsl 0
-	madd w8, w2, w9, w8
-	movz w9, #0xa, lsl 0
-	madd w8, w2, w9, w8
-	movz w9, #0x9, lsl 0
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0x8
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0x7
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0x6
-	madd w8, w2, w9, w8
-	movz w9, #0x5, lsl 0
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0x4
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0x3
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0x2
-	madd w8, w2, w9, w8
-	orr w9, wzr, #0x1
-	madd w0, w2, w9, w8
+	movz w8, #0xd2, lsl 0
+	madd w0, w2, w8, wzr
 	fmov s8, #1
 	fmul s8, s0, s8
 	fmov s9, #2

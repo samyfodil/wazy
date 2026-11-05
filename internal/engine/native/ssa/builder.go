@@ -238,6 +238,13 @@ type builder struct {
 	loopTestScratch                   []loopTest
 	loopBodyScratch, loopAvoidScratch []*basicBlock
 
+	// imuls counts the multiplications the function was built with. See passLinearFormOpt.
+	imuls int
+	// linearMark, linearStamp, linearBlockStamp and linearTerms are passLinearFormOpt's.
+	linearMark                    []linearMark
+	linearStamp, linearBlockStamp int32
+	linearTerms                   []linearTerm
+
 	// dominators stores the immediate dominator of each BasicBlock.
 	// The index is blockID of the BasicBlock.
 	dominators []*basicBlock
@@ -359,6 +366,7 @@ func (b *builder) Init(s *Signature) {
 	clear(b.vecPrograms)
 	b.vecPrograms = b.vecPrograms[:0]
 	b.nextVariable = 0
+	b.imuls = 0
 	b.currentSignature = s
 	b.zeros = [typeEnd]Value{ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid}
 	resetBasicBlock(b.returnBlk)
@@ -485,6 +493,9 @@ func (b *builder) MoveToCurrentBlock(instr *Instruction, from BasicBlock) {
 // InsertInstruction implements Builder.InsertInstruction.
 func (b *builder) InsertInstruction(instr *Instruction) {
 	b.currentBB.insertInstruction(b, instr)
+	if instr.opcode == OpcodeImul {
+		b.imuls++
+	}
 
 	if l := b.currentSourceOffset; l.Valid() {
 		// Emit the source offset info only when the instruction has side effect because

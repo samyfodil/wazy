@@ -48,6 +48,7 @@ func (b *builder) runPreBlockLayoutPasses() {
 
 	// Hoisting has to happen before the dead code pass, which stamps every
 	// instruction with the group id the backend reads.
+	passLinearFormOpt(b)
 	passLoopInvariantCodeMotionOpt(b)
 
 	passCloneSharedComparesOpt(b)
