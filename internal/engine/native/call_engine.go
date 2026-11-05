@@ -258,7 +258,7 @@ func alignedStackTop(s []byte) uintptr {
 // (10240) and only ever grows, so base+MARGIN < len(stack) always holds. See
 // the invariant proof on backend.StackBoundsCheckMarginBytes.
 func (c *callEngine) stackCheckLimitPtr(base int) *byte {
-	return &c.stack[base+backend.StackBoundsCheckMarginBytes]
+	return &c.stack[base+backend.StackBoundsCheckMarginBytes+backend.StackCheckBiasBytes]
 }
 
 // stackReleasesBeforeKeep is how many calls a callEngine gives its stack back to the pool for before it

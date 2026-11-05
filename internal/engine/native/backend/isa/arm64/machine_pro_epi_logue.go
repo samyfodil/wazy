@@ -3,6 +3,7 @@ package arm64
 import (
 	"fmt"
 
+	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 )
@@ -642,14 +643,16 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 		panic("BUG")
 	}
 
-	if immm12op, ok := asImm12Operand(uint64(requiredStackSize)); ok {
-		// sub tmp, sp, #requiredStackSize
+	// The stored limit is raised by backend.StackCheckBiasBytes, so only the excess is checked for.
+	adjust := max(requiredStackSize-backend.StackCheckBiasBytes, 0)
+	if immm12op, ok := asImm12Operand(uint64(adjust)); ok {
+		// sub tmp, sp, #adjust
 		sub := m.allocateInstr()
 		sub.asALU(aluOpSub, tmpRegVReg, operandNR(spVReg), immm12op, true)
 		cur = linkInstr(cur, sub)
 	} else {
-		// This case, we first load the requiredStackSize into the temporary register,
-		cur = m.lowerConstantI64AndInsert(cur, tmpRegVReg, requiredStackSize)
+		// This case, we first load the adjustment into the temporary register,
+		cur = m.lowerConstantI64AndInsert(cur, tmpRegVReg, adjust)
 		// Then subtract it.
 		sub := m.allocateInstr()
 		sub.asALU(aluOpSub, tmpRegVReg, operandNR(spVReg), operandNR(tmpRegVReg), true)

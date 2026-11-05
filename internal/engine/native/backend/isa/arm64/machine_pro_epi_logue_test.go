@@ -268,7 +268,7 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 		{
 			requiredStackSize: 0xfff_0,
 			exp: `
-	movz x27, #0xfff0, lsl 0
+	movz x27, #0xfef0, lsl 0
 	sub x27, sp, x27
 	ldr x11, [x0, #0x28]
 	subs xzr, x27, x11
@@ -282,7 +282,7 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 		{
 			requiredStackSize: 0x10,
 			exp: `
-	sub x27, sp, #0x10
+	sub x27, sp, #0x0
 	ldr x11, [x0, #0x28]
 	subs xzr, x27, x11
 	b.ge #0x14
