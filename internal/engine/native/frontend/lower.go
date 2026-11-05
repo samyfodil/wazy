@@ -5310,6 +5310,23 @@ func (c *Compiler) memOpSetup64(memIndex wasm.Index, baseAddr ssa.Value, constOf
 func (c *Compiler) atomicMemOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
 	builder := c.ssaBuilder
 
+	// An access both misaligned and out of bounds traps as misaligned, as the interpreter has it: the
+	// effective address's alignment is checked first, which is the host address's, the memory's base
+	// being page aligned. An effective address past 2^64 is out of bounds before anything.
+	ea := baseAddr
+	if !c.memoryIsIndex64(memIndex) {
+		ea = builder.AllocateInstruction().AsUExtend(baseAddr, 32, 64).Insert(builder).Return()
+	}
+	if constOffset != 0 {
+		k := builder.AllocateInstruction().AsIconst64(constOffset).Insert(builder).Return()
+		ea = builder.AllocateInstruction().AsIadd(ea, k).Insert(builder).Return()
+		if c.memoryIsIndex64(memIndex) {
+			wrapped := builder.AllocateInstruction().AsIcmp(ea, baseAddr, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
+			builder.AllocateInstruction().AsExitIfTrueWithCode(c.execCtxPtrValue, wrapped, nativeapi.ExitCodeMemoryOutOfBounds).Insert(builder)
+		}
+	}
+	c.memAlignmentCheck(ea, operationSizeInBytes)
+
 	addrWithoutOffset := c.memOpSetup(memIndex, baseAddr, constOffset, operationSizeInBytes)
 	var addr ssa.Value
 	// memOpSetup64 has already folded the offset into the address it returns,
@@ -5320,9 +5337,6 @@ func (c *Compiler) atomicMemOpSetup(memIndex wasm.Index, baseAddr ssa.Value, con
 		offset := builder.AllocateInstruction().AsIconst64(constOffset).Insert(builder).Return()
 		addr = builder.AllocateInstruction().AsIadd(addrWithoutOffset, offset).Insert(builder).Return()
 	}
-
-	c.memAlignmentCheck(addr, operationSizeInBytes)
-
 	return addr
 }
 

@@ -2183,38 +2183,33 @@ L0 (SSA Block: blk0):
 	lock xadd.b %rcx, (%rdx)
 	movzx.bl %rcx, %rcx
 	movabsq $8, %rbx
-	lea (%rdx,%rbx,1), %rbx
 	testq $1, %rbx
 	jnz L2
-	lock xadd.w %rdi, (%rbx)
-	movzx.wl %rdi, %rdi
 	movq %rdi, %rbx
+	lock xadd.w %rbx, 8(%rdx)
+	movzx.wl %rbx, %rbx
 	movabsq $16, %rdi
-	lea (%rdx,%rdi,1), %rdi
 	testq $3, %rdi
 	jnz L2
-	lock xadd.l %rsi, (%rdi)
+	lock xadd.l %rsi, 16(%rdx)
 	movq %r8, %rdi
 	lock xadd.b %rdi, 24(%rdx)
 	movzx.bq %rdi, %rdi
 	movabsq $32, %r8
-	lea (%rdx,%r8,1), %r8
 	testq $1, %r8
 	jnz L2
-	lock xadd.w %r9, (%r8)
+	lock xadd.w %r9, 32(%rdx)
 	movzx.wq %r9, %r9
 	movabsq $40, %r8
-	lea (%rdx,%r8,1), %r8
 	testq $3, %r8
 	jnz L2
-	lock xadd.l %r10, (%r8)
-	movzx.lq %r10, %r10
 	movq %r10, %r8
+	lock xadd.l %r8, 40(%rdx)
+	movzx.lq %r8, %r8
 	movabsq $48, %r10
-	lea (%rdx,%r10,1), %rdx
-	testq $7, %rdx
+	testq $7, %r10
 	jnz L2
-	lock xadd.q %r11, (%rdx)
+	lock xadd.q %r11, 48(%rdx)
 	movl %ecx, %eax
 	movl %esi, %ecx
 	movq %r9, %rsi
@@ -2250,32 +2245,42 @@ L0 (SSA Block: blk0):
 	add x10, x9, w10 UXTW
 	ldaddalb w2, w0, x10
 	orr w10, wzr, #0x8
-	add x10, x9, w10 UXTW
+	uxtw x10, w10
 	ands xzr, x10, #0x1
-	b.ne #0x74, (L2)
+	b.ne #0x9c, (L2)
+	orr w10, wzr, #0x8
+	add x10, x9, w10 UXTW
 	ldaddalh w3, w1, x10
 	orr w10, wzr, #0x10
-	add x10, x9, w10 UXTW
+	uxtw x10, w10
 	ands xzr, x10, #0x3
-	b.ne #0x60, (L2)
+	b.ne #0x80, (L2)
+	orr w10, wzr, #0x10
+	add x10, x9, w10 UXTW
 	ldaddal w4, w2, x10
 	orr w10, wzr, #0x18
 	add x10, x9, w10 UXTW
 	ldaddalb w5, w3, x10
 	orr w10, wzr, #0x20
-	add x10, x9, w10 UXTW
+	uxtw x10, w10
 	ands xzr, x10, #0x1
-	b.ne #0x40, (L2)
+	b.ne #0x58, (L2)
+	orr w10, wzr, #0x20
+	add x10, x9, w10 UXTW
 	ldaddalh w6, w4, x10
 	movz w10, #0x28, lsl 0
-	add x10, x9, w10 UXTW
+	uxtw x10, w10
 	ands xzr, x10, #0x3
-	b.ne #0x2c, (L2)
+	b.ne #0x3c, (L2)
+	movz w10, #0x28, lsl 0
+	add x10, x9, w10 UXTW
 	ldaddal w7, w5, x10
 	orr w10, wzr, #0x30
+	uxtw x10, w10
+	ands xzr, x10, #0x7
+	b.ne #0x20, (L2)
+	orr w10, wzr, #0x30
 	add x9, x9, w10 UXTW
-	ands xzr, x9, #0x7
-	b.ne #0x18, (L2)
 	ldaddal x8, x6, x9
 	add sp, sp, #0x20
 	ldr x30, [sp], #0x10
