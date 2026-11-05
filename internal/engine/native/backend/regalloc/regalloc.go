@@ -83,6 +83,13 @@ type (
 		// forest, and which loop it last found the block in, numbered from one.
 		forestParent []int32
 		inLoop       []int32
+		// loopBlocks lists the blocks of every loop, the range of each header's in loopBlocksOf, so that
+		// loopClobbers, indexed by header, can gather the fixed registers anything in the loop overwrites
+		// from blockClobbers, indexed by block. A value live across the loop is better elsewhere.
+		loopBlocks    []int32
+		loopBlocksOf  map[int32][2]int32
+		blockClobbers []RegSet
+		loopClobbers  map[int32]RegSet
 		// firstUseBuf is parallel to liveInsBuf: where a live-in is first used in its block, from the
 		// block's start, or -1. distBuf holds the blocks' next-use distances, and stamp numbers the passes
 		// that use vrState scratch. See computeNextUseDistances.
@@ -494,6 +501,7 @@ func (b *blockState[I, B, F]) dump(a *RegisterInfo) {
 func (a *Allocator[I, B, F]) DoAllocation(f F) {
 	a.computeLoopDepths(f)
 	a.livenessAnalysis(f)
+	a.computeLoopClobbers()
 	a.computeNextUseDistances(f)
 	a.alloc(f)
 	a.determineCalleeSavedRealRegs(f)
@@ -583,6 +591,7 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 		}
 
 		var n int32
+		var clobbers RegSet
 		for instr := blk.InstrRevIteratorBegin(); instr != nilInstr; instr = blk.InstrRevIteratorNext() {
 			n++
 			if instr.IsCopy() {
@@ -591,7 +600,13 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 
 			var use, def VReg
 			var defIsPhi bool
+			if instr.IsCall() || instr.IsIndirectCall() {
+				clobbers |= a.regInfo.CallerSavedRegisters
+			}
 			for _, def = range instr.Defs(&a.vs) {
+				if def.IsRealReg() {
+					clobbers = clobbers.add(def.RealReg())
+				}
 				if !def.IsRealReg() {
 					st := s.getOrAllocateVRegState(def)
 					defIsPhi = st.isPhi
@@ -623,6 +638,10 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 		}
 
 		info.instrCount = n
+		for int(blkID) >= len(a.blockClobbers) {
+			a.blockClobbers = append(a.blockClobbers, 0)
+		}
+		a.blockClobbers[blkID] = clobbers
 		info.liveInsBegin = int32(len(a.liveInsBuf))
 		for _, st := range a.ss {
 			// We use .spilled field to store the flag.
@@ -802,7 +821,7 @@ func (a *Allocator[I, B, F]) finalizeStartReg(f F, blk B) {
 		}
 		s.resetAt(predState)
 		if blk.LoopHeader() {
-			a.preloadLoopLiveIns(f, f.Pred(blk, currentBlkState.startFromPredIndex), currentBlkState, a.depthOf(bID))
+			a.preloadLoopLiveIns(f, f.Pred(blk, currentBlkState.startFromPredIndex), currentBlkState, a.depthOf(bID), a.loopClobbers[int32(bID)])
 		}
 	}
 
@@ -1083,11 +1102,20 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 					if home := homeOf(vState); home != RealRegInvalid && !s.regsInUse.has(home) {
 						r = home
 					}
+					// A loop's phi, live across the whole loop, keeps clear of the registers the loop
+					// overwrites at fixed places, a division's or a call's say, while another is free.
+					var avoid RegSet
+					if vState.isPhi && vState.defBlk.LoopHeader() {
+						avoid = a.loopClobbers[int32(vState.defBlk.ID())]
+					}
 					if r == RealRegInvalid && instr.IsCopy() {
 						copySrc := instr.Uses(&a.vs)[0].RealReg()
-						if a.allocatableSet.has(copySrc) && !s.regsInUse.has(copySrc) {
+						if a.allocatableSet.has(copySrc) && !s.regsInUse.has(copySrc) && !avoid.has(copySrc) {
 							r = copySrc
 						}
+					}
+					if r == RealRegInvalid && avoid != 0 {
+						r = s.findAllocatable(a.regInfo.AllocatableRegisters[def.RegType()], avoid)
 					}
 					if r == RealRegInvalid {
 						typ := def.RegType()
@@ -1475,7 +1503,7 @@ func (a *Allocator[I, B, F]) computeNextUses(bID int32) {
 // first and the back edge then reloads on every iteration. A value the loop does not use soon is what an
 // eviction inside the loop picks first, so a preload costs at most the reload it adds. depth is the
 // header's loop depth.
-func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState[I, B, F], depth uint8) {
+func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState[I, B, F], depth uint8, clobbered RegSet) {
 	s := &a.state
 	for _, vs := range a.liveIns(header) {
 		if vs.isPhi || vs.v.IsRealReg() || (vs.r != RealRegInvalid && s.regsInUse.get(vs.r) == vs) {
@@ -1485,7 +1513,10 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry B, header *blockState
 			continue // Nothing in the loop uses it.
 		}
 		regs := a.regInfo.AllocatableRegisters[vs.v.RegType()]
-		r := s.findAllocatable(regs, 0)
+		r := s.findAllocatable(regs, clobbered)
+		if r == RealRegInvalid {
+			r = s.findAllocatable(regs, 0)
+		}
 		if r == RealRegInvalid {
 			for _, cand := range regs {
 				occ := s.regsInUse.get(cand)
@@ -1688,6 +1719,11 @@ func (a *Allocator[I, B, F]) offerDistance(st *vrState[I, B, F], d int32) {
 // only after an inner loop is not.
 func (a *Allocator[I, B, F]) computeLoopDepths(f F) {
 	var nilBlk B
+	a.loopBlocks = a.loopBlocks[:0]
+	if a.loopBlocksOf == nil {
+		a.loopBlocksOf, a.loopClobbers = map[int32][2]int32{}, map[int32]RegSet{}
+	}
+	clear(a.loopBlocksOf)
 	n := 0
 	for blk := f.ReversePostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.ReversePostOrderBlockIteratorNext() {
 		n = max(n, int(blk.ID())+1)
@@ -1735,6 +1771,8 @@ func (a *Allocator[I, B, F]) computeLoopDepths(f F) {
 		loop++
 		inLoop[h] = loop
 		depths[h] = min(depths[h]+1, 255)
+		begin := int32(len(a.loopBlocks))
+		a.loopBlocks = append(a.loopBlocks, h)
 		for i := 0; i < blk.Preds(); i++ {
 			if p := f.Pred(blk, i); p.ID() != h && dominates(h, p.ID()) {
 				blks = append(blks, p)
@@ -1748,12 +1786,28 @@ func (a *Allocator[I, B, F]) computeLoopDepths(f F) {
 			}
 			inLoop[b.ID()] = loop
 			depths[b.ID()] = min(depths[b.ID()]+1, 255)
+			a.loopBlocks = append(a.loopBlocks, b.ID())
 			for i := 0; i < b.Preds(); i++ {
 				blks = append(blks, f.Pred(b, i))
 			}
 		}
+		a.loopBlocksOf[h] = [2]int32{begin, int32(len(a.loopBlocks))}
 	}
 	a.loopDepth, a.forestParent, a.inLoop, a.blks = depths, parent, inLoop, blks
+}
+
+// computeLoopClobbers gathers, for each loop, the registers the blocks in it overwrite at fixed places.
+func (a *Allocator[I, B, F]) computeLoopClobbers() {
+	clear(a.loopClobbers)
+	for h, r := range a.loopBlocksOf {
+		var set RegSet
+		for _, b := range a.loopBlocks[r[0]:r[1]] {
+			if int(b) < len(a.blockClobbers) {
+				set |= a.blockClobbers[b]
+			}
+		}
+		a.loopClobbers[h] = set
+	}
 }
 
 // depthOf returns the loop depth of the block with the given ID, 0 for one computeLoopDepths did not see.
