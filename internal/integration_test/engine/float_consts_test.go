@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -16,6 +17,9 @@ var floatConstsPressureWasm []byte
 // TestFloatConstsUnderPressure runs a loop with more float constants than vector registers against the
 // interpreter: the compiler hoists them out of the loop and, short of registers, rematerializes them.
 func TestFloatConstsUnderPressure(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip()
+	}
 	ctx := context.Background()
 	var got [2][]uint64
 	for i, cfg := range []wazy.RuntimeConfig{wazy.NewRuntimeConfigCompiler(), wazy.NewRuntimeConfigInterpreter()} {

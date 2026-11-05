@@ -7,6 +7,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -16,6 +17,9 @@ var narrowResultsWasm []byte
 // TestNarrowResults checks that i32 and f32 results come back zero-extended, as api.EncodeI32 and
 // api.EncodeF32 encode them, even in a slot that held a parameter with its upper half set.
 func TestNarrowResults(t *testing.T) {
+	if !platform.CompilerSupported() {
+		t.Skip()
+	}
 	ctx := context.Background()
 	for _, cfg := range []wazy.RuntimeConfig{wazy.NewRuntimeConfigCompiler(), wazy.NewRuntimeConfigInterpreter()} {
 		r := wazy.NewRuntimeWithConfig(ctx, cfg)
