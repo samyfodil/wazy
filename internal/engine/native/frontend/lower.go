@@ -5871,17 +5871,17 @@ func (c *Compiler) getMemoryBaseValue(memIndex wasm.Index, forceReload bool) ssa
 	var ret ssa.Value
 	if memIndex < c.m.ImportMemoryCount {
 		loadMemInstPtr := builder.AllocateInstruction()
-		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
+		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64).MarkContextLoad()
 		builder.InsertInstruction(loadMemInstPtr)
 		memInstPtr := loadMemInstPtr.Return()
 
 		loadBufPtr := builder.AllocateInstruction()
-		loadBufPtr.AsLoad(memInstPtr, memoryInstanceBufOffset, ssa.TypeI64)
+		loadBufPtr.AsLoad(memInstPtr, memoryInstanceBufOffset, ssa.TypeI64).MarkContextLoad()
 		builder.InsertInstruction(loadBufPtr)
 		ret = loadBufPtr.Return()
 	} else {
 		load := builder.AllocateInstruction()
-		load.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
+		load.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64).MarkContextLoad()
 		builder.InsertInstruction(load)
 		ret = load.Return()
 	}
@@ -5905,7 +5905,7 @@ func (c *Compiler) getMemoryLenValue(memIndex wasm.Index, forceReload bool) ssa.
 	var ret ssa.Value
 	if memIndex < c.m.ImportMemoryCount {
 		loadMemInstPtr := builder.AllocateInstruction()
-		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
+		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64).MarkContextLoad()
 		builder.InsertInstruction(loadMemInstPtr)
 		memInstPtr := loadMemInstPtr.Return()
 
@@ -5915,7 +5915,7 @@ func (c *Compiler) getMemoryLenValue(memIndex wasm.Index, forceReload bool) ssa.
 			addr := builder.AllocateInstruction().AsIadd(memInstPtr, sizeOffset).Insert(builder).Return()
 			loadBufSizePtr.AsAtomicLoad(addr, 8, ssa.TypeI64)
 		} else {
-			loadBufSizePtr.AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI64)
+			loadBufSizePtr.AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI64).MarkContextLoad()
 		}
 		builder.InsertInstruction(loadBufSizePtr)
 
@@ -5931,7 +5931,7 @@ func (c *Compiler) getMemoryLenValue(memIndex wasm.Index, forceReload bool) ssa.
 			// 65536-page (the legal maximum) memory has a byte length of
 			// exactly 2^32, which a 32-bit load truncates to zero, making
 			// every access on such a memory incorrectly trap as out-of-bounds.
-			load.AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI64)
+			load.AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI64).MarkContextLoad()
 		}
 		builder.InsertInstruction(load)
 		ret = load.Return()

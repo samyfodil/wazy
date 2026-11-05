@@ -39,6 +39,7 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 		return
 	}
 	defBlk := b.licmDefBlk()
+	clobbers := b.licmContextClobbers(loopOf)
 
 	for _, blk := range b.reversePostOrderedBasicBlocks {
 		if blk.invalid || loopOf[blk.id] == nil {
@@ -46,8 +47,17 @@ func passLoopInvariantCodeMotionOpt(b *builder) {
 		}
 		for cur := blk.rootInstr; cur != nil; {
 			next := cur.next
-			if target := b.licmTarget(cur, loopOf[blk.id], loopOf, defBlk); target != nil {
+			if target := b.licmTarget(cur, loopOf[blk.id], loopOf, defBlk, clobbers); target != nil {
 				blk.removeInstruction(cur)
+				b.resolveArgumentAlias(cur)
+				if same := target.contextLoadLike(cur); same != nil {
+					// Every block of a loop reloads a memory's base, since none of them is on a linear
+					// path from the one before the loop; one load before the loop serves them all.
+					b.alias(cur.rValue, same.rValue)
+					defBlk[cur.rValue.ID()] = target
+					cur = next
+					continue
+				}
 				target.insertBeforeTerminator(cur)
 				// Later instructions in this block may now be invariant too,
 				// since one of their operands just moved out of the loop.
@@ -182,13 +192,13 @@ func (b *builder) licmDefBlk() []*basicBlock {
 // alone. It walks outwards through enclosing loops for as long as instr stays
 // invariant, so an instruction in a nested loop lands outside the outermost
 // loop it does not depend on rather than one level up.
-func (b *builder) licmTarget(instr *Instruction, header *basicBlock, loopOf, defBlk []*basicBlock) *basicBlock {
-	if !hoistableFromLoop(instr) {
+func (b *builder) licmTarget(instr *Instruction, header *basicBlock, loopOf, defBlk []*basicBlock, clobbers []bool) *basicBlock {
+	if !instr.contextLoad && !hoistableFromLoop(instr) {
 		return nil
 	}
 	var target *basicBlock
 	for header != nil {
-		if !b.invariantIn(instr, header, defBlk) {
+		if !b.invariantIn(instr, header, defBlk) || instr.contextLoad && clobbers[header.id] {
 			break
 		}
 		preheader := b.dominators[header.id]
@@ -277,4 +287,65 @@ func hoistableFromLoop(instr *Instruction) bool {
 	}
 	first, _ := instr.Returns()
 	return first.Valid()
+}
+
+// licmContextClobbers reports, per loop header, whether its loop may change what a context load
+// (see Instruction.MarkContextLoad) reads: it makes a call, which can grow a memory or run any code,
+// or it stores through the module context pointer, as memory.grow's native path and global.set do.
+// A loop inherits the clobbers of the loops nested in it.
+func (b *builder) licmContextClobbers(loopOf []*basicBlock) []bool {
+	clobbers := b.licmClobbers
+	if n := int(b.BlockIDMax()); cap(clobbers) < n {
+		clobbers = make([]bool, n)
+	} else {
+		clobbers = clobbers[:n]
+		clear(clobbers)
+	}
+	b.licmClobbers = clobbers
+	moduleCtx := ValueInvalid
+	if params := b.entryBlk().params.View(); len(params) > 1 {
+		moduleCtx = params[1]
+	}
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		header := loopOf[blk.id]
+		if blk.invalid || header == nil || clobbers[header.id] {
+			continue
+		}
+		for cur := blk.rootInstr; cur != nil; cur = cur.next {
+			if !clobbersContext(cur, moduleCtx) {
+				continue
+			}
+			for h := header; h != nil && !clobbers[h.id]; {
+				clobbers[h.id] = true
+				preheader := b.dominators[h.id]
+				if preheader == nil || preheader == h {
+					break
+				}
+				h = loopOf[preheader.id]
+			}
+			break
+		}
+	}
+	return clobbers
+}
+
+func clobbersContext(instr *Instruction, moduleCtx Value) bool {
+	switch instr.opcode {
+	case OpcodeCall, OpcodeCallIndirect:
+		return true
+	case OpcodeStore, OpcodeIstore8, OpcodeIstore16, OpcodeIstore32:
+		_, ptr, _, _ := instr.StoreData()
+		return !moduleCtx.Valid() || ptr == moduleCtx
+	}
+	return false
+}
+
+// contextLoadLike returns a context load already in blk that reads what instr does, or nil.
+func (blk *basicBlock) contextLoadLike(instr *Instruction) *Instruction {
+	for cur := blk.rootInstr; cur != nil; cur = cur.next {
+		if cur.contextLoad && cur.opcode == instr.opcode && cur.v == instr.v && cur.u1 == instr.u1 && cur.typ == instr.typ {
+			return cur
+		}
+	}
+	return nil
 }

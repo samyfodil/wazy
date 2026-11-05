@@ -43,6 +43,9 @@ type Instruction struct {
 	// mayThrow marks a call inside a try_table with catch clauses: a throw
 	// can resume execution right after it. See MarkMayThrow.
 	mayThrow bool
+	// contextLoad marks a load of module state that only a call or a store to the module context can
+	// change. See MarkContextLoad.
+	contextLoad bool
 }
 
 // SourceOffset represents the offset of the source of an instruction.
@@ -93,6 +96,14 @@ func (i *Instruction) Lowered() bool {
 // caller. This is what lets a try_table cost nothing until something throws.
 func (i *Instruction) MarkMayThrow() {
 	i.mayThrow = true
+}
+
+// MarkContextLoad marks this load as reading module state, such as a memory's base or length, that
+// nothing changes but a call or a store through the module context pointer. A loop doing neither can
+// load it once before it starts: see passLoopInvariantCodeMotionOpt.
+func (i *Instruction) MarkContextLoad() *Instruction {
+	i.contextLoad = true
+	return i
 }
 
 // MayThrow reports whether MarkMayThrow was called on this call.
