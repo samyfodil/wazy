@@ -13,8 +13,15 @@ func (m *machine) threadJumps() {
 		return labelInvalid
 	}
 	// A label starts at its position's first instruction, which is a nop0 that may or may not carry it.
+	// Clearing a map costs as much as the most it ever held: after a large function, a small one makes a
+	// new one.
 	begins := m.threadBegins
-	clear(begins)
+	if len(begins) > 4*int(m.nextLabel)+64 {
+		begins = make(map[*instruction]label, m.nextLabel)
+		m.threadBegins = begins
+	} else {
+		clear(begins)
+	}
 	for l := label(0); l < m.nextLabel; l++ {
 		if pos := m.labelPositionPool.Get(int(l)); pos != nil && pos.begin != nil {
 			begins[pos.begin] = l
@@ -55,10 +62,18 @@ func (m *machine) threadJumps() {
 		}
 		return l
 	}
+	// The jumps and conditional jumps, which every step below takes from here rather than walking the
+	// whole function again.
+	jumps, condJumps := m.threadJumpsBuf[:0], m.threadCondJumpsBuf[:0]
 	for cur := m.rootInstr; cur != nil; cur = cur.next {
 		if (cur.kind == jmp || cur.kind == jmpIf) && cur.op1.kind == operandKindLabel {
 			if t := final(cur.op1.label()); t != cur.op1.label() {
 				cur.op1 = newOperandLabel(t)
+			}
+			if cur.kind == jmp {
+				jumps = append(jumps, cur)
+			} else {
+				condJumps = append(condJumps, cur)
 			}
 		}
 	}
@@ -68,30 +83,21 @@ func (m *machine) threadJumps() {
 		}
 	}
 	// A jump to a label the next instructions are anyway is not needed. Dropping one can leave the jump
-	// before it falling through to its target in turn.
-	for dropped := true; dropped; {
-		dropped = false
-		for cur := m.rootInstr; cur != nil; cur = cur.next {
-			if cur.kind != jmp || cur.op1.kind != operandKindLabel {
-				continue
-			}
-			for next := cur.next; next != nil && next.kind == nop0; next = next.next {
-				if l, ok := isLabel(next); ok && l == cur.op1.label() {
-					cur.kind = nop0
-					cur.u1 = uint64(labelInvalid)
-					dropped = true
-					break
-				}
+	// before it falling through to its target in turn, which taking them last first sees at once.
+	for i := len(jumps) - 1; i >= 0; i-- {
+		cur := jumps[i]
+		for next := cur.next; next != nil && next.kind == nop0; next = next.next {
+			if l, ok := isLabel(next); ok && l == cur.op1.label() {
+				cur.kind = nop0
+				cur.u1 = uint64(labelInvalid)
+				break
 			}
 		}
 	}
 	// A conditional jump over an unconditional one, to the code right after both, becomes the opposite
 	// conditional jump to where the unconditional one goes: a loop's back edge often falls through this
 	// way, one jump shorter.
-	for cur := m.rootInstr; cur != nil; cur = cur.next {
-		if cur.kind != jmpIf || cur.op1.kind != operandKindLabel {
-			continue
-		}
+	for _, cur := range condJumps {
 		j := cur.next
 		if j == nil || j.kind != jmp || j.op1.kind != operandKindLabel {
 			continue
@@ -106,17 +112,18 @@ func (m *machine) threadJumps() {
 			}
 		}
 	}
-	m.copyReturns()
+	m.copyReturns(jumps)
+	m.threadJumpsBuf, m.threadCondJumpsBuf = jumps[:0], condJumps[:0]
 }
 
 // copyReturns turns a jump to an epilogue, a few instructions ending in ret, into a copy of it: the
 // path that jumped returns on its own, one jump shorter.
-func (m *machine) copyReturns() {
+func (m *machine) copyReturns(jumps []*instruction) {
 	const maxEpilogue = 8
 	var epilogue [maxEpilogue]*instruction
-	for cur := m.rootInstr; cur != nil; cur = cur.next {
-		if cur.kind != jmp || cur.op1.kind != operandKindLabel {
-			continue
+	for _, cur := range jumps {
+		if cur.kind != jmp {
+			continue // dropped
 		}
 		pos := m.labelPositionPool.Get(int(cur.op1.label()))
 		if pos == nil || pos.begin == nil {

@@ -13,8 +13,15 @@ func (m *machine) threadJumps() {
 		return labelInvalid
 	}
 	// A label starts at its position's first instruction, which is a nop0 that may or may not carry it.
+	// Clearing a map costs as much as the most it ever held: after a large function, a small one makes a
+	// new one.
 	begins := m.threadBegins
-	clear(begins)
+	if len(begins) > 4*int(m.nextLabel)+64 {
+		begins = make(map[*instruction]label, m.nextLabel)
+		m.threadBegins = begins
+	} else {
+		clear(begins)
+	}
 	for l := label(0); l < m.nextLabel; l++ {
 		if pos := m.labelPositionPool.Get(int(l)); pos != nil && pos.begin != nil {
 			begins[pos.begin] = l
@@ -48,12 +55,17 @@ func (m *machine) threadJumps() {
 		}
 		return l
 	}
+	// The branches and conditional branches, which every step below takes from here rather than walking
+	// the whole function again.
+	jumps, condJumps := m.threadJumpsBuf[:0], m.threadCondJumpsBuf[:0]
 	for cur := m.rootInstr; cur != nil; cur = cur.next {
 		switch {
 		case cur.kind == br:
 			cur.u1 = uint64(final(cur.brLabel()))
+			jumps = append(jumps, cur)
 		case cur.kind == condBr && !cur.condBrOffsetResolved():
 			cur.u2 = cur.u2&^0xffffffff | uint64(final(cur.condBrLabel()))
+			condJumps = append(condJumps, cur)
 		}
 	}
 	for _, targets := range m.jmpTableTargets[:m.jmpTableTargetsNext] {
@@ -63,32 +75,57 @@ func (m *machine) threadJumps() {
 	}
 	// A branch to a label the next instructions are anyway is not needed. Dropping one can leave the
 	// branch before it falling through to its target in turn.
-	for dropped := true; dropped; {
-		dropped = false
-		for cur := m.rootInstr; cur != nil; cur = cur.next {
-			if cur.kind != br {
-				continue
-			}
-			for next := cur.next; next != nil && next.kind == nop0; next = next.next {
-				if l, ok := begins[next]; ok && l == cur.brLabel() {
-					cur.kind = nop0
-					cur.u1 = uint64(labelInvalid)
-					dropped = true
-					break
-				}
+	// Taking them last first sees one falling through at once.
+	for i := len(jumps) - 1; i >= 0; i-- {
+		cur := jumps[i]
+		for next := cur.next; next != nil && next.kind == nop0; next = next.next {
+			if l, ok := begins[next]; ok && l == cur.brLabel() {
+				cur.kind = nop0
+				cur.u1 = uint64(labelInvalid)
+				break
 			}
 		}
 	}
 	// A conditional branch over an unconditional one, to the code right after both, becomes the opposite
 	// conditional branch to where the unconditional one goes: a loop's back edge often falls through this
-	// way, one branch shorter. Labels between the two are of the unconditional one's block, which every
-	// branch to them now skips.
-	for cur := m.rootInstr; cur != nil; cur = cur.next {
-		if cur.kind != condBr || cur.condBrOffsetResolved() {
-			continue
+	// way, one branch shorter. A label between the two that nothing branches to any more does not stop it;
+	// one a branch still goes to does, as does the return block's.
+	// The labels a branch or a jump table still goes to, after threading: one of them between the two
+	// would lose the branch it falls through to.
+	referenced := m.threadReferenced[:0]
+	if n := int(m.nextLabel); cap(referenced) < n {
+		referenced = make([]bool, n)
+	} else {
+		referenced = referenced[:n]
+		clear(referenced)
+	}
+	mark := func(l label) {
+		if int(l) < len(referenced) {
+			referenced[l] = true
 		}
+	}
+	for _, cur := range jumps {
+		if cur.kind == br {
+			mark(cur.brLabel())
+		}
+	}
+	for _, cur := range condJumps {
+		mark(cur.condBrLabel())
+	}
+	for _, targets := range m.jmpTableTargets[:m.jmpTableTargetsNext] {
+		for _, t := range targets {
+			mark(label(t))
+		}
+	}
+	isReferenced := func(l label) bool { return int(l) < len(referenced) && referenced[l] }
+	for _, cur := range condJumps {
 		j := cur.next
 		for j != nil && j.kind == nop0 {
+			// A nop0 without a label of its own reads as label 0, the entry block's, which nothing branches to.
+			own := j.nop0Label()
+			if l, ok := begins[j]; ok && isReferenced(l) || own != 0 && own != labelInvalid && isReferenced(own) || j == m.returnLabelPos.begin {
+				break
+			}
 			j = j.next
 		}
 		if j == nil || j.kind != br {
@@ -104,17 +141,18 @@ func (m *machine) threadJumps() {
 			}
 		}
 	}
-	m.copyReturns()
+	m.copyReturns(jumps)
+	m.threadJumpsBuf, m.threadCondJumpsBuf, m.threadReferenced = jumps[:0], condJumps[:0], referenced[:0]
 }
 
 // copyReturns turns a branch to an epilogue, a few instructions ending in ret, into a copy of it: the
 // path that branched returns on its own, one branch shorter.
-func (m *machine) copyReturns() {
+func (m *machine) copyReturns(jumps []*instruction) {
 	const maxEpilogue = 10
 	var epilogue [maxEpilogue]*instruction
-	for cur := m.rootInstr; cur != nil; cur = cur.next {
+	for _, cur := range jumps {
 		if cur.kind != br {
-			continue
+			continue // dropped
 		}
 		pos := m.labelPositionPool.Get(int(cur.brLabel()))
 		if pos == nil || pos.begin == nil {

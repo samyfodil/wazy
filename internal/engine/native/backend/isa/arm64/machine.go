@@ -63,6 +63,9 @@ type (
 		// threadTargets and threadBegins are threadJumps' scratch.
 		threadTargets []label
 		threadBegins  map[*instruction]label
+		// threadJumpsBuf is threadJumps' scratch.
+		threadJumpsBuf, threadCondJumpsBuf []*instruction
+		threadReferenced                   []bool
 		// jmpTableTargets holds the labels of the jump table targets.
 		jmpTableTargets [][]uint32
 		// jmpTableTargetNext is the index to the jmpTableTargets slice to be used for the next jump table.
