@@ -1004,6 +1004,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.push(v)
 			break
 		}
+		if op == wasm.OpcodeI32DivS && c.lowerClampedSdiv(x, y) {
+			break
+		}
 		result := builder.AllocateInstruction().AsSDiv(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
