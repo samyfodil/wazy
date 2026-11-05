@@ -18,10 +18,13 @@ type instruction struct {
 	// mayThrow is set on a call a caught exception resumes after; see
 	// ClobbersAllRegisters.
 	mayThrow bool
+	// vecProg is a vecMap's program.
+	vecProg *ssa.VecProgram
 }
 
 // IsCall implements regalloc.Instr.
-func (i *instruction) IsCall() bool { return i.kind == call }
+// A vecMap counts as one: its expansion uses the registers a call clobbers.
+func (i *instruction) IsCall() bool { return i.kind == call || i.kind == vecMap }
 
 // IsIndirectCall implements regalloc.Instr.
 func (i *instruction) IsIndirectCall() bool {
@@ -251,6 +254,8 @@ func (i *instruction) String() string {
 		return fmt.Sprintf("testb $0x80, %s", i.op1.format(true))
 	case yield:
 		return fmt.Sprintf("yield *%s", i.op1.format(true))
+	case vecMap:
+		return i.vecMapString()
 	case ud2:
 		return "ud2"
 	case call:
@@ -378,6 +383,8 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 	*regs = (*regs)[:0]
 	switch uk := useKinds[i.kind]; uk {
 	case useKindNone:
+	case useKindVecMap:
+		i.vecMapUses(regs)
 	case useKindOp1Op2Reg, useKindOp1RegOp2:
 		opAny, opReg := &i.op1, &i.op2
 		if uk == useKindOp1RegOp2 {
@@ -938,6 +945,8 @@ const (
 	// in op1's base holds, with that context on the stack. The trampoline preserves
 	// every register, so to the allocator this is no call. See ssa.OpcodeYield.
 	yield
+	// vecMap expands an OpcodeVecMap; see lowerVecMap.
+	vecMap
 
 	// tailCall is a meta instruction that emits a tail call.
 	tailCall
@@ -1255,6 +1264,8 @@ func (k instructionKind) String() string {
 		return "exit_sequence"
 	case preemptCheck:
 		return "preemptCheck"
+	case vecMap:
+		return "vecMap"
 	case yield:
 		return "yield"
 	case ud2:
@@ -2587,6 +2598,7 @@ var defKinds = [instrMax]defKind{
 	nopUseReg:              defKindNone,
 	preemptCheck:           defKindNone,
 	yield:                  defKindNone,
+	vecMap:                 defKindNone,
 	tailCall:               defKindCall,
 	tailCallIndirect:       defKindCall,
 	xmmLoadConst:           defKindOp2,
@@ -2629,6 +2641,7 @@ const (
 	useKindMulHi
 	useKindBlendvpd
 	useKindCall
+	useKindVecMap
 	useKindCallInd
 	useKindTailCallInd
 	useKindFcvtToSintSequence
@@ -2685,6 +2698,7 @@ var useKinds = [instrMax]useKind{
 	nopUseReg:              useKindOp1,
 	preemptCheck:           useKindNone,
 	yield:                  useKindOp1,
+	vecMap:                 useKindVecMap,
 	tailCall:               useKindCall,
 	tailCallIndirect:       useKindTailCallInd,
 	xmmLoadConst:           useKindOp1,
@@ -2706,6 +2720,8 @@ func (u useKind) String() string {
 		return "op1RegOp2"
 	case useKindCall:
 		return "call"
+	case useKindVecMap:
+		return "vecmap"
 	case useKindCallInd:
 		return "callInd"
 	case useKindTailCallInd:

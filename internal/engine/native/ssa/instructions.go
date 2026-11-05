@@ -705,6 +705,13 @@ const (
 	// being spilled, wherever they are defined, for a path that almost never runs.
 	OpcodeYield
 
+	// OpcodeVecMap runs a vector map loop's element program over count elements: `VecMap ptr..., count,
+	// inv...`, where the program, Builder.VecProgram(u1), says how many pointers and invariants there are.
+	// Its operands are all it reads besides memory, and it writes only the store stream's elements. The
+	// backend expands it in place and treats it as a call, since its expansion is free to use the
+	// registers a call clobbers. See VecProgram.
+	OpcodeVecMap
+
 	// opcodeEnd marks the end of the opcode list.
 	opcodeEnd
 )
@@ -953,6 +960,7 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeFence:                       sideEffectStrict,
 	OpcodePreemptRequested:            sideEffectTraps,
 	OpcodeYield:                       sideEffectStrict,
+	OpcodeVecMap:                      sideEffectStrict,
 	OpcodeTailCallReturnCall:          sideEffectStrict,
 	OpcodeTailCallReturnCallIndirect:  sideEffectStrict,
 	OpcodeWideningPairwiseDotProductS: sideEffectNone,
@@ -1114,6 +1122,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeFence:                       returnTypesFnNoReturns,
 	OpcodePreemptRequested:            returnTypesFnI32,
 	OpcodeYield:                       returnTypesFnNoReturns,
+	OpcodeVecMap:                      returnTypesFnNoReturns,
 	OpcodeTailCallReturnCallIndirect:  returnTypesFnCallIndirect,
 	OpcodeTailCallReturnCall:          returnTypesFnCall,
 	OpcodeWideningPairwiseDotProductS: returnTypesFnV128,
@@ -2761,6 +2770,12 @@ func (i *Instruction) Format(b Builder) string {
 		instSuffix = fmt.Sprintf(" %s, %#x", i.v.Format(b), int32(i.u1))
 	case OpcodeYield:
 		instSuffix = " " + i.v.Format(b)
+	case OpcodeVecMap:
+		vs := make([]string, 0, len(i.vs.View()))
+		for _, v := range i.vs.View() {
+			vs = append(vs, v.Format(b))
+		}
+		instSuffix = fmt.Sprintf(" #%d %s", i.u1, strings.Join(vs, ", "))
 	case OpcodeLoadSplat:
 		instSuffix = fmt.Sprintf(".%s %s, %#x", VecLane(i.u2), i.v.Format(b), int32(i.u1))
 	case OpcodeUload8, OpcodeUload16, OpcodeUload32, OpcodeSload8, OpcodeSload16, OpcodeSload32:
@@ -3162,6 +3177,8 @@ func (o Opcode) String() (ret string) {
 		return "PreemptRequested"
 	case OpcodeYield:
 		return "Yield"
+	case OpcodeVecMap:
+		return "VecMap"
 	case OpcodeTailCallReturnCall:
 		return "ReturnCall"
 	case OpcodeTailCallReturnCallIndirect:
@@ -3260,4 +3277,46 @@ func (o Opcode) String() (ret string) {
 		return "VZeroExtLoad"
 	}
 	panic(fmt.Sprintf("unknown opcode %d", o))
+}
+
+// VecProgram is the per-element computation of an OpcodeVecMap. Ops run in order, each producing one
+// vector of lanes: an op's A and B name earlier ops. The last op is the value stored through pointer
+// Store. Every pointer advances one element per element, and each load reads the element its pointer is at.
+type VecProgram struct {
+	F64        bool
+	Ptrs, Invs int
+	Store      int
+	Ops        []VecOp
+}
+
+// VecOp kinds.
+const (
+	VecOpLoad = iota + 1 // Arg: pointer index
+	VecOpInv             // Arg: invariant index, broadcast to every lane
+	VecOpAdd
+	VecOpSub
+	VecOpMul
+	VecOpDiv
+	VecOpXor // A ^ invariant Arg: a sign flip, with the sign mask as the invariant
+	VecOpAnd // A & invariant Arg: an absolute value, with the magnitude mask as the invariant
+	VecOpSqrt
+)
+
+// VecOp is one step of a VecProgram.
+type VecOp struct {
+	Kind, A, B, Arg uint8
+}
+
+// AsVecMap initializes this instruction as an OpcodeVecMap running program number prog over args: the
+// pointers, the element count and the invariants, in that order.
+func (i *Instruction) AsVecMap(prog int, args Values) *Instruction {
+	i.opcode = OpcodeVecMap
+	i.u1 = uint64(prog)
+	i.vs = args
+	return i
+}
+
+// VecMapData returns an OpcodeVecMap's program number and operands.
+func (i *Instruction) VecMapData() (prog int, args []Value) {
+	return int(i.u1), i.vs.View()
 }

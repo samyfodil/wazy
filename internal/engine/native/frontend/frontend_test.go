@@ -3081,6 +3081,7 @@ blk13: () <-- (blk6)
 			offset := nativeapi.NewModuleContextOffsetData(tc.m, tc.needListener)
 			fc := NewFrontendCompiler(tc.m, b, &offset, tc.needListener, false)
 			fc.SetInlineLeaves(tc.inline)
+			fc.SetVecMap(false)
 			typeIndex := tc.m.FunctionSection[tc.targetIndex]
 			code := &tc.m.CodeSection[tc.targetIndex]
 			fc.Init(tc.targetIndex, typeIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body, tc.needListener, 0)

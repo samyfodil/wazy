@@ -2874,6 +2874,7 @@ L7 (SSA Block: blk7):
 			offset := nativeapi.NewModuleContextOffsetData(tc.m, false)
 			fc := frontend.NewFrontendCompiler(tc.m, ssab, &offset, false, false)
 			fc.SetInlineLeaves(false) // the call cases pin how a call is lowered.
+			fc.SetVecMap(false)
 			machine := newMachine()
 			machine.DisableStackCheck()
 			be := backend.NewCompiler(context.Background(), machine, ssab)

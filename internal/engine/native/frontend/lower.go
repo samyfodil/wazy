@@ -1422,6 +1422,15 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.unreachableDepth++
 			break
 		}
+		if (c.vecMap || VecPlanHook != nil) && len(bt.Params) == 0 && len(bt.Results) == 0 && c.vecMapMemory() {
+			plan, why, ok := planVecMap(c.wasmFunctionBody, state.pc+1, c.localTypes())
+			if ok && c.vecMap {
+				ok = c.lowerVecMap(plan)
+			}
+			if VecPlanHook != nil {
+				VecPlanHook(c.wasmLocalFunctionIndex, loopStart, ok, why)
+			}
+		}
 
 		loopHeader, afterLoopBlock := builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
 		c.addBlockParamsFromWasmTypes(bt.Params, loopHeader)

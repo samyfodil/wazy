@@ -640,6 +640,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerCall(instr)
 	case ssa.OpcodeYield:
 		m.lowerYield(instr)
+	case ssa.OpcodeVecMap:
+		m.lowerVecMap(instr)
 	case ssa.OpcodeStore, ssa.OpcodeIstore8, ssa.OpcodeIstore16, ssa.OpcodeIstore32:
 		m.lowerStore(instr)
 	case ssa.OpcodeIadd:

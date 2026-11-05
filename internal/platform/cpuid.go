@@ -25,6 +25,9 @@ const (
 	CpuFeatureAmd64SSE4_2
 	// CpuFeatureAmd64POPCNT is the flag to query CpuFeatureFlags.Has for the POPCNT instruction on amd64
 	CpuFeatureAmd64POPCNT
+	// CpuFeatureAmd64AVX is the flag to query CpuFeatureFlags.Has for AVX with the operating system saving
+	// the upper halves of the YMM registers on amd64
+	CpuFeatureAmd64AVX
 )
 
 const (

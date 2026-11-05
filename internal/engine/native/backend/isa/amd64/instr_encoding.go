@@ -878,6 +878,8 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		c.EmitByte(0x83)
 		c.EmitByte(0xc4)
 		c.EmitByte(0x08)
+	case vecMap:
+		i.encodeVecMap(c)
 	case preemptCheck:
 		// F6 /0 ib: test r/m8, imm8.
 		encodeEncMem(c, legacyPrefixesNone, 0xf6, 1, 0, i.op1.addressMode(), rexInfo(0).clearW())

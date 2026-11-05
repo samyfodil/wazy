@@ -4,6 +4,7 @@ package frontend
 import (
 	"bytes"
 	"math"
+	"runtime"
 	"sync"
 
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
@@ -114,6 +115,8 @@ type Compiler struct {
 	inlineLocals []ssa.Variable
 	// inlineLeaves turns isInlinableLeaf on; see SetInlineLeaves.
 	inlineLeaves bool
+	// vecMap turns vector map loops on; see SetVecMap.
+	vecMap bool
 	// inlinedCallee is one more than the local index of the function inlineLeaf is lowering, and zero
 	// outside one. See memoryOutOfBoundsCode.
 	inlinedCallee uint32
@@ -181,6 +184,7 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 		offset:                            offset,
 		loopYield:                         LoopYield,
 		inlineLeaves:                      true,
+		vecMap:                            runtime.GOARCH == "amd64",
 		needSourceOffsetInfo:              sourceInfo,
 		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
@@ -193,6 +197,10 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 // SetInlineLeaves turns off lowering small callees in place of their calls (see isInlinableLeaf), for
 // tests that pin how a call is lowered. It must be called before lowering.
 func (c *Compiler) SetInlineLeaves(on bool) { c.inlineLeaves = on }
+
+// SetVecMap turns off vectorizing loops (see lowerVecMap), for tests that pin how a loop is lowered. It must
+// be called before lowering.
+func (c *Compiler) SetVecMap(on bool) { c.vecMap = on }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {

@@ -126,6 +126,11 @@ type Builder interface {
 	// InsertUndefined inserts an undefined instruction at the current position.
 	InsertUndefined()
 
+	// AddVecProgram records p for an OpcodeVecMap and returns its number; VecProgram returns it back.
+	// Programs last until the next Init.
+	AddVecProgram(p *VecProgram) int
+	VecProgram(n int) *VecProgram
+
 	// SetCurrentSourceOffset sets the current source offset. The incoming instruction will be annotated with this offset.
 	SetCurrentSourceOffset(line SourceOffset)
 
@@ -233,6 +238,7 @@ type builder struct {
 	loopNestingForestRoots []BasicBlock
 
 	// The followings are used for optimization passes/deterministic compilation.
+	vecPrograms  []*VecProgram
 	licmLoops    []*basicBlock
 	licmDefs     []*basicBlock
 	licmClobbers []bool
@@ -329,7 +335,18 @@ func (b *builder) ReturnBlock() BasicBlock {
 }
 
 // Init implements Builder.Reset.
+// AddVecProgram implements Builder.AddVecProgram.
+func (b *builder) AddVecProgram(p *VecProgram) int {
+	b.vecPrograms = append(b.vecPrograms, p)
+	return len(b.vecPrograms) - 1
+}
+
+// VecProgram implements Builder.VecProgram.
+func (b *builder) VecProgram(n int) *VecProgram { return b.vecPrograms[n] }
+
 func (b *builder) Init(s *Signature) {
+	clear(b.vecPrograms)
+	b.vecPrograms = b.vecPrograms[:0]
 	b.nextVariable = 0
 	b.currentSignature = s
 	b.zeros = [typeEnd]Value{ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid}
