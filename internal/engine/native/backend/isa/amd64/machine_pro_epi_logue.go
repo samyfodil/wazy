@@ -10,6 +10,7 @@ import (
 func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
+	m.foldReloads()
 	m.emitTrapIslands()
 	m.emitPreemptIslands()
 	m.threadJumps()

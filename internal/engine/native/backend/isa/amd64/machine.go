@@ -102,6 +102,8 @@ type (
 		// threadTargets and threadBegins are threadJumps' scratch.
 		threadTargets []label
 		threadBegins  map[*instruction]label
+		// foldRegs is foldReloads' scratch.
+		foldRegs []regalloc.VReg
 		// jmpTableTargets holds the labels of the jump table targets.
 		jmpTableTargets [][]uint32
 		// jmpTableTargetNext is the index to the jmpTableTargets slice to be used for the next jump table.
