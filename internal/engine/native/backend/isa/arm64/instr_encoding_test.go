@@ -1599,6 +1599,13 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "03103f1e", setup: func(i *instruction) { i.asLoadFpuConst32(v3VReg, uint64(math.Float32bits(-1.5))) }},
 		{want: "07f0671e", setup: func(i *instruction) { i.asLoadFpuConst64(v7VReg, math.Float64bits(31)) }},
 		{want: "0710681e", setup: func(i *instruction) { i.asLoadFpuConst64(v7VReg, math.Float64bits(0.125)) }},
+		// ccmp w20, w22, #0, ge; ccmp x1, x2, #4, lt
+		{want: "80a2567a", setup: func(i *instruction) {
+			i.asCCmpReg(operandNR(x20VReg), operandNR(x22VReg), ge, 0, false)
+		}},
+		{want: "24b042fa", setup: func(i *instruction) {
+			i.asCCmpReg(operandNR(x1VReg), operandNR(x2VReg), lt, 4, true)
+		}},
 		// uadalp v1.2d, v2.4s
 		{want: "4168a06e", setup: func(i *instruction) {
 			i.asVecMisc(vecOpUadalp, v1VReg, operandNR(v2VReg), vecArrangement4S)

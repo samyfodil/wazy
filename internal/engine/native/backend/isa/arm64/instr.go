@@ -143,6 +143,7 @@ var defKinds = [numInstructionKinds]defKind{
 	fpuToInt:             defKindRD,
 	intToFpu:             defKindRD,
 	cCmpImm:              defKindNone,
+	cCmpReg:              defKindNone,
 	movToFPSR:            defKindNone,
 	movFromFPSR:          defKindRD,
 	emitSourceOffsetInfo: defKindNone,
@@ -280,6 +281,7 @@ var useKinds = [numInstructionKinds]useKind{
 	vecDupElement:        useKindRN,
 	vecExtract:           useKindRNRM,
 	cCmpImm:              useKindRN,
+	cCmpReg:              useKindRNRM,
 	vecMisc:              useKindRN,
 	vecMovElement:        useKindRN,
 	vecLanes:             useKindRN,
@@ -867,6 +869,18 @@ func (i *instruction) asFpuCmp(rn, rm operand, is64bit bool) {
 	}
 }
 
+// asCCmpReg makes ccmp rn, rm, #flag, c: the flags of comparing rn with rm where c holds, and flag where
+// it does not.
+func (i *instruction) asCCmpReg(rn, rm operand, c condFlag, flag byte, is64bit bool) {
+	i.kind = cCmpReg
+	i.rn, i.rm = rn, rm
+	i.u1 = uint64(c)
+	i.u2 = uint64(flag)
+	if is64bit {
+		i.u2 |= 1 << 32
+	}
+}
+
 func (i *instruction) asCCmpImm(rn operand, imm uint64, c condFlag, flag byte, is64bit bool) {
 	i.kind = cCmpImm
 	i.rn = rn
@@ -1296,6 +1310,12 @@ func (i *instruction) String() (str string) {
 		} else {
 			str = fmt.Sprintf("cset %s, %s", formatVRegSized(i.rd, 64), condFlag(i.u1))
 		}
+	case cCmpReg:
+		size := is64SizeBitToSize(i.u2 >> 32)
+		str = fmt.Sprintf("ccmp %s, %s, #%#x, %s",
+			formatVRegSized(i.rn.nr(), size), formatVRegSized(i.rm.nr(), size),
+			i.u2&0b1111,
+			condFlag(i.u1))
 	case cCmpImm:
 		size := is64SizeBitToSize(i.u2 >> 32)
 		str = fmt.Sprintf("ccmp %s, #%#x, #%#x, %s",
@@ -1855,6 +1875,8 @@ const (
 	cSet
 	// cCmpImm represents a conditional comparison with an immediate.
 	cCmpImm
+	// cCmpReg represents a conditional comparison of two registers.
+	cCmpReg
 	// fpuMov64 represents a FPU move. Distinct from a vector-register move; moving just 64 bits appears to be significantly faster.
 	fpuMov64
 	// fpuMov128 represents a vector register move.

@@ -993,3 +993,55 @@ func TestMachine_lowerSelect_clampConstant(t *testing.T) {
 		})
 	}
 }
+
+// TestMachine_LowerConditionalBranch_orOfIcmps checks a branch on either of two comparisons: the first sets
+// the flags, a conditional compare sets them by the second only where the first does not hold, and one
+// branch tests the second's condition, the opposite one for a brz.
+func TestMachine_LowerConditionalBranch_orOfIcmps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		brz  bool
+		k    uint32 // the second comparison's constant, or none where it is zero
+		exp  string
+	}{
+		{name: "brnz, registers", exp: "subs wzr, w1?, #0x1\nccmp w1?, w2?, #0x0, ge\nb.gt L1"},
+		{name: "brz, registers", brz: true, exp: "subs wzr, w1?, #0x1\nccmp w1?, w2?, #0x0, ge\nb.le L1"},
+		{name: "brnz, immediate", k: 31, exp: "subs wzr, w1?, #0x1\nccmp w1?, #0x1f, #0x0, ge\nb.gt L1"},
+		{name: "brz, immediate", brz: true, k: 31, exp: "subs wzr, w1?, #0x1\nccmp w1?, #0x1f, #0x0, ge\nb.le L1"},
+		{name: "past an immediate", k: 32, exp: "subs wzr, w1?, #0x1\norr w11?, wzr, #0x20\nccmp w1?, w11?, #0x0, ge\nb.gt L1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, b, m := newSetupWithMockContext()
+			ctx.vRegCounter = 10
+			m.maxSSABlockID, m.nextLabel = 1, 1
+			entry := b.CurrentBlock()
+			x, y := entry.AddParam(b, ssa.TypeI32), entry.AddParam(b, ssa.TypeI32)
+			ctx.vRegMap[x], ctx.vRegMap[y] = intToVReg(1), intToVReg(2)
+			ctx.definitions[x], ctx.definitions[y] = backend.SSAValueDefinition{V: x}, backend.SSAValueDefinition{V: y}
+			def := func(i *ssa.Instruction) ssa.Value {
+				b.InsertInstruction(i)
+				ctx.definitions[i.Return()] = backend.SSAValueDefinition{Instr: i, V: i.Return()}
+				return i.Return()
+			}
+			one := def(b.AllocateInstruction().AsIconst32(1))
+			second := y
+			if tc.k != 0 {
+				second = def(b.AllocateInstruction().AsIconst32(tc.k))
+			}
+			c1 := def(b.AllocateInstruction().AsIcmp(x, one, ssa.IntegerCmpCondSignedLessThan))
+			c2 := def(b.AllocateInstruction().AsIcmp(x, second, ssa.IntegerCmpCondSignedGreaterThan))
+			or := b.AllocateInstruction()
+			or.AsBor(c1, c2)
+			either := def(or)
+			br := b.AllocateInstruction()
+			if tc.brz {
+				br.AsBrz(either, ssa.ValuesNil, b.AllocateBasicBlock())
+			} else {
+				br.AsBrnz(either, ssa.ValuesNil, b.AllocateBasicBlock())
+			}
+			b.InsertInstruction(br)
+			m.LowerConditionalBranch(br)
+			require.Equal(t, tc.exp, formatEmittedInstructionsInCurrentBlock(m))
+		})
+	}
+}

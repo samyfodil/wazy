@@ -1730,6 +1730,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			builder.SetCurrentBlock(current)
 		}
 
+		if argNum == 0 && !hinted && !sealTargetBlk {
+			v = c.mergeBrIfs(v, labelIndex)
+		}
+
 		// Insert the conditional jump to the target block.
 		brnz := builder.AllocateInstruction()
 		brnz.AsBrnz(v, args, targetBlk)

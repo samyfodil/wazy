@@ -141,6 +141,8 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 		cbr.asCondBr(registerAsSignBitCond(tmp, !brz), target, true)
 		m.insert(cbr)
 		cvalDef.Instr.MarkLowered()
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeBor) && m.lowerOrOfIcmpsToFlag(cvalDef.Instr, b.Opcode() == ssa.OpcodeBrz, target):
+		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
 		cvalInstr := cvalDef.Instr
 		x, y, c := cvalInstr.IcmpData()
@@ -180,6 +182,95 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 		cbr.asCondBr(c, target, false)
 		m.insert(cbr)
 	}
+}
+
+// lowerOrOfIcmpsToFlag branches to target where either of the comparisons or or-s holds, or, for a brz,
+// neither: the first sets the flags, and a conditional compare sets them by the second where the first
+// does not hold, and otherwise to flags that satisfy the second's condition. It reports false, emitting
+// nothing, where or is not of two comparisons of same-width registers, or of a register with a constant
+// up to 31, that are its only uses.
+func (m *machine) lowerOrOfIcmpsToFlag(or *ssa.Instruction, brz bool, target label) bool {
+	a, b := or.Arg2()
+	ad, bd := m.compiler.ValueDefinition(a), m.compiler.ValueDefinition(b)
+	if !m.compiler.MatchInstr(ad, ssa.OpcodeIcmp) || !m.compiler.MatchInstr(bd, ssa.OpcodeIcmp) {
+		return false
+	}
+	ax, ay, ac := ad.Instr.IcmpData()
+	bx, by, bc := bd.Instr.IcmpData()
+	if bx.Type() != by.Type() || ax.Type() != ay.Type() {
+		return false
+	}
+	byDef := m.compiler.ValueDefinition(by)
+	imm, isImm := uint64(0), false
+	if byDef.IsFromInstr() && byDef.Instr.Opcode() == ssa.OpcodeIconst {
+		k := byDef.Instr.ConstantVal()
+		if bx.Type() == ssa.TypeI32 {
+			k = uint64(uint32(k))
+		}
+		imm, isImm = k, k <= 31
+	}
+	cc1, cc2 := condFlagFromSSAIntegerCmpCond(ac), condFlagFromSSAIntegerCmpCond(bc)
+	m.lowerIcmpToFlag(ax, ay, ac.Signed())
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(bx), extModeNone)
+	ccmp := m.allocateInstr()
+	if isImm {
+		ccmp.asCCmpImm(rn, imm, cc1.invert(), satisfyingFlags(cc2), bx.Type().Bits() == 64)
+		byDef.Instr.MarkLowered()
+	} else {
+		ccmp.asCCmpReg(rn, m.getOperand_NR(byDef, extModeNone), cc1.invert(), satisfyingFlags(cc2), bx.Type().Bits() == 64)
+	}
+	m.insert(ccmp)
+	if brz {
+		cc2 = cc2.invert()
+	}
+	cbr := m.allocateInstr()
+	cbr.asCondBr(cc2.asCond(), target, false /* ignored */)
+	m.insert(cbr)
+	ad.Instr.MarkLowered()
+	bd.Instr.MarkLowered()
+	return true
+}
+
+// satisfyingFlags returns NZCV flags under which c holds.
+func satisfyingFlags(c condFlag) byte {
+	for nzcv := byte(0); nzcv < 16; nzcv++ {
+		n, z, cf, v := nzcv&8 != 0, nzcv&4 != 0, nzcv&2 != 0, nzcv&1 != 0
+		var holds bool
+		switch c {
+		case eq:
+			holds = z
+		case ne:
+			holds = !z
+		case hs:
+			holds = cf
+		case lo:
+			holds = !cf
+		case mi:
+			holds = n
+		case pl:
+			holds = !n
+		case vs:
+			holds = v
+		case vc:
+			holds = !v
+		case hi:
+			holds = cf && !z
+		case ls:
+			holds = !cf || z
+		case ge:
+			holds = n == v
+		case lt:
+			holds = n != v
+		case gt:
+			holds = !z && n == v
+		case le:
+			holds = z || n != v
+		}
+		if holds {
+			return nzcv
+		}
+	}
+	panic("BUG: no flags satisfy " + c.String())
 }
 
 func (m *machine) tryLowerBandToFlag(x, y ssa.Value) (ok bool) {

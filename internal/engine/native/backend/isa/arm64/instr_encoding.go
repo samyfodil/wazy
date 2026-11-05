@@ -419,6 +419,13 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(
 			sf<<31 | 0b111101001<<22 | imm<<16 | cond<<12 | 0b1<<11 | rn<<5 | nzcv,
 		)
+	case cCmpReg:
+		sf := uint32((i.u2 >> 32) & 0b1)
+		nzcv := uint32(i.u2 & 0b1111)
+		cond := uint32(condFlag(i.u1))
+		rn := regNumberInEncoding[i.rn.realReg()]
+		rm := regNumberInEncoding[i.rm.realReg()]
+		c.Emit4Bytes(sf<<31 | 0b111101001<<22 | rm<<16 | cond<<12 | rn<<5 | nzcv)
 	case movFromFPSR:
 		rt := regNumberInEncoding[i.rd.RealReg()]
 		c.Emit4Bytes(encodeSystemRegisterMove(rt, true))
