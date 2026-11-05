@@ -1796,6 +1796,15 @@ func (m *machine) lowerSubOrAdd(si *ssa.Instruction, add bool) {
 		return
 	}
 
+	// 0 - y is neg: sub rd, zr, y, where register 31 is the zero register only in the shifted form.
+	if !add && xDef.IsFromInstr() && xDef.Instr.Constant() && xDef.Instr.ConstantVal() == 0 {
+		xDef.Instr.MarkLowered()
+		alu := m.allocateInstr()
+		alu.asALU(aluOpSub, m.compiler.VRegOf(si.Return()), operandNR(xzrVReg), m.getOperand_SR_NR(yDef, extModeNone), x.Type().Bits() == 64)
+		m.insert(alu)
+		return
+	}
+
 	rn := m.getOperand_NR(xDef, extModeNone)
 	rm, yNegated := m.getOperand_MaybeNegatedImm12_ER_SR_NR(yDef, extModeNone)
 

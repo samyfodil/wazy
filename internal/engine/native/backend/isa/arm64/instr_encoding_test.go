@@ -1612,6 +1612,13 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "e103222a", setup: func(i *instruction) {
 			i.asALU(aluOpOrn, x1VReg, operandNR(xzrVReg), operandNR(x2VReg), false)
 		}},
+		// neg w24, w16; neg x1, x2, lsl #3
+		{want: "f803104b", setup: func(i *instruction) {
+			i.asALU(aluOpSub, x24VReg, operandNR(xzrVReg), operandNR(x16VReg), false)
+		}},
+		{want: "e10f02cb", setup: func(i *instruction) {
+			i.asALU(aluOpSub, x1VReg, operandNR(xzrVReg), operandSR(x2VReg, 3, shiftOpLSL), true)
+		}},
 		// cmp sp, x11
 		{want: "ff632beb", setup: func(i *instruction) {
 			i.asALU(aluOpSubS, xzrVReg, operandNR(spVReg), operandNR(x11VReg), true)
