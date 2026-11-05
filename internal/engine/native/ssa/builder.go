@@ -234,6 +234,10 @@ type builder struct {
 	// anything, indexed by Variable, holding the last definition of that Variable there.
 	varDefs []Value
 
+	// loopTestScratch, loopBodyScratch and loopAvoidScratch are reused by loopTests.
+	loopTestScratch                   []loopTest
+	loopBodyScratch, loopAvoidScratch []*basicBlock
+
 	// dominators stores the immediate dominator of each BasicBlock.
 	// The index is blockID of the BasicBlock.
 	dominators []*basicBlock

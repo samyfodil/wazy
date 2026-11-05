@@ -18,8 +18,8 @@ type LoopCounter struct {
 	Start Value
 	// BackEdge is the branch that continues the loop.
 	BackEdge *Instruction
-	// preheader is the block the loop is entered from.
-	preheader *basicBlock
+	// preheader is the block the loop is entered from, and header the loop's.
+	preheader, header *basicBlock
 }
 
 // FindLoopCounter returns the counter of the loop headed by header, entered from
@@ -62,11 +62,13 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 	if len(backArgs) != len(params) || len(entryArgs) != len(params) {
 		return
 	}
-	tested := [3]Value{ValueInvalid, ValueInvalid, ValueInvalid}
-	if back.opcode != OpcodeJump {
-		tested[0] = b.resolveAlias(back.v)
-		if cond := b.InstructionOfValue(tested[0]); cond != nil && cond.opcode == OpcodeIcmp {
-			tested[1], tested[2] = b.resolveAlias(cond.v), b.resolveAlias(cond.v2)
+	var testedAt [6]Value
+	tested := testedAt[:0]
+	for _, t := range b.loopTests(h, back) {
+		v := b.resolveAlias(t.cond)
+		tested = append(tested, v)
+		if cond := b.InstructionOfValue(v); cond != nil && cond.opcode == OpcodeIcmp {
+			tested = append(tested, b.resolveAlias(cond.v), b.resolveAlias(cond.v2))
 		}
 	}
 	for j, p := range params {
@@ -97,7 +99,7 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 		}
 		c := LoopCounter{
 			Param: p, Next: next, Step: step, Start: b.resolveAlias(entryArgs[j]), BackEdge: back,
-			preheader: preheader.(*basicBlock),
+			preheader: preheader.(*basicBlock), header: h,
 		}
 		for _, v := range tested {
 			if v.Valid() && (v == p || v == next) {
@@ -112,18 +114,27 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 }
 
 // TripBound returns how many times at most the loop counted by lc runs its body,
-// when its back edge is a conditional branch comparing the counter against a
-// constant, or testing the counter itself against zero, and the counter starts
-// from a constant. ok is false when that cannot be shown, including when the
+// when its test (see loopTest) compares the counter against a constant, or tests
+// the counter itself against zero, and the counter starts from a constant. ok is false when that cannot be shown, including when the
 // counter could wrap around past the bound. A loop that steps by one until its
 // counter equals the bound may also start anywhere in a range (see startRange):
 // the remainder loop of an unrolled one runs at most three times.
 func (b *builder) TripBound(lc LoopCounter) (trips uint64, ok bool) {
 	lo, hi, isRange := b.startRange(lc)
-	if !isRange || lc.BackEdge.opcode == OpcodeJump {
+	if !isRange {
 		return
 	}
-	x := b.resolveAlias(lc.BackEdge.v)
+	for _, t := range b.loopTests(lc.header, lc.BackEdge) {
+		if n, bounded := b.testTrips(lc, t, lo, hi); bounded && (!ok || n < trips) {
+			trips, ok = n, true
+		}
+	}
+	return
+}
+
+// testTrips is TripBound for the loop test t, the counter starting from lo to hi.
+func (b *builder) testTrips(lc LoopCounter, t loopTest, lo, hi uint64) (trips uint64, ok bool) {
+	x := b.resolveAlias(t.cond)
 	var bound uint64
 	cc := IntegerCmpCondNotEqual
 	if x != lc.Next && x != lc.Param {
@@ -142,7 +153,7 @@ func (b *builder) TripBound(lc LoopCounter) (trips uint64, ok bool) {
 			x, cc = y, cc.Swapped()
 		}
 	}
-	if lc.BackEdge.opcode == OpcodeBrz { // the loop continues while the condition is false
+	if !t.onTrue {
 		cc = cc.Inverted()
 	}
 
@@ -220,6 +231,89 @@ func (b *builder) TripBound(lc LoopCounter) (trips uint64, ok bool) {
 		return
 	}
 	return limit + 1, true
+}
+
+// loopTest is a condition that decides whether a loop goes round again: it does
+// only if the condition holds, where onTrue, or fails, where not.
+type loopTest struct {
+	cond   Value
+	onTrue bool
+}
+
+// loopTests returns the tests of the loop headed by h, whose one back edge is
+// back: back's, if it is conditional, or else those of the conditional branches
+// out of the loop that every iteration going round passes. The loop's body is the
+// blocks that reach back's block without passing h, and a branch out of it is one
+// to a block outside, which never gets back to h. Every iteration passes the first
+// branch of a block that dominates back's within the body. Bodies over
+// loopBodyMaxBlocks blocks are not searched.
+func (b *builder) loopTests(h *basicBlock, back *Instruction) []loopTest {
+	tests := b.loopTestScratch[:0]
+	defer func() { b.loopTestScratch = tests }()
+	if back.opcode != OpcodeJump {
+		return append(tests, loopTest{back.v, back.opcode == OpcodeBrnz})
+	}
+	var from *basicBlock
+	for _, p := range h.preds {
+		if p.branch == back {
+			from = p.blk
+		}
+	}
+	body, ok := b.reachers(h, from, nil, b.loopBodyScratch[:0])
+	b.loopBodyScratch = body
+	if !ok {
+		return tests
+	}
+	for _, blk := range body {
+		br := blk.currentInstr
+		for br != nil && br.prev != nil && isBranch(br.prev) {
+			br = br.prev
+		}
+		if br == nil || br.opcode != OpcodeBrz && br.opcode != OpcodeBrnz || slices.Contains(body, b.basicBlock(BasicBlockID(br.rValue))) {
+			continue
+		}
+		if blk != h && blk != from {
+			others, ok := b.reachers(h, from, blk, b.loopAvoidScratch[:0])
+			b.loopAvoidScratch = others
+			if !ok || slices.Contains(others, h) {
+				continue
+			}
+		}
+		tests = append(tests, loopTest{br.v, br.opcode == OpcodeBrz})
+	}
+	return tests
+}
+
+func isBranch(i *Instruction) bool {
+	return i.opcode == OpcodeJump || i.opcode == OpcodeBrz || i.opcode == OpcodeBrnz
+}
+
+// loopBodyMaxBlocks is the most blocks of a loop's body loopTests searches.
+const loopBodyMaxBlocks = 32
+
+// reachers appends to dst from and the blocks that reach it without passing h or
+// avoid, and h where one of them is reached from it, and returns them, or false
+// where they are over loopBodyMaxBlocks.
+func (b *builder) reachers(h, from, avoid *basicBlock, dst []*basicBlock) ([]*basicBlock, bool) {
+	if from == nil {
+		return dst, false
+	}
+	dst = append(dst, from)
+	for i := 0; i < len(dst); i++ {
+		if dst[i] == h {
+			continue
+		}
+		for _, p := range dst[i].preds {
+			switch {
+			case p.blk == avoid || slices.Contains(dst, p.blk):
+			case len(dst) == loopBodyMaxBlocks:
+				return dst, false
+			default:
+				dst = append(dst, p.blk)
+			}
+		}
+	}
+	return dst, true
 }
 
 // rangeTrips is TripBound for a counter that starts anywhere from lo to hi: the
