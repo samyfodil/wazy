@@ -61,6 +61,9 @@ func (i *instruction) String() string {
 		}
 	case xmmRmR:
 		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(false), i.op2.format(false))
+	case xmmRmRVex:
+		src1 := newOperandReg(regalloc.VReg(i.u1))
+		return fmt.Sprintf("v%s %s, %s, %s", sseOpcode(i.u2), i.op1.format(false), src1.format(false), i.op2.format(false))
 	case gprToXmm:
 		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(i.b1), i.op2.format(i.b1))
 	case xmmUnaryRmR:
@@ -388,6 +391,16 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 	case useKindNone:
 	case useKindVecMap:
 		i.vecMapUses(regs)
+	case useKindOp1U1Reg:
+		switch i.op1.kind {
+		case operandKindReg:
+			*regs = append(*regs, i.op1.reg())
+		case operandKindMem:
+			i.op1.addressMode().uses(regs)
+		default:
+			panic(fmt.Sprintf("BUG: invalid operand: %s", i))
+		}
+		*regs = append(*regs, regalloc.VReg(i.u1))
 	case useKindOp1Op2Reg, useKindOp1RegOp2:
 		opAny, opReg := &i.op1, &i.op2
 		if uk == useKindOp1RegOp2 {
@@ -496,6 +509,19 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 func (i *instruction) AssignUse(index int, v regalloc.VReg) {
 	switch uk := useKinds[i.kind]; uk {
 	case useKindNone:
+	case useKindOp1U1Reg:
+		nregs := 1
+		if i.op1.kind == operandKindMem {
+			nregs = i.op1.addressMode().nregs()
+		}
+		switch {
+		case index == nregs:
+			i.u1 = uint64(v)
+		case i.op1.kind == operandKindReg:
+			i.op1.setReg(v)
+		default:
+			i.op1.addressMode().assignUses(index, v)
+		}
 	case useKindCallInd, useKindTailCallInd:
 		if index != 0 {
 			panic("BUG")
@@ -816,6 +842,9 @@ const (
 
 	// XMM (scalar or vector) binary op: (add sub and or xor mul adc? sbb?) (32 64) (reg addr) reg
 	xmmRmR
+
+	// xmmRmRVex is xmmRmR's AVX form, which does not overwrite either operand: op2 = u1 op op1.
+	xmmRmRVex
 
 	// XMM (scalar or vector) unary op: mov between XMM registers (32 64) (reg addr) reg.
 	//
@@ -1197,6 +1226,8 @@ func (k instructionKind) String() string {
 		return "movRR"
 	case xmmRmR:
 		return "xmmRmR"
+	case xmmRmRVex:
+		return "xmmRmRVex"
 	case gprToXmm:
 		return "gprToXmm"
 	case xmmUnaryRmR:
@@ -1371,7 +1402,7 @@ func (i *instruction) asJmp(target operand) *instruction {
 
 func (i *instruction) jmpLabel() label {
 	switch i.kind {
-	case jmp, jmpIf, lea, xmmUnaryRmR:
+	case jmp, jmpIf, lea, xmmUnaryRmR, xmmRmRVex:
 		return i.op1.label()
 	default:
 		panic("BUG")
@@ -1466,6 +1497,15 @@ func (i *instruction) asBlendvpd(rm operand, rd regalloc.VReg) *instruction {
 	i.kind = blendvpd
 	i.op1 = rm
 	i.op2 = newOperandReg(rd)
+	return i
+}
+
+// asXmmRmRVex initializes this as rd = src1 op src2, op one of the scalar float arithmetic opcodes
+// vexScalarOp knows, in its AVX form.
+func (i *instruction) asXmmRmRVex(op sseOpcode, src2 operand, src1, rd regalloc.VReg) *instruction {
+	i.kind = xmmRmRVex
+	i.op1, i.op2 = src2, newOperandReg(rd)
+	i.u1, i.u2 = uint64(src1), uint64(op)
 	return i
 }
 
@@ -2568,6 +2608,7 @@ var defKinds = [instrMax]defKind{
 	xmmUnaryRmRImm:         defKindOp2,
 	xmmCmpRmR:              defKindNone,
 	xmmRmR:                 defKindNone,
+	xmmRmRVex:              defKindOp2,
 	xmmRmRImm:              defKindNone,
 	mov64MR:                defKindOp2,
 	movsxRmR:               defKindOp2,
@@ -2648,6 +2689,8 @@ const (
 	useKindBlendvpd
 	useKindCall
 	useKindVecMap
+	// useKindOp1U1Reg reads op1, a register or memory, and the register in u1.
+	useKindOp1U1Reg
 	useKindCallInd
 	useKindTailCallInd
 	useKindFcvtToSintSequence
@@ -2671,6 +2714,7 @@ var useKinds = [instrMax]useKind{
 	xmmUnaryRmRImm:         useKindOp1,
 	xmmCmpRmR:              useKindOp1Op2Reg,
 	xmmRmR:                 useKindOp1Op2Reg,
+	xmmRmRVex:              useKindOp1U1Reg,
 	xmmRmRImm:              useKindOp1Op2Reg,
 	mov64MR:                useKindOp1,
 	movzxRmR:               useKindOp1,

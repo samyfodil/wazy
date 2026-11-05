@@ -31,6 +31,62 @@ func TestInstruction_format_encode(t *testing.T) {
 			wantFormat: "testb $0x80, 7(%r13)",
 			want:       "41f6450780",
 		},
+		// Three-operand AVX scalar arithmetic, as llvm-mc encodes it.
+		{
+			setup:      func(i *instruction) { i.asXmmRmRVex(sseOpcodeAddsd, newOperandReg(xmm3VReg), xmm2VReg, xmm1VReg) },
+			wantFormat: "vaddsd %xmm3, %xmm2, %xmm1",
+			want:       "c5eb58cb",
+		},
+		{
+			setup:      func(i *instruction) { i.asXmmRmRVex(sseOpcodeSubss, newOperandReg(xmm11VReg), xmm9VReg, xmm14VReg) },
+			wantFormat: "vsubss %xmm11, %xmm9, %xmm14",
+			want:       "c441325cf3",
+		},
+		{
+			setup: func(i *instruction) {
+				i.asXmmRmRVex(sseOpcodeMulsd, newOperandMem(newAmodeImmReg(8, raxVReg)), xmm12VReg, xmm1VReg)
+			},
+			wantFormat: "vmulsd 8(%rax), %xmm12, %xmm1",
+			want:       "c59b594808",
+		},
+		{
+			setup: func(i *instruction) {
+				i.asXmmRmRVex(sseOpcodeDivss, newOperandMem(newAmodeRegRegShift(0x100, r13VReg, r10VReg, 2)), xmm1VReg, xmm9VReg)
+			},
+			wantFormat: "vdivss 256(%r13,%r10,4), %xmm1, %xmm9",
+			want:       "c401725e8c9500010000",
+		},
+		{
+			setup: func(i *instruction) {
+				i.asXmmRmRVex(sseOpcodeAddsd, newOperandMem(newAmodeImmReg(0, rspVReg)), xmm0VReg, xmm15VReg)
+			},
+			wantFormat: "vaddsd (%rsp), %xmm0, %xmm15",
+			want:       "c57b583c24",
+		},
+		{
+			setup:      func(i *instruction) { i.asXmmRmRVex(sseOpcodePshufb, newOperandReg(xmm3VReg), xmm2VReg, xmm1VReg) },
+			wantFormat: "vpshufb %xmm3, %xmm2, %xmm1",
+			want:       "c4e26900cb",
+		},
+		{
+			setup: func(i *instruction) {
+				i.asXmmRmRVex(sseOpcodePmulld, newOperandMem(newAmodeImmReg(16, raxVReg)), xmm10VReg, xmm11VReg)
+			},
+			wantFormat: "vpmulld 16(%rax), %xmm10, %xmm11",
+			want:       "c46229405810",
+		},
+		{
+			setup:      func(i *instruction) { i.asXmmRmRVex(sseOpcodeAndnps, newOperandReg(xmm1VReg), xmm2VReg, xmm3VReg) },
+			wantFormat: "vandnps %xmm1, %xmm2, %xmm3",
+			want:       "c5e855d9",
+		},
+		{
+			setup: func(i *instruction) {
+				i.asXmmRmRVex(sseOpcodePaddd, newOperandMem(newAmodeRegRegShift(0, r12VReg, rcxVReg, 3)), xmm14VReg, xmm7VReg)
+			},
+			wantFormat: "vpaddd (%r12,%rcx,8), %xmm14, %xmm7",
+			want:       "c4c109fe3ccc",
+		},
 		{
 			// pushq %rax; callq *88(%rax); add $8, %rsp.
 			setup:      func(i *instruction) { i.asYield(newAmodeImmReg(88, raxVReg)) },

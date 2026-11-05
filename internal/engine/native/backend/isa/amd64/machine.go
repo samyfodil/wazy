@@ -2202,15 +2202,18 @@ func (m *machine) lowerXmmRmR(instr *ssa.Instruction) {
 	// only it uses folds into it.
 	rn := m.getOperand_Mem_Reg(yDef)
 	rm := m.getOperand_Reg(xDef)
-	rd := m.c.VRegOf(instr.Return())
+	m.insertXmmBinary(op, rn, rm.reg(), m.c.VRegOf(instr.Return()))
+}
 
-	// rm is being overwritten, so we first copy its value to a temp register,
-	// in case it is referenced again later.
-	tmp := m.copyToTmp(rm.reg())
-
-	xmm := m.allocateInstr().asXmmRmR(op, rn, tmp)
-	m.insert(xmm)
-
+// insertXmmBinary inserts rd = src1 op src2: in AVX's three-operand form where there is one, which
+// overwrites neither, and otherwise as SSE's two-operand form on a copy of src1.
+func (m *machine) insertXmmBinary(op sseOpcode, src2 operand, src1, rd regalloc.VReg) {
+	if m.cpuFeatures.Has(platform.CpuFeatureAmd64AVX) && hasVexForm(op) {
+		m.insert(m.allocateInstr().asXmmRmRVex(op, src2, src1, rd))
+		return
+	}
+	tmp := m.copyToTmp(src1)
+	m.insert(m.allocateInstr().asXmmRmR(op, src2, tmp))
 	m.copyTo(tmp, rd)
 }
 
@@ -2705,7 +2708,7 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 	for i := range m.labelResolutionPends {
 		p := &m.labelResolutionPends[i]
 		switch p.instr.kind {
-		case jmp, jmpIf, lea, xmmUnaryRmR:
+		case jmp, jmpIf, lea, xmmUnaryRmR, xmmRmRVex:
 			target := p.instr.jmpLabel()
 			targetOffset := m.labelPositionPool.Get(int(target)).binaryOffset
 			imm32Offset := p.imm32Offset
@@ -4001,29 +4004,22 @@ func (m *machine) loadV128Const(lo, hi uint64) regalloc.VReg {
 func (m *machine) lowerVbBinOpUnaligned(op sseOpcode, x, y, ret ssa.Value) {
 	rn := m.getOperand_Reg(m.c.ValueDefinition(x))
 	rm := m.getOperand_Reg(m.c.ValueDefinition(y))
-	rd := m.c.VRegOf(ret)
-
-	tmp := m.copyToTmp(rn.reg())
-
-	binOp := m.allocateInstr()
-	binOp.asXmmRmR(op, rm, tmp)
-	m.insert(binOp)
-
-	m.copyTo(tmp, rd)
+	m.insertXmmBinary(op, rm, rn.reg(), m.c.VRegOf(ret))
 }
 
 func (m *machine) lowerVbBinOp(op sseOpcode, x, y, ret ssa.Value) {
 	rn := m.getOperand_Reg(m.c.ValueDefinition(x))
-	rm := m.getOperand_Mem_Reg(m.c.ValueDefinition(y))
-	rd := m.c.VRegOf(ret)
-
-	tmp := m.copyToTmp(rn.reg())
-
-	binOp := m.allocateInstr()
-	binOp.asXmmRmR(op, rm, tmp)
-	m.insert(binOp)
-
-	m.copyTo(tmp, rd)
+	yDef := m.c.ValueDefinition(y)
+	var rm operand
+	if m.cpuFeatures.Has(platform.CpuFeatureAmd64AVX) && hasVexForm(op) && m.c.MatchInstr(yDef, ssa.OpcodeLoad) {
+		// A VEX instruction's memory operand need not be aligned, so the load of a vector folds into it.
+		ptr, offset, _ := yDef.Instr.LoadData()
+		rm = newOperandMem(m.lowerToAddressMode(ptr, offset))
+		yDef.Instr.MarkLowered()
+	} else {
+		rm = m.getOperand_Mem_Reg(yDef)
+	}
+	m.insertXmmBinary(op, rm, rn.reg(), m.c.VRegOf(ret))
 }
 
 func (m *machine) lowerVFcmp(x, y ssa.Value, c ssa.FloatCmpCond, ret ssa.Value, lane ssa.VecLane) {
