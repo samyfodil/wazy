@@ -2246,6 +2246,11 @@ func (m *machine) lowerExitWithCode(execCtxVReg regalloc.VReg, code nativeapi.Ex
 }
 
 func (m *machine) lowerIcmpToFlag(x, y ssa.Value, signed bool) {
+	m.lowerIcmpToFlagWith(x, y, signed, regalloc.VRegInvalid)
+}
+
+// lowerIcmpToFlagWith is lowerIcmpToFlag with y already in yReg, where that is valid.
+func (m *machine) lowerIcmpToFlagWith(x, y ssa.Value, signed bool, yReg regalloc.VReg) {
 	// subs has a 32 and a 64 bit form only, so the comparison happens at the width of
 	// the wider operand, and the narrower one is extended into it by the operand helpers
 	// below, from extMod. The extension follows `signed`, which is what makes comparing
@@ -2262,6 +2267,27 @@ func (m *machine) lowerIcmpToFlag(x, y ssa.Value, signed bool) {
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extMod)
 	yDef := m.compiler.ValueDefinition(y)
 	var rm operand
+	if yReg.Valid() && y.Type() == cmpType {
+		alu := m.allocateInstr()
+		alu.asALU(aluOpSubS, xzrVReg, rn, operandNR(yReg), cmpType.Bits() == 64)
+		m.insert(alu)
+		return
+	}
+	if y.Type() == cmpType && m.compiler.MatchInstr(yDef, ssa.OpcodeIconst) {
+		// A negative constant whose negation fits an immediate: cmn rn, #-y sets the flags cmp rn, y
+		// would, -y being no minimum integer, rather than build the constant in a register.
+		k := int64(yDef.Instr.ConstantVal())
+		if cmpType.Bits() == 32 {
+			k = int64(int32(k))
+		}
+		if imm, ok := asImm12Operand(uint64(-k)); ok && k < 0 {
+			yDef.Instr.MarkLowered()
+			alu := m.allocateInstr()
+			alu.asALU(aluOpAddS, xzrVReg, rn, imm, cmpType.Bits() == 64)
+			m.insert(alu)
+			return
+		}
+	}
 	if y.Type().Bits() == cmpType.Bits() {
 		// Second operand can be in any of Imm12, ER, SR, or NR form supported by the SUBS instructions.
 		rm = m.getOperand_Imm12_ER_SR_NR(yDef, extMod)
@@ -2391,14 +2417,41 @@ func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.E
 
 func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 	cvalDef := m.compiler.ValueDefinition(c)
+	shared, sharedReg := ssa.ValueInvalid, regalloc.VRegInvalid
 
 	var cc condFlag
 	switch {
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
 		cvalInstr := cvalDef.Instr
-		x, y, c := cvalInstr.IcmpData()
+		cx, cy, c := cvalInstr.IcmpData()
 		cc = condFlagFromSSAIntegerCmpCond(c)
-		m.lowerIcmpToFlag(x, y, c.Signed())
+		// A clamp selects the constant it compares with: built in a register once, it serves both.
+		sameConst := func(v ssa.Value) bool {
+			if v == cy {
+				return true
+			}
+			dv, dy := m.compiler.ValueDefinition(v), m.compiler.ValueDefinition(cy)
+			return v.Type() == cy.Type() && m.compiler.MatchInstr(dv, ssa.OpcodeIconst) && m.compiler.MatchInstr(dy, ssa.OpcodeIconst) &&
+				dv.Instr.ConstantVal() == dy.Instr.ConstantVal()
+		}
+		if (sameConst(x) || sameConst(y)) && cy.Type() == cx.Type() && m.compiler.MatchInstr(m.compiler.ValueDefinition(cy), ssa.OpcodeIconst) {
+			k := m.compiler.ValueDefinition(cy).Instr.ConstantVal()
+			neg := -int64(k)
+			if cy.Type() == ssa.TypeI32 {
+				neg = -int64(int32(k))
+			}
+			_, imm := asImm12Operand(k)
+			_, cmn := asImm12Operand(uint64(neg))
+			if !imm && !(cmn && neg > 0) {
+				shared, sharedReg = y, m.compiler.AllocateVReg(cy.Type())
+				if sameConst(x) {
+					shared = x
+				}
+				m.insertLoadConstant(k, cy.Type(), sharedReg)
+				m.compiler.ValueDefinition(shared).Instr.MarkLowered()
+			}
+		}
+		m.lowerIcmpToFlagWith(cx, cy, c.Signed(), sharedReg)
 		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeFcmp): // This case we can use the Fpu flag directly.
 		cvalInstr := cvalDef.Instr
@@ -2464,8 +2517,13 @@ func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 		cc = ne
 	}
 
-	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
-	rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
+	operandOf := func(v ssa.Value) operand {
+		if v == shared {
+			return operandNR(sharedReg)
+		}
+		return m.getOperand_NR(m.compiler.ValueDefinition(v), extModeNone)
+	}
+	rn, rm := operandOf(x), operandOf(y)
 
 	rd := m.compiler.VRegOf(result)
 	switch x.Type() {

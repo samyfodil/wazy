@@ -81,12 +81,16 @@ func (m *machine) threadJumps() {
 	}
 	// A conditional branch over an unconditional one, to the code right after both, becomes the opposite
 	// conditional branch to where the unconditional one goes: a loop's back edge often falls through this
-	// way, one branch shorter.
+	// way, one branch shorter. Labels between the two are of the unconditional one's block, which every
+	// branch to them now skips.
 	for cur := m.rootInstr; cur != nil; cur = cur.next {
 		if cur.kind != condBr || cur.condBrOffsetResolved() {
 			continue
 		}
 		j := cur.next
+		for j != nil && j.kind == nop0 {
+			j = j.next
+		}
 		if j == nil || j.kind != br {
 			continue
 		}

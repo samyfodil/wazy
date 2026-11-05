@@ -523,13 +523,12 @@ L0 (SSA Block: blk0):
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
 	ldr x8, [x21]
-	tbnz x8, #63, #0x8 (L3)
+	tbz x8, #63, #-0x4 (L1)
 L5 (SSA Block: blk5):
 L4 (SSA Block: blk4):
-	b #-0x8 (L1)
 L3 (SSA Block: blk3):
 	yield x0
-	b #-0x1c (L1)
+	b #-0x18 (L1)
 `,
 		},
 		{
@@ -560,13 +559,12 @@ L0 (SSA Block: blk0):
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
 	ldr x8, [x21]
-	tbnz x8, #63, #0x20 (L3)
+	tbnz x8, #63, #0x1c (L3)
 L6 (SSA Block: blk6):
 L4 (SSA Block: blk4):
 	orr w8, wzr, #0x1
-	cbz w8, #0x8 L5
+	cbnz w8, #-0xc (L1)
 L7 (SSA Block: blk7):
-	b #-0x10 (L1)
 L5 (SSA Block: blk5):
 	mov x0, x2
 	add sp, sp, #0x10
@@ -574,7 +572,7 @@ L5 (SSA Block: blk5):
 	ret
 L3 (SSA Block: blk3):
 	yield x0
-	b #-0x2c (L4)
+	b #-0x28 (L4)
 `,
 		},
 		{
@@ -603,20 +601,19 @@ L0 (SSA Block: blk0):
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
 	ldr x8, [x21]
-	tbnz x8, #63, #0x1c (L3)
+	tbnz x8, #63, #0x18 (L3)
 L6 (SSA Block: blk6):
 L4 (SSA Block: blk4):
 	orr w8, wzr, #0x1
-	cbz w8, #0x8 L5
+	cbnz w8, #-0xc (L1)
 L7 (SSA Block: blk7):
-	b #-0x10 (L1)
 L5 (SSA Block: blk5):
 	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
 L3 (SSA Block: blk3):
 	yield x0
-	b #-0x28 (L4)
+	b #-0x24 (L4)
 `,
 		},
 		{
@@ -750,11 +747,8 @@ L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 	mov x0, x2
-	cbz w0, #0x10 L2
+	cbnz w0, #0x8 (L3)
 L1 (SSA Block: blk1):
-	add sp, sp, #0x10
-	ldr x30, [sp], #0x10
-	ret
 L2 (SSA Block: blk2):
 	mov x0, x3
 L3 (SSA Block: blk3):
@@ -813,12 +807,11 @@ L0 (SSA Block: blk0):
 	str xzr, [sp, #-0x10]!
 L1 (SSA Block: blk1):
 	ldr x8, [x21]
-	tbnz x8, #63, #0x1c (L3)
+	tbnz x8, #63, #0x18 (L3)
 L7 (SSA Block: blk7):
 L4 (SSA Block: blk4):
-	cbz w2, #0x8 L6
+	cbnz w2, #-0x8 (L1)
 L8 (SSA Block: blk8):
-	b #-0xc (L1)
 L6 (SSA Block: blk6):
 	mov x0, xzr
 	add sp, sp, #0x10
@@ -826,7 +819,7 @@ L6 (SSA Block: blk6):
 	ret
 L3 (SSA Block: blk3):
 	yield x0
-	b #-0x28 (L4)
+	b #-0x24 (L4)
 `,
 		},
 		{
