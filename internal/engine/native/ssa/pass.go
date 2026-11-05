@@ -28,6 +28,7 @@ func (b *builder) runPreBlockLayoutPasses() {
 	passRedundantPhiEliminationOpt(b)
 	passWidenMemoryBoundsOpt(b)
 	passDominatedMemoryBoundsEliminationOpt(b)
+	passMergeBoundsChecksOpt(b)
 
 	// Note: wazy intentionally does NOT run middle-end "language compiler"
 	// optimizations here (constant folding, algebraic identities, CSE,

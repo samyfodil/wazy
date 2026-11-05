@@ -185,22 +185,38 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	}
 }
 
-// lowerTwoIcmpsToFlag branches to target where either of the comparisons op or-s holds, or, where and,
-// both of those it and-s do, or, for a brz, where that does not hold: the first sets the flags, and a
-// conditional compare sets them by the second where the first does not hold (holds, for and), and
-// otherwise to flags that satisfy the second's condition (fail it). It reports false, emitting nothing,
-// where op is not of two comparisons of same-width registers, or of a register with a constant up to
-// 31, that are its only uses. The first may be a test of an and with zero.
+// lowerTwoIcmpsToFlag branches to target where twoIcmpsToFlag's condition holds, or, for a brz, where it
+// does not. It reports false, emitting nothing, where twoIcmpsToFlag does.
 func (m *machine) lowerTwoIcmpsToFlag(op *ssa.Instruction, and, brz bool, target label) bool {
+	cc, ok := m.twoIcmpsToFlag(op, and)
+	if !ok {
+		return false
+	}
+	if brz {
+		cc = cc.invert()
+	}
+	cbr := m.allocateInstr()
+	cbr.asCondBr(cc.asCond(), target, false /* ignored */)
+	m.insert(cbr)
+	return true
+}
+
+// twoIcmpsToFlag sets the flags so that the condition it returns holds where either of the comparisons
+// op or-s does, or, where and, both of those it and-s: the first sets them, and a conditional compare
+// sets them by the second where the first does not hold (holds, for and), and otherwise to flags that
+// satisfy the second's condition (fail it). It reports false, emitting nothing, where op is not of two
+// comparisons of same-width registers, or of a register with a constant up to 31, that are its only
+// uses. The first may be a test of an and with zero.
+func (m *machine) twoIcmpsToFlag(op *ssa.Instruction, and bool) (condFlag, bool) {
 	a, b := op.Arg2()
 	ad, bd := m.compiler.ValueDefinition(a), m.compiler.ValueDefinition(b)
 	if !m.compiler.MatchInstr(ad, ssa.OpcodeIcmp) || !m.compiler.MatchInstr(bd, ssa.OpcodeIcmp) {
-		return false
+		return 0, false
 	}
 	ax, ay, ac := ad.Instr.IcmpData()
 	bx, by, bc := bd.Instr.IcmpData()
 	if bx.Type() != by.Type() || ax.Type() != ay.Type() {
-		return false
+		return 0, false
 	}
 	byDef := m.compiler.ValueDefinition(by)
 	imm, isImm := uint64(0), false
@@ -228,15 +244,9 @@ func (m *machine) lowerTwoIcmpsToFlag(op *ssa.Instruction, and, brz bool, target
 		ccmp.asCCmpReg(rn, m.getOperand_NR(byDef, extModeNone), when, otherwise, bx.Type().Bits() == 64)
 	}
 	m.insert(ccmp)
-	if brz {
-		cc2 = cc2.invert()
-	}
-	cbr := m.allocateInstr()
-	cbr.asCondBr(cc2.asCond(), target, false /* ignored */)
-	m.insert(cbr)
 	ad.Instr.MarkLowered()
 	bd.Instr.MarkLowered()
-	return true
+	return cc2, true
 }
 
 // satisfyingFlags returns NZCV flags under which c holds.
@@ -2512,8 +2522,16 @@ func (m *machine) promoteToF64(rn operand) regalloc.VReg {
 // The comparison feeding the trap is folded whenever it is still foldable,
 // which is the shape the frontend emits. It is not always: any pass that moves
 // the comparison into another block, or a second use of it, leaves a condition
-// already materialized as a 0-or-1 value, and cbnz tests that directly.
+// already materialized as a 0-or-1 value, and cbnz tests that directly. An or
+// of two comparisons, as two bounds checks merged make, is a compare and a
+// conditional compare.
 func (m *machine) lowerTrapCond(condDef backend.SSAValueDefinition) cond {
+	if m.compiler.MatchInstr(condDef, ssa.OpcodeBor) {
+		if cc, ok := m.twoIcmpsToFlag(condDef.Instr, false); ok {
+			condDef.Instr.MarkLowered()
+			return cc.asCond()
+		}
+	}
 	if !m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
 		rn := m.getOperand_NR(condDef, extModeNone)
 		return registerAsRegNotZeroCond(rn.nr())

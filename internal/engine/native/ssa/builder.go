@@ -238,6 +238,8 @@ type builder struct {
 	loopTestScratch                   []loopTest
 	loopBodyScratch, loopAvoidScratch []*basicBlock
 
+	// boundsMoves is passMergeBoundsChecksOpt's scratch.
+	boundsMoves []*Instruction
 	// imuls counts the multiplications the function was built with. See passLinearFormOpt.
 	imuls int
 	// linearMark, linearStamp, linearBlockStamp and linearTerms are passLinearFormOpt's.
