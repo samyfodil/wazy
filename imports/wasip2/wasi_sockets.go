@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/samyfodil/wazy/component"
 )
@@ -302,7 +303,7 @@ type outgoingDatagramStream struct {
 // shared, disjoint-based counter is safe across all three).
 type wasiSockets struct {
 	mu           sync.Mutex
-	dial         func(network, address string) (net.Conn, error)
+	dial         func(ctx context.Context, network, address string) (net.Conn, error)
 	listenPacket func(network, address string) (net.PacketConn, error)
 	listen       func(network, address string) (net.Listener, error)
 	resolveIP    func(ctx context.Context, name string) ([]net.IP, error)
@@ -330,7 +331,7 @@ const wasiSockRepBase uint32 = 1 << 20
 // through listenPacket, and binds+listens TCP through listen (none ever nil
 // by the time WithWASI constructs one -- see WASIConfig.Dialer/ListenPacket/
 // Listen's own docs).
-func newWasiSockets(dial func(network, address string) (net.Conn, error), listenPacket func(network, address string) (net.PacketConn, error), listen func(network, address string) (net.Listener, error), resolveIP func(ctx context.Context, name string) ([]net.IP, error)) *wasiSockets {
+func newWasiSockets(dial func(ctx context.Context, network, address string) (net.Conn, error), listenPacket func(network, address string) (net.PacketConn, error), listen func(network, address string) (net.Listener, error), resolveIP func(ctx context.Context, name string) ([]net.IP, error)) *wasiSockets {
 	return &wasiSockets{
 		dial:          dial,
 		listenPacket:  listenPacket,
@@ -451,14 +452,18 @@ func (s *wasiSockets) outDatagramStreamNode(rep uint32) (*outgoingDatagramStream
 // "closed" rather than fabricating a bogus error-code payload -- a real
 // guest observes "the stream ended" either way and does not distinguish
 // further.
-func (s *sockInStream) read(length uint64) ([]component.Value, error) {
+func (s *sockInStream) read(ctx context.Context, length uint64) ([]component.Value, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if length > wasiSockMaxReadChunk {
 		length = wasiSockMaxReadChunk
 	}
 	buf := make([]byte, length)
+	stop := cancelBlocking(ctx, s.conn.SetReadDeadline)
 	n, err := s.conn.Read(buf)
+	if stop() && n == 0 {
+		return nil, ctx.Err()
+	}
 	if n > 0 {
 		return []component.Value{component.ResultValue{IsErr: false, Payload: wasiListFromBytes(buf[:n])}}, nil
 	}
@@ -474,11 +479,74 @@ func (s *sockInStream) read(length uint64) ([]component.Value, error) {
 // "success or failure, no partial-write case to report" shape
 // [method]output-stream.write's result<_,stream-error> expects, mirroring
 // wasi.go's writeSink dispatch for stdio/fs writers.
-func (s *sockOutStream) write(buf []byte) error {
+func (s *sockOutStream) write(ctx context.Context, buf []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	stop := cancelBlocking(ctx, s.conn.SetWriteDeadline)
 	_, err := s.conn.Write(buf)
+	if stop() && err != nil {
+		return ctx.Err()
+	}
 	return err
+}
+
+// cancelBlocking lets ctx's cancellation end a blocking call on a connection, by moving the deadline
+// set sets into the past: the guest's call then returns ctx's error rather than waiting on the network
+// for as long as the peer stays silent. The stop it returns must run once the blocking call has
+// returned, and may run again; it clears the deadline and reports whether ctx was cancelled.
+func cancelBlocking(ctx context.Context, set func(time.Time) error) (stop func() bool) {
+	if ctx.Done() == nil {
+		return notCancelled
+	}
+	fired := make(chan struct{})
+	stopAfter := context.AfterFunc(ctx, func() {
+		_ = set(time.Unix(1, 0))
+		close(fired)
+	})
+	var stopped, cancelled bool
+	return func() bool {
+		if !stopped {
+			stopped = true
+			if !stopAfter() {
+				<-fired
+				_ = set(time.Time{})
+				cancelled = true
+			}
+		}
+		return cancelled
+	}
+}
+
+func notCancelled() bool { return false }
+
+// cancelableDial adapts a dialer that takes no context, such as WASIConfig.Dialer, so that ctx's
+// cancellation ends the wait for it. A connection that completes after that is closed.
+func cancelableDial(dial func(network, address string) (net.Conn, error)) func(ctx context.Context, network, address string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if ctx.Done() == nil {
+			return dial(network, address)
+		}
+		type dialed struct {
+			conn net.Conn
+			err  error
+		}
+		done := make(chan dialed, 1)
+		go func() {
+			conn, err := dial(network, address)
+			done <- dialed{conn, err}
+		}()
+		select {
+		case d := <-done:
+			return d.conn, d.err
+		case <-ctx.Done():
+			go func() {
+				if d := <-done; d.conn != nil {
+					_ = d.conn.Close()
+				}
+			}()
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // receive performs a real, blocking net.PacketConn.ReadFrom against s's
@@ -505,16 +573,21 @@ func (s *sockOutStream) write(buf []byte) error {
 // real connected UDP socket's kernel-side filtering; an unconnected stream
 // (s.remote == nil) accepts from anyone, exactly like a real unconnected UDP
 // socket's recvfrom.
-func (s *incomingDatagramStream) receive(maxResults uint64) ([]component.Value, error) {
+func (s *incomingDatagramStream) receive(ctx context.Context, maxResults uint64) ([]component.Value, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if maxResults == 0 {
 		return []component.Value{component.ResultValue{IsErr: false, Payload: []component.Value{}}}, nil
 	}
 	buf := make([]byte, wasiSockMaxReadChunk)
+	stop := cancelBlocking(ctx, s.pconn.SetReadDeadline)
+	defer stop()
 	for {
 		n, raddr, err := s.pconn.ReadFrom(buf)
 		if err != nil {
+			if stop() {
+				return nil, ctx.Err()
+			}
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiUDPErrToCode(err)}}, nil
 		}
 		udpAddr, ok := raddr.(*net.UDPAddr)
@@ -544,9 +617,11 @@ func (s *incomingDatagramStream) receive(maxResults uint64) ([]component.Value, 
 // count of datagrams actually written is reported Ok, matching "this
 // function never returns an error [if] at least one datagram has been sent
 // successfully".
-func (s *outgoingDatagramStream) send(datagrams []component.Value) ([]component.Value, error) {
+func (s *outgoingDatagramStream) send(ctx context.Context, datagrams []component.Value) ([]component.Value, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	stop := cancelBlocking(ctx, s.pconn.SetWriteDeadline)
+	defer stop()
 	var sent uint64
 	var lastErr error
 sendLoop:
@@ -575,6 +650,9 @@ sendLoop:
 			break sendLoop
 		}
 		if _, err := s.pconn.WriteTo(data, addr); err != nil {
+			if stop() {
+				return nil, ctx.Err()
+			}
 			lastErr = err
 			break sendLoop
 		}
@@ -826,7 +904,7 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 		return []component.Value{component.ResultValue{IsErr: false, Payload: handle}}, nil
 	}
 
-	startConnect := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+	startConnect := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 3 {
 			return nil, fmt.Errorf("[method]tcp-socket.start-connect: expected 3 args (self, network, remote-address), got %d", len(args))
 		}
@@ -856,7 +934,10 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 		// the real, blocking connect happens right here, synchronously --
 		// finish-connect (below) only ever reports this already-settled
 		// outcome.
-		node.conn, node.dialErr = sockets.dial("tcp", addr)
+		node.conn, node.dialErr = sockets.dial(ctx, "tcp", addr)
+		if node.dialErr != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return []component.Value{component.ResultValue{IsErr: false, Payload: nil}}, nil
 	}
 
@@ -1011,7 +1092,7 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 	// tcp-socket wraps the accepted net.Conn (for local/remote-address), and
 	// the two streams read/write that same conn, exactly as finish-connect
 	// mints its own stream pair over one conn.
-	accept := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+	accept := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		node, err := tcpListenerNode(sockets, "accept", args)
 		if err != nil {
 			return nil, err
@@ -1022,7 +1103,14 @@ func wasiSocketOptions(sockets *wasiSockets) []component.Option {
 		if ln == nil {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiSockErrInvalidState}}, nil
 		}
+		stop := notCancelled
+		if d, ok := ln.(interface{ SetDeadline(time.Time) error }); ok {
+			stop = cancelBlocking(ctx, d.SetDeadline)
+		}
 		conn, aerr := ln.Accept()
+		if stop() && aerr != nil {
+			return nil, ctx.Err()
+		}
 		if aerr != nil {
 			return []component.Value{component.ResultValue{IsErr: true, Payload: wasiTCPListenErrToCode(aerr)}}, nil
 		}
@@ -1511,7 +1599,7 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
 		return []component.Value{component.ResultValue{IsErr: false, Payload: v}}, nil
 	}
 
-	incomingReceive := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+	incomingReceive := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: expected 2 args (self, max-results), got %d", len(args))
 		}
@@ -1527,7 +1615,7 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]incoming-datagram-stream.receive: incoming-datagram-stream rep %d does not name a live stream", selfRep)
 		}
-		return node.receive(maxResults)
+		return node.receive(ctx, maxResults)
 	}
 
 	incomingSubscribe := func(_ context.Context, args []component.Value) ([]component.Value, error) {
@@ -1561,7 +1649,7 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
 		return []component.Value{component.ResultValue{IsErr: false, Payload: uint64(1) << 20}}, nil
 	}
 
-	outgoingSend := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+	outgoingSend := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: expected 2 args (self, datagrams), got %d", len(args))
 		}
@@ -1577,7 +1665,7 @@ func wasiUDPSocketOptions(sockets *wasiSockets) []component.Option {
 		if !ok {
 			return nil, fmt.Errorf("[method]outgoing-datagram-stream.send: outgoing-datagram-stream rep %d does not name a live stream", selfRep)
 		}
-		return node.send(datagrams)
+		return node.send(ctx, datagrams)
 	}
 
 	outgoingSubscribe := func(_ context.Context, args []component.Value) ([]component.Value, error) {

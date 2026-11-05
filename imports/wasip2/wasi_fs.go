@@ -1700,7 +1700,7 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 	// blocking net.Conn.Read (sockInStream.read), so the two methods differ
 	// there in name only, identically to how this package's fs path never
 	// distinguished them either.
-	streamRead := func(_ context.Context, args []component.Value) ([]component.Value, error) {
+	streamRead := func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("[method]input-stream.read: expected 2 args (self, len), got %d", len(args))
 		}
@@ -1715,7 +1715,7 @@ func wasiFilesystemOptions(fs *wasiFS, sockets *wasiSockets) []component.Option 
 		s, err := fs.streamNode(selfRep)
 		if err != nil {
 			if sock, found := sockets.inStreamNode(selfRep); found {
-				return sock.read(length)
+				return sock.read(ctx, length)
 			}
 			return nil, fmt.Errorf("[method]input-stream.read: %w", err)
 		}
