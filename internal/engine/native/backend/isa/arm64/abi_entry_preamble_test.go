@@ -154,12 +154,16 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	ldr s1, [x25], #0x8
 	ldr x4, [x25], #0x8
 	bl x24
-	str s0, [x19], #0x8
+	umov w15, v0.s[0]
+	str x15, [x19], #0x8
 	str d1, [x19], #0x8
-	str w0, [x19], #0x8
-	str s2, [x19], #0x8
+	mov w15, w0
+	str x15, [x19], #0x8
+	umov w15, v2.s[0]
+	str x15, [x19], #0x8
 	str x1, [x19], #0x8
-	str w2, [x19], #0x8
+	mov w15, w2
+	str x15, [x19], #0x8
 	str d3, [x19], #0x8
 	ldr x29, [x20, #0x10]
 	ldr x27, [x20, #0x18]
@@ -186,38 +190,49 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	mov sp, x26
 	ldr x21, [x20, #0x2e0]
 	bl x24
-	str s0, [x19], #0x8
+	umov w15, v0.s[0]
+	str x15, [x19], #0x8
 	str d1, [x19], #0x8
-	str w0, [x19], #0x8
-	str s2, [x19], #0x8
+	mov w15, w0
+	str x15, [x19], #0x8
+	umov w15, v2.s[0]
+	str x15, [x19], #0x8
 	str x1, [x19], #0x8
-	str w2, [x19], #0x8
-	str w3, [x19], #0x8
+	mov w15, w2
+	str x15, [x19], #0x8
+	mov w15, w3
+	str x15, [x19], #0x8
 	str x4, [x19], #0x8
-	str w5, [x19], #0x8
+	mov w15, w5
+	str x15, [x19], #0x8
 	str x6, [x19], #0x8
-	str s3, [x19], #0x8
+	umov w15, v3.s[0]
+	str x15, [x19], #0x8
 	str d4, [x19], #0x8
-	str w7, [x19], #0x8
-	str s5, [x19], #0x8
+	mov w15, w7
+	str x15, [x19], #0x8
+	umov w15, v5.s[0]
+	str x15, [x19], #0x8
 	ldr x15, [sp, #-0x70]
 	str x15, [x19], #0x8
 	ldr w15, [sp, #-0x68]
-	str w15, [x19], #0x8
+	str x15, [x19], #0x8
 	ldr w15, [sp, #-0x60]
-	str w15, [x19], #0x8
+	str x15, [x19], #0x8
 	ldr x15, [sp, #-0x58]
 	str x15, [x19], #0x8
 	ldr w15, [sp, #-0x50]
-	str w15, [x19], #0x8
+	str x15, [x19], #0x8
 	ldr x15, [sp, #-0x48]
 	str x15, [x19], #0x8
-	str s6, [x19], #0x8
+	umov w15, v6.s[0]
+	str x15, [x19], #0x8
 	str d7, [x19], #0x8
 	ldr d15, [sp, #-0x40]
 	str d15, [x19], #0x8
 	ldr s15, [sp, #-0x38]
-	str s15, [x19], #0x8
+	umov w15, v15.s[0]
+	str x15, [x19], #0x8
 	ldr d15, [sp, #-0x30]
 	str d15, [x19], #0x8
 	ldr q15, [sp, #-0x28]
@@ -367,32 +382,39 @@ func TestAbiImpl_constructEntryPreamble(t *testing.T) {
 	ldr q15, [x25], #0x10
 	str q15, [sp, #-0x50]
 	bl x24
-	str s0, [x19], #0x8
+	umov w15, v0.s[0]
+	str x15, [x19], #0x8
 	str d1, [x19], #0x8
-	str w0, [x19], #0x8
-	str s2, [x19], #0x8
+	mov w15, w0
+	str x15, [x19], #0x8
+	umov w15, v2.s[0]
+	str x15, [x19], #0x8
 	str x1, [x19], #0x8
-	str w2, [x19], #0x8
-	str w3, [x19], #0x8
+	mov w15, w2
+	str x15, [x19], #0x8
+	mov w15, w3
+	str x15, [x19], #0x8
 	str x4, [x19], #0x8
-	str w5, [x19], #0x8
+	mov w15, w5
+	str x15, [x19], #0x8
 	str x6, [x19], #0x8
-	str w7, [x19], #0x8
+	mov w15, w7
+	str x15, [x19], #0x8
 	ldr w15, [sp, #-0x40]
-	str w15, [x19], #0x8
+	str x15, [x19], #0x8
 	str q3, [x19], #0x10
 	str q4, [x19], #0x10
 	str q5, [x19], #0x10
 	ldr x15, [sp, #-0x38]
 	str x15, [x19], #0x8
 	ldr w15, [sp, #-0x30]
-	str w15, [x19], #0x8
+	str x15, [x19], #0x8
 	ldr w15, [sp, #-0x28]
-	str w15, [x19], #0x8
+	str x15, [x19], #0x8
 	ldr x15, [sp, #-0x20]
 	str x15, [x19], #0x8
 	ldr w15, [sp, #-0x18]
-	str w15, [x19], #0x8
+	str x15, [x19], #0x8
 	ldr x15, [sp, #-0x10]
 	str x15, [x19], #0x8
 	ldr x29, [x20, #0x10]
@@ -560,7 +582,8 @@ func TestMachine_goEntryPreamblePassResult(t *testing.T) {
 		{
 			arg: backend.ABIArg{Type: ssa.TypeI32, Reg: x0VReg, Kind: backend.ABIArgKindReg},
 			exp: `
-	str w0, [x16], #0x8
+	mov w15, w0
+	str x15, [x16], #0x8
 `,
 		},
 		{
@@ -572,7 +595,8 @@ func TestMachine_goEntryPreamblePassResult(t *testing.T) {
 		{
 			arg: backend.ABIArg{Type: ssa.TypeF32, Reg: v11VReg, Kind: backend.ABIArgKindReg},
 			exp: `
-	str s11, [x16], #0x8
+	umov w15, v11.s[0]
+	str x15, [x16], #0x8
 `,
 		},
 		{
@@ -598,7 +622,7 @@ func TestMachine_goEntryPreamblePassResult(t *testing.T) {
 			arg: backend.ABIArg{Type: ssa.TypeI32, Offset: 0, Kind: backend.ABIArgKindStack},
 			exp: `
 	ldr w15, [sp]
-	str w15, [x16], #0x8
+	str x15, [x16], #0x8
 `,
 		},
 		{
@@ -606,14 +630,14 @@ func TestMachine_goEntryPreamblePassResult(t *testing.T) {
 			retStart: 1024,
 			exp: `
 	ldr w15, [sp, #0x400]
-	str w15, [x16], #0x8
+	str x15, [x16], #0x8
 `,
 		},
 		{
 			arg: backend.ABIArg{Type: ssa.TypeI32, Offset: 8, Kind: backend.ABIArgKindStack},
 			exp: `
 	ldr w15, [sp, #0x8]
-	str w15, [x16], #0x8
+	str x15, [x16], #0x8
 `,
 		},
 		{
@@ -621,7 +645,7 @@ func TestMachine_goEntryPreamblePassResult(t *testing.T) {
 			retStart: 1024,
 			exp: `
 	ldr w15, [sp, #0x408]
-	str w15, [x16], #0x8
+	str x15, [x16], #0x8
 `,
 		},
 		{
@@ -642,14 +666,16 @@ func TestMachine_goEntryPreamblePassResult(t *testing.T) {
 			arg: backend.ABIArg{Type: ssa.TypeF32, Offset: 64, Kind: backend.ABIArgKindStack},
 			exp: `
 	ldr s15, [sp, #0x40]
-	str s15, [x16], #0x8
+	umov w15, v15.s[0]
+	str x15, [x16], #0x8
 `,
 		},
 		{
 			arg: backend.ABIArg{Type: ssa.TypeF32, Offset: 2056, Kind: backend.ABIArgKindStack},
 			exp: `
 	ldr s15, [sp, #0x808]
-	str s15, [x16], #0x8
+	umov w15, v15.s[0]
+	str x15, [x16], #0x8
 `,
 		},
 		{

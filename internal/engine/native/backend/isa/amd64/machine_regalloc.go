@@ -254,6 +254,9 @@ func (m *machine) insertStoreRegisterAt(v regalloc.VReg, instr *instruction, aft
 		cur, prevNext = instr.prev, instr
 	}
 
+	if _, ok := m.remat[v.ID()]; ok {
+		return linkInstr(cur, prevNext) // Its reload loads the constant again.
+	}
 	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), typ.Size())
 	store := m.allocateInstr()
 	mem := newOperandMem(m.newAmodeImmReg(uint32(offsetFromSP), rspVReg))
@@ -285,6 +288,21 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 		cur, prevNext = instr, instr.next
 	} else {
 		cur, prevNext = instr.prev, instr
+	}
+
+	if c, ok := m.remat[v.ID()]; ok {
+		load := m.allocateInstr()
+		if c == 0 {
+			load.asZeros(v)
+		} else {
+			op := sseOpcodeMovss
+			if typ == ssa.TypeF64 {
+				op = sseOpcodeMovsd
+			}
+			load.asXmmUnaryRmR(op, newOperandMem(m.newAmodeRipRel(m.fconstLabel(c))), v)
+		}
+		cur = linkInstr(cur, load)
+		return linkInstr(cur, prevNext)
 	}
 
 	// Load the value to the temporary.

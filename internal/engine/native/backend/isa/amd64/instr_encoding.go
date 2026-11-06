@@ -154,202 +154,51 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		}
 		encodeRegReg(c, legacyPrefixesNone, 0x89, 1, src, dst, rex)
 
+	case imulImm:
+		var rex rexInfo
+		if i.b1 {
+			rex = rex.setW()
+		} else {
+			rex = rex.clearW()
+		}
+		dst := regEncodings[i.op2.reg().RealReg()]
+		imm := uint32(i.u1)
+		imm8 := lower8willSignExtendTo32(imm)
+		opc := uint32(0x69)
+		if imm8 {
+			opc = 0x6b
+		}
+		switch i.op1.kind {
+		case operandKindReg:
+			encodeRegReg(c, legacyPrefixesNone, opc, 1, dst, regEncodings[i.op1.reg().RealReg()], rex)
+		case operandKindMem:
+			if i.op1.addressMode().kind() == amodeRipRel {
+				panic("BUG: a RIP-relative operand is resolved as if no immediate followed it")
+			}
+			encodeRegMem(c, legacyPrefixesNone, opc, 1, dst, i.op1.addressMode(), rex)
+		default:
+			panic("BUG: invalid operand kind")
+		}
+		if imm8 {
+			c.EmitByte(byte(imm))
+		} else {
+			c.Emit4Bytes(imm)
+		}
+
+	case xmmRmRVex:
+		pp, mapSel, opcode := vexEncoding(sseOpcode(i.u2))
+		dst := uint8(regEncodings[i.op2.reg().RealReg()])
+		src1 := uint8(regEncodings[regalloc.VReg(i.u1).RealReg()])
+		needsLabelResolution = encodeVex3(c, mapSel, pp, opcode, dst, src1, i.op1)
 	case xmmRmR, blendvpd:
 		op := sseOpcode(i.u1)
 		var legPrex legacyPrefixes
 		var opcode uint32
 		var opcodeNum uint32
-		switch op {
-		case sseOpcodeAddps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F58, 2
-		case sseOpcodeAddpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F58, 2
-		case sseOpcodeAddss:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F58, 2
-		case sseOpcodeAddsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F58, 2
-		case sseOpcodeAndps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F54, 2
-		case sseOpcodeAndpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F54, 2
-		case sseOpcodeAndnps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F55, 2
-		case sseOpcodeAndnpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F55, 2
-		case sseOpcodeBlendvps:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3814, 3
-		case sseOpcodeBlendvpd:
+		if kind == blendvpd {
 			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3815, 3
-		case sseOpcodeDivps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F5E, 2
-		case sseOpcodeDivpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F5E, 2
-		case sseOpcodeDivss:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F5E, 2
-		case sseOpcodeDivsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F5E, 2
-		case sseOpcodeMaxps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F5F, 2
-		case sseOpcodeMaxpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F5F, 2
-		case sseOpcodeMaxss:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F5F, 2
-		case sseOpcodeMaxsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F5F, 2
-		case sseOpcodeMinps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F5D, 2
-		case sseOpcodeMinpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F5D, 2
-		case sseOpcodeMinss:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F5D, 2
-		case sseOpcodeMinsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F5D, 2
-		case sseOpcodeMovlhps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F16, 2
-		case sseOpcodeMovsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F10, 2
-		case sseOpcodeMulps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F59, 2
-		case sseOpcodeMulpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F59, 2
-		case sseOpcodeMulss:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F59, 2
-		case sseOpcodeMulsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F59, 2
-		case sseOpcodeOrpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F56, 2
-		case sseOpcodeOrps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F56, 2
-		case sseOpcodePackssdw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F6B, 2
-		case sseOpcodePacksswb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F63, 2
-		case sseOpcodePackusdw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F382B, 3
-		case sseOpcodePackuswb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F67, 2
-		case sseOpcodePaddb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFC, 2
-		case sseOpcodePaddd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFE, 2
-		case sseOpcodePaddq:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FD4, 2
-		case sseOpcodePaddw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFD, 2
-		case sseOpcodePaddsb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEC, 2
-		case sseOpcodePaddsw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FED, 2
-		case sseOpcodePaddusb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDC, 2
-		case sseOpcodePaddusw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDD, 2
-		case sseOpcodePand:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDB, 2
-		case sseOpcodePandn:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDF, 2
-		case sseOpcodePavgb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FE0, 2
-		case sseOpcodePavgw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FE3, 2
-		case sseOpcodePcmpeqb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F74, 2
-		case sseOpcodePcmpeqw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F75, 2
-		case sseOpcodePcmpeqd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F76, 2
-		case sseOpcodePcmpeqq:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3829, 3
-		case sseOpcodePcmpgtb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F64, 2
-		case sseOpcodePcmpgtw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F65, 2
-		case sseOpcodePcmpgtd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F66, 2
-		case sseOpcodePcmpgtq:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3837, 3
-		case sseOpcodePmaddwd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FF5, 2
-		case sseOpcodePmaxsb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383C, 3
-		case sseOpcodePmaxsw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEE, 2
-		case sseOpcodePmaxsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383D, 3
-		case sseOpcodePmaxub:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDE, 2
-		case sseOpcodePmaxuw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383E, 3
-		case sseOpcodePmaxud:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383F, 3
-		case sseOpcodePminsb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3838, 3
-		case sseOpcodePminsw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEA, 2
-		case sseOpcodePminsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3839, 3
-		case sseOpcodePminub:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDA, 2
-		case sseOpcodePminuw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383A, 3
-		case sseOpcodePminud:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383B, 3
-		case sseOpcodePmulld:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3840, 3
-		case sseOpcodePmullw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FD5, 2
-		case sseOpcodePmuludq:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FF4, 2
-		case sseOpcodePor:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEB, 2
-		case sseOpcodePshufb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3800, 3
-		case sseOpcodePsubb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FF8, 2
-		case sseOpcodePsubd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFA, 2
-		case sseOpcodePsubq:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFB, 2
-		case sseOpcodePsubw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FF9, 2
-		case sseOpcodePsubsb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FE8, 2
-		case sseOpcodePsubsw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FE9, 2
-		case sseOpcodePsubusb:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FD8, 2
-		case sseOpcodePsubusw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FD9, 2
-		case sseOpcodePunpckhbw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F68, 2
-		case sseOpcodePunpcklbw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F60, 2
-		case sseOpcodePxor:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEF, 2
-		case sseOpcodeSubps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F5C, 2
-		case sseOpcodeSubpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F5C, 2
-		case sseOpcodeSubss:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F5C, 2
-		case sseOpcodeSubsd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F5C, 2
-		case sseOpcodeXorps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F57, 2
-		case sseOpcodeXorpd:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F57, 2
-		case sseOpcodePmulhrsw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F380B, 3
-		case sseOpcodeUnpcklps:
-			legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F14, 2
-		case sseOpcodePmaddubsw:
-			legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3804, 3
-		default:
-			if kind == blendvpd {
-				legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3815, 3
-			} else {
-				panic(fmt.Sprintf("Unsupported sseOpcode: %s", op))
-			}
+		} else {
+			legPrex, opcode, opcodeNum = xmmRmREncoding(op)
 		}
 
 		dst := regEncodings[i.op2.reg().RealReg()]
@@ -878,6 +727,8 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		c.EmitByte(0x83)
 		c.EmitByte(0xc4)
 		c.EmitByte(0x08)
+	case vecMap:
+		i.encodeVecMap(c)
 	case preemptCheck:
 		// F6 /0 ib: test r/m8, imm8.
 		encodeEncMem(c, legacyPrefixesNone, 0xf6, 1, 0, i.op1.addressMode(), rexInfo(0).clearW())
@@ -1555,6 +1406,14 @@ func (i *instruction) encode(c backend.Compiler) (needsLabelResolution bool) {
 		c.AddRelocationInfo(ssa.FuncRef(i.u1), false)
 		// Note that this is zero as a placeholder for the call target if it's a function value.
 		c.Emit4Bytes(uint32(i.u2))
+		if i.b1 {
+			// A call from a copy of a function's body is followed, where it returns to, by a nop the
+			// unwinder recognizes: nopl InlinedCallMarker(%rax), 0F 1F 80 disp32.
+			c.EmitByte(0x0f)
+			c.EmitByte(0x1f)
+			c.EmitByte(0x80)
+			c.Emit4Bytes(InlinedCallMarker)
+		}
 
 	case callIndirect:
 		op := i.op1
@@ -1819,6 +1678,30 @@ func encodeEncMem(
 ) (needsLabelResolution bool) {
 	legPrefixes.encode(c)
 
+	switch m.kind() {
+	case amodeImmReg, amodeImmRBP:
+		rex.encode(c, regRexBit(r), regEncodings[m.base.RealReg()].rexBit())
+	case amodeRegRegShift:
+		if m.index.RealReg() == rsp {
+			panic("BUG: rsp can't be used as index of addressing mode")
+		}
+		rex.encodeForIndex(c, regEnc(r), regEncodings[m.index.RealReg()], regEncodings[m.base.RealReg()])
+	case amodeRipRel:
+		rex.encode(c, regRexBit(r), 0)
+	default:
+		panic("BUG: invalid addressing mode")
+	}
+
+	for opcodeNum > 0 {
+		opcodeNum--
+		c.EmitByte(byte((opcodes >> (opcodeNum << 3)) & 0xff))
+	}
+	return encodeMemOperand(c, r, m)
+}
+
+// encodeMemOperand emits the ModRM byte, and the SIB byte and displacement where m needs them, of an
+// instruction whose register operand is r and whose memory operand is m: everything after the opcode.
+func encodeMemOperand(c backend.Compiler, r uint8, m *amode) (needsLabelResolution bool) {
 	const (
 		modNoDisplacement    = 0b00
 		modShortDisplacement = 0b01
@@ -1831,13 +1714,6 @@ func encodeEncMem(
 	case amodeImmReg, amodeImmRBP:
 		base := m.base.RealReg()
 		baseEnc := regEncodings[base]
-
-		rex.encode(c, regRexBit(r), baseEnc.rexBit())
-
-		for opcodeNum > 0 {
-			opcodeNum--
-			c.EmitByte(byte((opcodes >> (opcodeNum << 3)) & 0xff))
-		}
 
 		// SIB byte is the last byte of the memory encoding before the displacement
 		const sibByte = 0x24 // == encodeSIB(0, 4, 4)
@@ -1868,19 +1744,7 @@ func encodeEncMem(
 	case amodeRegRegShift:
 		base := m.base.RealReg()
 		baseEnc := regEncodings[base]
-		index := m.index.RealReg()
-		indexEnc := regEncodings[index]
-
-		if index == rsp {
-			panic("BUG: rsp can't be used as index of addressing mode")
-		}
-
-		rex.encodeForIndex(c, regEnc(r), indexEnc, baseEnc)
-
-		for opcodeNum > 0 {
-			opcodeNum--
-			c.EmitByte(byte((opcodes >> (opcodeNum << 3)) & 0xff))
-		}
+		indexEnc := regEncodings[m.index.RealReg()]
 
 		immZero, baseRbp, baseR13 := m.imm32 == 0, base == rbp, base == r13
 		if immZero && !baseRbp && !baseR13 { // rbp or r13 can't be used as base for without displacement encoding. (curious why? because it's interpreted as RIP relative addressing).
@@ -1897,12 +1761,6 @@ func encodeEncMem(
 		}
 
 	case amodeRipRel:
-		rex.encode(c, regRexBit(r), 0)
-		for opcodeNum > 0 {
-			opcodeNum--
-			c.EmitByte(byte((opcodes >> (opcodeNum << 3)) & 0xff))
-		}
-
 		// Indicate "LEAQ [RIP + 32bit displacement].
 		// https://wiki.osdev.org/X86-64_Instruction_Encoding#32.2F64-bit_addressing
 		c.EmitByte(encodeModRM(0b00, regEncoding(r), 0b101))
@@ -1915,6 +1773,41 @@ func encodeEncMem(
 		panic("BUG: invalid addressing mode")
 	}
 	return
+}
+
+// encodeVex3 emits a three-operand VEX instruction, W=0 and L=0, with the two-byte prefix where it can: dst in
+// ModRM.reg, src1 in VEX.vvvv and src2, a register or memory, in ModRM.rm. mapSel is the opcode map (1 =
+// 0F) and pp the implied prefix (1 = 66, 2 = F3, 3 = F2).
+func encodeVex3(c backend.Compiler, mapSel, pp, opcode byte, dst, src1 uint8, src2 operand) (needsLabelResolution bool) {
+	var x, b uint8
+	switch src2.kind {
+	case operandKindReg:
+		b = regRexBit(uint8(regEncodings[src2.reg().RealReg()]))
+	case operandKindMem:
+		m := src2.addressMode()
+		switch m.kind() {
+		case amodeImmReg, amodeImmRBP:
+			b = regEncodings[m.base.RealReg()].rexBit()
+		case amodeRegRegShift:
+			x, b = regEncodings[m.index.RealReg()].rexBit(), regEncodings[m.base.RealReg()].rexBit()
+		}
+	default:
+		panic("BUG: invalid VEX operand")
+	}
+	if x == 0 && b == 0 && mapSel == 1 { // The two-byte form, which implies them.
+		c.EmitByte(0xc5)
+		c.EmitByte((regRexBit(dst)^1)<<7 | (^src1&0xf)<<3 | pp)
+	} else {
+		c.EmitByte(0xc4)
+		c.EmitByte((regRexBit(dst)^1)<<7 | (x^1)<<6 | (b^1)<<5 | mapSel)
+		c.EmitByte((^src1&0xf)<<3 | pp)
+	}
+	c.EmitByte(opcode)
+	if src2.kind == operandKindReg {
+		c.EmitByte(encodeModRM(0b11, regEncoding(dst), regEncoding(uint8(regEncodings[src2.reg().RealReg()]))))
+		return false
+	}
+	return encodeMemOperand(c, dst, src2.addressMode())
 }
 
 const (
@@ -2158,4 +2051,225 @@ func emitExitWithCode(c backend.Compiler, execCtx regalloc.VReg, code nativeapi.
 	am.imm32 = nativeapi.ExecutionContextOffsetOriginalStackPointer.U32()
 	encodeLoad64(c, &am, rsp)
 	encodeRet(c)
+}
+
+// xmmRmREncoding returns the legacy prefix and opcode bytes, and how many, of an xmmRmR opcode.
+func xmmRmREncoding(op sseOpcode) (legPrex legacyPrefixes, opcode uint32, opcodeNum uint32) {
+	switch op {
+	case sseOpcodeAddps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F58, 2
+	case sseOpcodeAddpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F58, 2
+	case sseOpcodeAddss:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F58, 2
+	case sseOpcodeAddsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F58, 2
+	case sseOpcodeAndps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F54, 2
+	case sseOpcodeAndpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F54, 2
+	case sseOpcodeAndnps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F55, 2
+	case sseOpcodeAndnpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F55, 2
+	case sseOpcodeBlendvps:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3814, 3
+	case sseOpcodeBlendvpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3815, 3
+	case sseOpcodeDivps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F5E, 2
+	case sseOpcodeDivpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F5E, 2
+	case sseOpcodeDivss:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F5E, 2
+	case sseOpcodeDivsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F5E, 2
+	case sseOpcodeMaxps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F5F, 2
+	case sseOpcodeMaxpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F5F, 2
+	case sseOpcodeMaxss:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F5F, 2
+	case sseOpcodeMaxsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F5F, 2
+	case sseOpcodeMinps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F5D, 2
+	case sseOpcodeMinpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F5D, 2
+	case sseOpcodeMinss:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F5D, 2
+	case sseOpcodeMinsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F5D, 2
+	case sseOpcodeMovlhps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F16, 2
+	case sseOpcodeMovsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F10, 2
+	case sseOpcodeMulps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F59, 2
+	case sseOpcodeMulpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F59, 2
+	case sseOpcodeMulss:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F59, 2
+	case sseOpcodeMulsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F59, 2
+	case sseOpcodeOrpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F56, 2
+	case sseOpcodeOrps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F56, 2
+	case sseOpcodePackssdw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F6B, 2
+	case sseOpcodePacksswb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F63, 2
+	case sseOpcodePackusdw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F382B, 3
+	case sseOpcodePackuswb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F67, 2
+	case sseOpcodePaddb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFC, 2
+	case sseOpcodePaddd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFE, 2
+	case sseOpcodePaddq:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FD4, 2
+	case sseOpcodePaddw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFD, 2
+	case sseOpcodePaddsb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEC, 2
+	case sseOpcodePaddsw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FED, 2
+	case sseOpcodePaddusb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDC, 2
+	case sseOpcodePaddusw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDD, 2
+	case sseOpcodePand:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDB, 2
+	case sseOpcodePandn:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDF, 2
+	case sseOpcodePavgb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FE0, 2
+	case sseOpcodePavgw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FE3, 2
+	case sseOpcodePcmpeqb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F74, 2
+	case sseOpcodePcmpeqw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F75, 2
+	case sseOpcodePcmpeqd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F76, 2
+	case sseOpcodePcmpeqq:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3829, 3
+	case sseOpcodePcmpgtb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F64, 2
+	case sseOpcodePcmpgtw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F65, 2
+	case sseOpcodePcmpgtd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F66, 2
+	case sseOpcodePcmpgtq:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3837, 3
+	case sseOpcodePmaddwd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FF5, 2
+	case sseOpcodePmaxsb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383C, 3
+	case sseOpcodePmaxsw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEE, 2
+	case sseOpcodePmaxsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383D, 3
+	case sseOpcodePmaxub:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDE, 2
+	case sseOpcodePmaxuw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383E, 3
+	case sseOpcodePmaxud:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383F, 3
+	case sseOpcodePminsb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3838, 3
+	case sseOpcodePminsw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEA, 2
+	case sseOpcodePminsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3839, 3
+	case sseOpcodePminub:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FDA, 2
+	case sseOpcodePminuw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383A, 3
+	case sseOpcodePminud:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F383B, 3
+	case sseOpcodePmulld:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3840, 3
+	case sseOpcodePmullw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FD5, 2
+	case sseOpcodePmuludq:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FF4, 2
+	case sseOpcodePor:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEB, 2
+	case sseOpcodePshufb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3800, 3
+	case sseOpcodePsubb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FF8, 2
+	case sseOpcodePsubd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFA, 2
+	case sseOpcodePsubq:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FFB, 2
+	case sseOpcodePsubw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FF9, 2
+	case sseOpcodePsubsb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FE8, 2
+	case sseOpcodePsubsw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FE9, 2
+	case sseOpcodePsubusb:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FD8, 2
+	case sseOpcodePsubusw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FD9, 2
+	case sseOpcodePunpckhbw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F68, 2
+	case sseOpcodePunpcklbw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F60, 2
+	case sseOpcodePxor:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0FEF, 2
+	case sseOpcodeSubps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F5C, 2
+	case sseOpcodeSubpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F5C, 2
+	case sseOpcodeSubss:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF3, 0x0F5C, 2
+	case sseOpcodeSubsd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0xF2, 0x0F5C, 2
+	case sseOpcodeXorps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F57, 2
+	case sseOpcodeXorpd:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F57, 2
+	case sseOpcodePmulhrsw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F380B, 3
+	case sseOpcodeUnpcklps:
+		legPrex, opcode, opcodeNum = legacyPrefixesNone, 0x0F14, 2
+	case sseOpcodePmaddubsw:
+		legPrex, opcode, opcodeNum = legacyPrefixes0x66, 0x0F3804, 3
+	default:
+		panic(fmt.Sprintf("Unsupported sseOpcode: %s", op))
+	}
+	return
+}
+
+// vexEncoding returns the implied prefix, opcode map and opcode of the VEX form of an xmmRmR opcode,
+// which takes them from its legacy encoding: only blendv, whose VEX form takes a fourth operand, has none.
+func vexEncoding(op sseOpcode) (pp, mapSel, opcode byte) {
+	legPrex, op32, n := xmmRmREncoding(op)
+	switch legPrex {
+	case legacyPrefixes0x66:
+		pp = 1
+	case legacyPrefixes0xF3:
+		pp = 2
+	case legacyPrefixes0xF2:
+		pp = 3
+	}
+	switch {
+	case n == 2:
+		mapSel = 1
+	case op32>>8 == 0x0F38:
+		mapSel = 2
+	default:
+		mapSel = 3
+	}
+	return pp, mapSel, byte(op32)
+}
+
+// hasVexForm reports whether vexEncoding knows op.
+func hasVexForm(op sseOpcode) bool {
+	return op != sseOpcodeBlendvps && op != sseOpcodeBlendvpd
 }

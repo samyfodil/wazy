@@ -10,9 +10,10 @@ import (
 )
 
 type (
-	_allocator = Allocator[*mockInstr, *mockBlock, *mockFunction]
-	_state     = state[*mockInstr, *mockBlock, *mockFunction]
-	_vrState   = vrState[*mockInstr, *mockBlock, *mockFunction]
+	_allocator  = Allocator[*mockInstr, *mockBlock, *mockFunction]
+	_state      = state[*mockInstr, *mockBlock, *mockFunction]
+	_vrState    = vrState[*mockInstr, *mockBlock, *mockFunction]
+	_blockState = blockState[*mockInstr, *mockBlock, *mockFunction]
 )
 
 var (
@@ -481,4 +482,66 @@ func Test_recordReload_listsEachSpillOnce(t *testing.T) {
 	require.Equal(t, []*_vrState{first, second}, a.spills)
 	require.True(t, first.spilled)
 	require.True(t, second.spilled)
+}
+
+func TestAllocator_preloadLoopLiveIns_frees(t *testing.T) {
+	// setup gives the loop header blk regs to allocate and live-ins with their next-use distances from
+	// it, those with a register in it.
+	setup := func(blk *mockBlock, regs []RealReg, live []*_vrState, dists []int32) (*_allocator, *_blockState) {
+		a := _newAllocator(&RegisterInfo{AllocatableRegisters: [NumRegType][]RealReg{RegTypeInt: regs}})
+		a.state.reset()
+		header := a.getOrAllocateBlockState(blk.id)
+		header.liveInsBegin, header.liveInsEnd = 0, int32(len(live))
+		a.liveInsBuf = append(a.liveInsBuf[:0], live...)
+		a.distBuf = append(a.distBuf[:0], dists...)
+		for _, vs := range live {
+			if vs.r != RealRegInvalid {
+				a.state.useRealReg(vs.r, vs)
+			}
+		}
+		return &a, header
+	}
+	val := func(id VReg, r RealReg) *_vrState {
+		return &_vrState{v: id.SetRegType(RegTypeInt), r: r}
+	}
+	t.Run("an outer loop's parameter goes, the header's stays", func(t *testing.T) {
+		// Every register is taken: the loop's temporaries need two, which the values it does not use give
+		// from the last register down.
+		blk := newMockBlock(1)
+		used, mine, dead, outer := val(1, 1), val(2, 2), val(4, 4), val(5, 5)
+		mine.isPhi, mine.defBlk = true, blk
+		outer.isPhi, outer.defBlk = true, newMockBlock(0)
+		a, header := setup(blk, []RealReg{1, 2, 4, 5}, []*_vrState{used, mine, outer}, []int32{4, 0, loopExitDistance + 3})
+		a.state.useRealReg(4, dead)
+		a.preloadLoopLiveIns(nil, nil, blk, header, 0)
+		require.Equal(t, RealRegInvalid, outer.r)
+		require.Equal(t, RealRegInvalid, dead.r)
+		require.Equal(t, RealReg(1), used.r)
+		require.Equal(t, RealReg(2), mine.r)
+	})
+	t.Run("the header's parameters take registers", func(t *testing.T) {
+		// One register holds a value the loop does not use and the rest are free: enough for the loop's
+		// temporaries, until the header's three parameters take three of them.
+		regs := make([]RealReg, 0, loopFreeRegs+3)
+		for r := RealReg(1); len(regs) < cap(regs); r++ {
+			regs = append(regs, r)
+		}
+		blk := newMockBlock(1)
+		unused := val(1, 1)
+		live, dists := []*_vrState{unused}, []int32{loopExitDistance}
+		for i := range 3 {
+			p := val(VReg(10+i), RealRegInvalid)
+			p.isPhi, p.defBlk = true, blk
+			live, dists = append(live, p), append(dists, 1)
+		}
+		a, header := setup(blk, regs, live, dists)
+		a.preloadLoopLiveIns(nil, nil, blk, header, 0)
+		require.Equal(t, RealRegInvalid, unused.r)
+
+		// Without them, it keeps its register.
+		unused = val(1, 1)
+		a, header = setup(blk, regs, []*_vrState{unused}, []int32{loopExitDistance})
+		a.preloadLoopLiveIns(nil, nil, blk, header, 0)
+		require.Equal(t, RealReg(1), unused.r)
+	})
 }

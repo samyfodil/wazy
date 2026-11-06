@@ -334,9 +334,8 @@ func TestMachine_lowerExitIfTrueWithCode_nonIcmpCondition(t *testing.T) {
 	t.Run("shared island", func(t *testing.T) {
 		ctx, b, m := newSetupWithMockContext()
 		c := setup(ctx, b, m)
-		m.lowerExitIfTrueWithCodeShared(intToVReg(1), c, nativeapi.ExitCodeUnreachable)
+		m.lowerExitIfTrueWithCodeShared(c, nativeapi.ExitCodeUnreachable)
 		require.Equal(t, `
-mov x27, x1?
 cbnz w2?, L1
 `, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 	})
@@ -388,11 +387,10 @@ func TestMachine_lowerExitIfTrueWithCode_icmpCondition(t *testing.T) {
 	t.Run("shared island", func(t *testing.T) {
 		ctx, b, m := newSetupWithMockContext()
 		c, icmp := setup(ctx, b, m)
-		m.lowerExitIfTrueWithCodeShared(intToVReg(3), c, nativeapi.ExitCodeUnreachable)
+		m.lowerExitIfTrueWithCodeShared(c, nativeapi.ExitCodeUnreachable)
 		require.True(t, icmp.Lowered())
 		require.Equal(t, `
 subs wzr, w1?, w2?
-mov x27, x3?
 b.eq L1
 `, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 	})
@@ -797,8 +795,10 @@ func Test_aliasZeroExtended32(t *testing.T) {
 	iadd32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
 		return b.AllocateInstruction().AsIadd(arg, arg)
 	}
-	imul32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
-		return b.AllocateInstruction().AsImul(arg, arg)
+	popcnt32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+		i := b.AllocateInstruction()
+		i.AsPopcnt(arg)
+		return i
 	}
 
 	t.Run("zero-extending producer: aliased, nothing emitted", func(t *testing.T) {
@@ -807,7 +807,7 @@ func Test_aliasZeroExtended32(t *testing.T) {
 		require.Equal(t, "nop0", formatEmittedInstructionsInCurrentBlock(m))
 	})
 	t.Run("other producer: not aliased, uxtw emitted", func(t *testing.T) {
-		ctx, m, ext := setup(t, imul32, false, 32, 64)
+		ctx, m, ext := setup(t, popcnt32, false, 32, 64)
 		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
 		require.Equal(t, "uxtw x3?, w2?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
 	})
@@ -918,4 +918,132 @@ func TestMachine_lowerUmulhi(t *testing.T) {
 
 	m.lowerUmulhi(mul)
 	require.Equal(t, "umulh x3?, x1?, x2?", formatEmittedInstructionsInCurrentBlock(m))
+}
+
+// TestMachine_lowerIcmpToFlag_negativeConstant checks that a comparison with a negative constant whose
+// negation is an immediate becomes cmn, and with any other constant stays subs.
+func TestMachine_lowerIcmpToFlag_negativeConstant(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  ssa.Type
+		k    uint64
+		exp  string
+	}{
+		{name: "i32 -8", typ: ssa.TypeI32, k: uint64(uint32(0xfffffff8)), exp: "adds wzr, w1?, #0x8"},
+		{name: "i32 -32768", typ: ssa.TypeI32, k: uint64(uint32(0xffff8000)), exp: "adds wzr, w1?, #0x8000"},
+		{name: "i64 -1", typ: ssa.TypeI64, k: ^uint64(0), exp: "adds xzr, x1?, #0x1"},
+		{name: "i32 -5000", typ: ssa.TypeI32, k: uint64(uint32(0xffffec78)), exp: "movn w11?, #0x1387, lsl 0\nsubs wzr, w1?, w11?"},
+		{name: "i32 minimum", typ: ssa.TypeI32, k: 0x80000000, exp: "movz w11?, #0x8000, lsl 16\nsubs wzr, w1?, w11?"},
+		{name: "i32 7", typ: ssa.TypeI32, k: 7, exp: "subs wzr, w1?, #0x7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, b, m := newSetupWithMockContext()
+			ctx.vRegCounter = 10
+			x := b.CurrentBlock().AddParam(b, tc.typ)
+			ctx.vRegMap[x] = intToVReg(1)
+			ctx.definitions[x] = backend.SSAValueDefinition{V: x}
+			k := b.AllocateInstruction()
+			if tc.typ == ssa.TypeI32 {
+				k.AsIconst32(uint32(tc.k))
+			} else {
+				k.AsIconst64(tc.k)
+			}
+			b.InsertInstruction(k)
+			ctx.definitions[k.Return()] = backend.SSAValueDefinition{Instr: k, V: k.Return()}
+			m.lowerIcmpToFlag(x, k.Return(), true)
+			require.Equal(t, tc.exp, formatEmittedInstructionsInCurrentBlock(m))
+		})
+	}
+}
+
+// TestMachine_lowerSelect_clampConstant checks that a select of the constant it compares with, the same
+// value even where the program wrote it twice, builds it in a register once for the compare and the select.
+func TestMachine_lowerSelect_clampConstant(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		k1, k2    uint32
+		sameValue bool
+		exp       string
+	}{
+		{name: "one constant", k1: 0x7fff, sameValue: true, exp: "movz w11?, #0x7fff, lsl 0\nsubs wzr, w1?, w11?\ncsel w4?, w1?, w11?, lt"},
+		{name: "the same constant twice", k1: 0x7fff, k2: 0x7fff, exp: "movz w11?, #0x7fff, lsl 0\nsubs wzr, w1?, w11?\ncsel w4?, w1?, w11?, lt"},
+		{name: "another constant", k1: 0x7fff, k2: 0x7ffe, exp: "movz w11?, #0x7fff, lsl 0\nsubs wzr, w1?, w11?\nmovz w12?, #0x7ffe, lsl 0\ncsel w4?, w1?, w12?, lt"},
+		{name: "an immediate", k1: 7, sameValue: true, exp: "subs wzr, w1?, #0x7\norr w11?, wzr, #0x7\ncsel w4?, w1?, w11?, lt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, b, m := newSetupWithMockContext()
+			ctx.vRegCounter = 10
+			x := b.CurrentBlock().AddParam(b, ssa.TypeI32)
+			ctx.vRegMap[x] = intToVReg(1)
+			ctx.definitions[x] = backend.SSAValueDefinition{V: x}
+			konst := func(v uint32) ssa.Value {
+				k := b.AllocateInstruction().AsIconst32(v).Insert(b)
+				ctx.definitions[k.Return()] = backend.SSAValueDefinition{Instr: k, V: k.Return()}
+				return k.Return()
+			}
+			k1 := konst(tc.k1)
+			k2 := k1
+			if !tc.sameValue {
+				k2 = konst(tc.k2)
+			}
+			cmp := b.AllocateInstruction().AsIcmp(x, k1, ssa.IntegerCmpCondSignedLessThan).Insert(b)
+			ctx.definitions[cmp.Return()] = backend.SSAValueDefinition{Instr: cmp, V: cmp.Return()}
+			sel := b.AllocateInstruction().AsSelect(cmp.Return(), x, k2).Insert(b)
+			ctx.vRegMap[sel.Return()] = intToVReg(4)
+			m.lowerSelect(cmp.Return(), x, k2, sel.Return())
+			require.Equal(t, tc.exp, formatEmittedInstructionsInCurrentBlock(m))
+		})
+	}
+}
+
+// TestMachine_LowerConditionalBranch_orOfIcmps checks a branch on either of two comparisons: the first sets
+// the flags, a conditional compare sets them by the second only where the first does not hold, and one
+// branch tests the second's condition, the opposite one for a brz.
+func TestMachine_LowerConditionalBranch_orOfIcmps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		brz  bool
+		k    uint32 // the second comparison's constant, or none where it is zero
+		exp  string
+	}{
+		{name: "brnz, registers", exp: "subs wzr, w1?, #0x1\nccmp w1?, w2?, #0x0, ge\nb.gt L1"},
+		{name: "brz, registers", brz: true, exp: "subs wzr, w1?, #0x1\nccmp w1?, w2?, #0x0, ge\nb.le L1"},
+		{name: "brnz, immediate", k: 31, exp: "subs wzr, w1?, #0x1\nccmp w1?, #0x1f, #0x0, ge\nb.gt L1"},
+		{name: "brz, immediate", brz: true, k: 31, exp: "subs wzr, w1?, #0x1\nccmp w1?, #0x1f, #0x0, ge\nb.le L1"},
+		{name: "past an immediate", k: 32, exp: "subs wzr, w1?, #0x1\norr w11?, wzr, #0x20\nccmp w1?, w11?, #0x0, ge\nb.gt L1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, b, m := newSetupWithMockContext()
+			ctx.vRegCounter = 10
+			m.maxSSABlockID, m.nextLabel = 1, 1
+			entry := b.CurrentBlock()
+			x, y := entry.AddParam(b, ssa.TypeI32), entry.AddParam(b, ssa.TypeI32)
+			ctx.vRegMap[x], ctx.vRegMap[y] = intToVReg(1), intToVReg(2)
+			ctx.definitions[x], ctx.definitions[y] = backend.SSAValueDefinition{V: x}, backend.SSAValueDefinition{V: y}
+			def := func(i *ssa.Instruction) ssa.Value {
+				b.InsertInstruction(i)
+				ctx.definitions[i.Return()] = backend.SSAValueDefinition{Instr: i, V: i.Return()}
+				return i.Return()
+			}
+			one := def(b.AllocateInstruction().AsIconst32(1))
+			second := y
+			if tc.k != 0 {
+				second = def(b.AllocateInstruction().AsIconst32(tc.k))
+			}
+			c1 := def(b.AllocateInstruction().AsIcmp(x, one, ssa.IntegerCmpCondSignedLessThan))
+			c2 := def(b.AllocateInstruction().AsIcmp(x, second, ssa.IntegerCmpCondSignedGreaterThan))
+			or := b.AllocateInstruction()
+			or.AsBor(c1, c2)
+			either := def(or)
+			br := b.AllocateInstruction()
+			if tc.brz {
+				br.AsBrz(either, ssa.ValuesNil, b.AllocateBasicBlock())
+			} else {
+				br.AsBrnz(either, ssa.ValuesNil, b.AllocateBasicBlock())
+			}
+			b.InsertInstruction(br)
+			m.LowerConditionalBranch(br)
+			require.Equal(t, tc.exp, formatEmittedInstructionsInCurrentBlock(m))
+		})
+	}
 }

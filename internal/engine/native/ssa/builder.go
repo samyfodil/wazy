@@ -64,6 +64,10 @@ type Builder interface {
 	// If it cannot find the definition, or it's not sealed yet, it returns ValueInvalid.
 	FindValueInLinearPath(variable Variable) Value
 
+	// MoveToCurrentBlock takes instr, a pure instruction of the block from, out of it and appends it to the
+	// current block.
+	MoveToCurrentBlock(instr *Instruction, from BasicBlock)
+
 	// Seal declares that we've known all the predecessors to this block and were added via AddPred.
 	// After calling this, AddPred will be forbidden.
 	Seal(blk BasicBlock)
@@ -125,6 +129,11 @@ type Builder interface {
 
 	// InsertUndefined inserts an undefined instruction at the current position.
 	InsertUndefined()
+
+	// AddVecProgram records p for an OpcodeVecMap and returns its number; VecProgram returns it back.
+	// Programs last until the next Init.
+	AddVecProgram(p *VecProgram) int
+	VecProgram(n int) *VecProgram
 
 	// SetCurrentSourceOffset sets the current source offset. The incoming instruction will be annotated with this offset.
 	SetCurrentSourceOffset(line SourceOffset)
@@ -209,6 +218,9 @@ type builder struct {
 
 	// nextValueID is used by builder.AllocateValue.
 	nextValueID ValueID
+	// cloneMark, cloneStamp and cloneBlockStamp are passCloneSharedComparesOpt's scratch.
+	cloneMark                   []cloneMark
+	cloneStamp, cloneBlockStamp int32
 	// nextVariable is used by builder.AllocateVariable.
 	nextVariable Variable
 
@@ -222,6 +234,19 @@ type builder struct {
 	// anything, indexed by Variable, holding the last definition of that Variable there.
 	varDefs []Value
 
+	// loopTestScratch, loopBodyScratch and loopAvoidScratch are reused by loopTests.
+	loopTestScratch                   []loopTest
+	loopBodyScratch, loopAvoidScratch []*basicBlock
+
+	// boundsMoves is passMergeBoundsChecksOpt's scratch.
+	boundsMoves []*Instruction
+	// imuls counts the multiplications the function was built with. See passLinearFormOpt.
+	imuls int
+	// linearMark, linearStamp, linearBlockStamp and linearTerms are passLinearFormOpt's.
+	linearMark                    []linearMark
+	linearStamp, linearBlockStamp int32
+	linearTerms                   []linearTerm
+
 	// dominators stores the immediate dominator of each BasicBlock.
 	// The index is blockID of the BasicBlock.
 	dominators []*basicBlock
@@ -233,11 +258,13 @@ type builder struct {
 	loopNestingForestRoots []BasicBlock
 
 	// The followings are used for optimization passes/deterministic compilation.
-	licmLoops []*basicBlock
-	licmDefs  []*basicBlock
-	instStack []*Instruction
-	blkStack  []*basicBlock
-	blkStack2 []*basicBlock
+	vecPrograms  []*VecProgram
+	licmLoops    []*basicBlock
+	licmDefs     []*basicBlock
+	licmClobbers []bool
+	instStack    []*Instruction
+	blkStack     []*basicBlock
+	blkStack2    []*basicBlock
 	// predIndex is passLayoutBlocks' index of long predecessor lists; see predInfoOf.
 	predIndex                 map[*basicBlock]map[*basicBlock]int
 	redundantParams           []redundantParam
@@ -328,8 +355,20 @@ func (b *builder) ReturnBlock() BasicBlock {
 }
 
 // Init implements Builder.Reset.
+// AddVecProgram implements Builder.AddVecProgram.
+func (b *builder) AddVecProgram(p *VecProgram) int {
+	b.vecPrograms = append(b.vecPrograms, p)
+	return len(b.vecPrograms) - 1
+}
+
+// VecProgram implements Builder.VecProgram.
+func (b *builder) VecProgram(n int) *VecProgram { return b.vecPrograms[n] }
+
 func (b *builder) Init(s *Signature) {
+	clear(b.vecPrograms)
+	b.vecPrograms = b.vecPrograms[:0]
 	b.nextVariable = 0
+	b.imuls = 0
 	b.currentSignature = s
 	b.zeros = [typeEnd]Value{ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid}
 	resetBasicBlock(b.returnBlk)
@@ -446,9 +485,19 @@ func (b *builder) Idom(blk BasicBlock) BasicBlock {
 	return b.dominators[blk.ID()]
 }
 
+// MoveToCurrentBlock implements Builder.MoveToCurrentBlock.
+func (b *builder) MoveToCurrentBlock(instr *Instruction, from BasicBlock) {
+	from.(*basicBlock).removeInstruction(instr)
+	instr.prev, instr.next = nil, nil
+	b.currentBB.insertInstruction(b, instr)
+}
+
 // InsertInstruction implements Builder.InsertInstruction.
 func (b *builder) InsertInstruction(instr *Instruction) {
 	b.currentBB.insertInstruction(b, instr)
+	if instr.opcode == OpcodeImul {
+		b.imuls++
+	}
 
 	if l := b.currentSourceOffset; l.Valid() {
 		// Emit the source offset info only when the instruction has side effect because

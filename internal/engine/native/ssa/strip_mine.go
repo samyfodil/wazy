@@ -68,7 +68,7 @@ func (b *builder) StripMine(header, preheader, body BasicBlock, lc LoopCounter, 
 	}
 	var n0 Value
 	if !t.nIsConst {
-		if n0, ok = b.valueOnEntry(h, entry, t.n); !ok {
+		if n0, ok = b.valueOnEntry(h, entry, lc, t.n); !ok {
 			return false
 		}
 	}
@@ -80,7 +80,7 @@ func (b *builder) StripMine(header, preheader, body BasicBlock, lc LoopCounter, 
 	pre.removeInstruction(entry)
 	b.currentBB = pre
 	x0 := lc.Start
-	if t.x == lc.Next {
+	if lc.isNext(b, t.x) {
 		x0 = b.AllocateInstruction().AsIadd(lc.Start, b.iconst(typ, lc.Step)).Insert(b).Return()
 	}
 	if t.nIsConst {
@@ -283,7 +283,7 @@ func (b *builder) findExitTest(h, body *basicBlock, lc LoopCounter) (t exitTest,
 	if !goOnIfTrue {
 		cc = cc.Inverted()
 	}
-	counter := func(v Value) bool { return v == lc.Param || (t.backEdge && v == lc.Next) }
+	counter := func(v Value) bool { return lc.isParam(b, v) || (t.backEdge && lc.isNext(b, v)) }
 	switch {
 	case counter(x):
 	case y.Valid() && counter(y):
@@ -303,14 +303,16 @@ func (b *builder) findExitTest(h, body *basicBlock, lc LoopCounter) (t exitTest,
 
 // valueOnEntry returns what n, a bound the loop headed by h compares against, is
 // when the loop is entered through entry, if n is a parameter of h that every
-// other way in passes back unchanged.
-func (b *builder) valueOnEntry(h *basicBlock, entry *Instruction, n Value) (Value, bool) {
+// other way in passes back unchanged, both seen through lc's parameters that
+// stand for one value (see LoopCounter.see).
+func (b *builder) valueOnEntry(h *basicBlock, entry *Instruction, lc LoopCounter, n Value) (Value, bool) {
+	n = lc.see(b, n)
 	for i, p := range h.params.View() {
 		if p != n {
 			continue
 		}
 		for _, pred := range h.preds {
-			if pred.branch != entry && b.resolveAlias(pred.branch.vs.View()[i]) != n {
+			if pred.branch != entry && lc.see(b, pred.branch.vs.View()[i]) != n {
 				return ValueInvalid, false
 			}
 		}

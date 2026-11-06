@@ -607,7 +607,9 @@ func TestE2E(t *testing.T) {
 				{params: []uint64{0x3, 0xbeef, 0xffffffff}, expErr: "unaligned atomic"},
 				{params: []uint64{0x4, 0xbeef, 0xffffffff}, expResults: []uint64{1}}, // exp not equal, returns 1
 
-				{params: []uint64{0xffffffff, 0xbeef, 0xffffffff}, expErr: "out of bounds memory access"},
+				{params: []uint64{0xfffffffc, 0xbeef, 0xffffffff}, expErr: "out of bounds memory access"},
+				// Misaligned as well as out of bounds: misaligned, as the interpreter has it.
+				{params: []uint64{0xffffffff, 0xbeef, 0xffffffff}, expErr: "unaligned atomic"},
 			},
 		},
 		{
@@ -625,7 +627,8 @@ func TestE2E(t *testing.T) {
 				{params: []uint64{0x7, 0xbeef, 0xffffffff}, expErr: "unaligned atomic"},
 				{params: []uint64{0x8, 0xbeef, 0xffffffff}, expResults: []uint64{1}}, // exp not equal, returns 1
 
-				{params: []uint64{0xffffffff, 0xbeef, 0xffffffff}, expErr: "out of bounds memory access"},
+				{params: []uint64{0xfffffff8, 0xbeef, 0xffffffff}, expErr: "out of bounds memory access"},
+				{params: []uint64{0xffffffff, 0xbeef, 0xffffffff}, expErr: "unaligned atomic"},
 			},
 		},
 		{

@@ -369,6 +369,11 @@ func (m *machine) lowerToAddressModeFromAddends(a32s *nativeapi.Queue[addend32],
 		var a32 addend32
 		a32 = a32s.Dequeue()
 		*amode = addressMode{kind: addressModeKindRegExtended, rn: base, rm: a32.r, extOp: a32.ext}
+	case offset == 0 && a64s.Len() == 2 && !a32sExist:
+		// Two registers and nothing else, a memory's base and an index the bounds check also reads say:
+		// [base, index] adds them for free.
+		base := a64s.Dequeue()
+		*amode = addressMode{kind: addressModeKindRegReg, rn: base, rm: a64s.Dequeue(), extOp: extendOpUXTX}
 	case a64sExist && offsetFitsInAddressModeKindRegUnsignedImm12(size, offset):
 		var base regalloc.VReg
 		base = a64s.Dequeue()

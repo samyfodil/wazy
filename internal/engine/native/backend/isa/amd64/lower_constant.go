@@ -40,24 +40,31 @@ func (m *machine) insertLoadConstant(instr *ssa.Instruction, vr regalloc.VReg) {
 	}
 }
 
+// lowerFconst loads a nonzero scalar float constant from the function's constant pool: one load, where
+// materializing it takes an immediate move to a general register and a move across.
 func (m *machine) lowerFconst(dst regalloc.VReg, c uint64, _64 bool) {
 	if c == 0 {
 		xor := m.allocateInstr().asZeros(dst)
 		m.insert(xor)
-	} else {
-		var tmpType ssa.Type
-		if _64 {
-			tmpType = ssa.TypeI64
-		} else {
-			tmpType = ssa.TypeI32
-		}
-		tmpInt := m.c.AllocateVReg(tmpType)
-		loadToGP := m.allocateInstr().asImm(tmpInt, c, _64)
-		m.insert(loadToGP)
-
-		movToXmm := m.allocateInstr().asGprToXmm(sseOpcodeMovq, newOperandReg(tmpInt), dst, _64)
-		m.insert(movToXmm)
+		return
 	}
+	op := sseOpcodeMovss
+	if _64 {
+		op = sseOpcodeMovsd
+	}
+	m.insert(m.allocateInstr().asXmmUnaryRmR(op, newOperandMem(m.newAmodeRipRel(m.fconstLabel(c))), dst))
+}
+
+// fconstLabel returns the constant pool slot holding c, adding one the first time c is asked for.
+func (m *machine) fconstLabel(c uint64) label {
+	for i := range m.consts {
+		if vc := &m.consts[i]; vc._var == nil && vc.lo == c && vc.hi == 0 {
+			return vc.label
+		}
+	}
+	l, pos := m.allocateLabel()
+	m.consts = append(m.consts, _const{label: l, labelPos: pos, lo: c})
+	return l
 }
 
 func (m *machine) lowerIconst(dst regalloc.VReg, c uint64, _64 bool) {

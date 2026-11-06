@@ -248,12 +248,12 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 `,
 		},
 		{
-			name:            "20ms timeout, fdread on tty (buffer ready): only the fd event, the clock has not expired",
+			name:            "1m timeout, fdread on tty (buffer ready): only the fd event, the clock has not expired",
 			nsubscriptions:  2,
 			expectedNevents: 1,
 			stdin:           &ttyStdinFile{StdinFile: sys.StdinFile{Reader: strings.NewReader("test")}},
 			mem: concat(
-				clockNsSub(20*1000*1000),
+				clockNsSub(60*1000*1000*1000), // a minute: a short clock could expire on a loaded machine
 				fdReadSub,
 			),
 			expectedErrno: wasip1.ErrnoSuccess,
@@ -349,12 +349,12 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 `,
 		},
 		{
-			name:            "20ms timeout, fdread on regular file: only the fd event, the clock has not expired",
+			name:            "1m timeout, fdread on regular file: only the fd event, the clock has not expired",
 			nsubscriptions:  2,
 			expectedNevents: 1,
 			stdin:           &sys.StdinFile{Reader: strings.NewReader("test")},
 			mem: concat(
-				clockNsSub(20*1000*1000),
+				clockNsSub(60*1000*1000*1000), // a minute: a short clock could expire on a loaded machine
 				fdReadSub,
 			),
 			expectedErrno: wasip1.ErrnoSuccess,
@@ -518,12 +518,13 @@ func Test_pollOneoff_Zero(t *testing.T) {
 
 	mod.Memory().Write(0,
 		concat(
-			clockNsSub(20*1000*1000),
+			clockNsSub(60*1000*1000*1000),
 			fdReadSub,
 		),
 	)
 
-	// The fd is ready; the 20ms clock has not expired, so it is not reported.
+	// The fd is ready; the minute's clock has not expired, so it is not reported. A short clock could
+	// have expired by the time a loaded machine gets to check it.
 	expectedMem := []byte{
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 		byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit

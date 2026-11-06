@@ -19,8 +19,10 @@ type (
 	// loweringState is used to keep the state of lowering.
 	loweringState struct {
 		// values holds the values on the Wasm stack.
-		values           []ssa.Value
-		controlFrames    []controlFrame
+		values        []ssa.Value
+		controlFrames []controlFrame
+		// loops is how many of controlFrames are loops.
+		loops            int
 		unreachable      bool
 		unreachableDepth int
 		tmpForBrTable    []uint32
@@ -159,6 +161,7 @@ func (ctrl *controlFrame) isTryCatch() bool {
 func (l *loweringState) reset() {
 	l.values = l.values[:0]
 	l.controlFrames = l.controlFrames[:0]
+	l.loops = 0
 	l.pc = 0
 	l.unreachable = false
 	l.unreachableDepth = 0
@@ -198,11 +201,17 @@ func (l *loweringState) ctrlPop() (ret controlFrame) {
 	tail := len(l.controlFrames) - 1
 	ret = l.controlFrames[tail]
 	l.controlFrames = l.controlFrames[:tail]
+	if ret.isLoop() {
+		l.loops--
+	}
 	return
 }
 
 func (l *loweringState) ctrlPush(ret controlFrame) {
 	l.controlFrames = append(l.controlFrames, ret)
+	if ret.isLoop() {
+		l.loops++
+	}
 }
 
 func (l *loweringState) ctrlPeekAt(n int) (ret *controlFrame) {
@@ -236,7 +245,9 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 		followingBlock: c.ssaBuilder.ReturnBlock(),
 	})
 
+	c.vecSum = vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim}
 	for c.loweringState.pc < len(c.wasmFunctionBody) {
+		c.lowerVecSums()
 		blkBeforeLowering := c.ssaBuilder.CurrentBlock()
 		c.lowerCurrentOpcode()
 		blkAfterLowering := c.ssaBuilder.CurrentBlock()
@@ -263,6 +274,9 @@ func (c *Compiler) state() *loweringState {
 
 func (c *Compiler) lowerCurrentOpcode() {
 	op := c.wasmFunctionBody[c.loweringState.pc]
+	if !keepsMemory(op) {
+		c.lastStore = storedValue{}
+	}
 
 	if c.needSourceOffsetInfo {
 		c.ssaBuilder.SetCurrentSourceOffset(
@@ -366,6 +380,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 		y, x := state.pop(), state.pop()
 		if v, ok := c.foldInlined(op, x, y); ok {
+			state.push(v)
+			break
+		}
+		if v, ok := c.mulByPowerOfTwo(x, y); ok {
 			state.push(v)
 			break
 		}
@@ -995,6 +1013,13 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.lowerDivByConst(op, x, y); ok {
+			state.push(v)
+			break
+		}
+		if op == wasm.OpcodeI32DivS && c.lowerClampedSdiv(x, y) {
+			break
+		}
 		result := builder.AllocateInstruction().AsSDiv(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
@@ -1003,6 +1028,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.lowerDivByConst(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		result := builder.AllocateInstruction().AsUDiv(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
@@ -1011,6 +1040,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.lowerDivByConst(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		result := builder.AllocateInstruction().AsSRem(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
@@ -1019,6 +1052,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		y, x := state.pop(), state.pop()
+		if v, ok := c.lowerDivByConst(op, x, y); ok {
+			state.push(v)
+			break
+		}
 		result := builder.AllocateInstruction().AsURem(x, y, c.execCtxPtrValue).Insert(builder).Return()
 		state.push(result)
 
@@ -1201,6 +1238,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 		v2 := state.pop()
 		v1 := state.pop()
 
+		if sl, ok := c.sinkSelect(cond, v1, v2); ok {
+			state.push(sl)
+			break
+		}
 		sl := builder.AllocateInstruction().
 			AsSelect(cond, v1, v2).
 			Insert(builder).
@@ -1317,6 +1358,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 		builder.AllocateInstruction().
 			AsStore(opcode, value, addr, disp).
 			Insert(builder)
+		if opcode == ssa.OpcodeStore && !c.memoryShared[memIndex] {
+			c.lastStore = storedValue{blk: builder.CurrentBlock(), base: baseAddr, offset: offset, mem: memIndex, size: opSize, value: value}
+		}
 
 	case wasm.OpcodeI32Load,
 		wasm.OpcodeI64Load,
@@ -1358,6 +1402,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		baseAddr := state.pop()
+		if v, ok := c.lastStore.forward(builder.CurrentBlock(), baseAddr, offset, memIndex, op); ok {
+			state.push(v)
+			break
+		}
 		addr := c.memOpSetup(memIndex, baseAddr, offset, opSize)
 		load := builder.AllocateInstruction()
 		switch op {
@@ -1415,12 +1463,29 @@ func (c *Compiler) lowerCurrentOpcode() {
 			blockType:                    bt,
 		})
 	case wasm.OpcodeLoop:
+		if !state.unreachable && c.inlinedCallee == 0 && c.lowerPopcountLoop() {
+			break
+		}
 		loopStart := state.pc
 		bt := c.readBlockType()
 
 		if state.unreachable {
 			state.unreachableDepth++
 			break
+		}
+		if (c.vecMap || VecPlanHook != nil) && len(bt.Params) == 0 && len(bt.Results) == 0 && c.vecMapMemory() {
+			plan, why, ok := planVecMap(c.wasmFunctionBody, state.pc+1, c.localTypes())
+			// A top exit leaves the construct around the loop, which must then end right after it, as the
+			// planner checks, and not be a loop: branching to that would go round it instead.
+			if ok && plan.top && state.ctrlPeekAt(0).kind == controlFrameKindLoop {
+				ok, why = false, "top exit to a loop"
+			}
+			if ok && c.vecMap {
+				ok = c.lowerVecMap(plan)
+			}
+			if VecPlanHook != nil {
+				VecPlanHook(c.wasmLocalFunctionIndex, loopStart, ok, why)
+			}
 		}
 
 		loopHeader, afterLoopBlock := builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
@@ -1459,6 +1524,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 		}
 	case wasm.OpcodeIf:
+		if !state.unreachable && c.lowerIfAsSelect() {
+			break
+		}
 		likely, hinted := c.branchHint(state.pc)
 		bt := c.readBlockType()
 
@@ -1652,6 +1720,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		v := state.pop()
+		if brIfMerge && !hinted {
+			if cond, l, ok := c.mergeBrIfOverBlockEnd(v, labelIndex); ok {
+				v, labelIndex = cond, l
+				likely, hinted = c.branchHint(state.pc)
+			}
+		}
 		if c.branchChecks(labelIndex) {
 			c.emitInlinePreemptCheck()
 		}
@@ -1679,6 +1753,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 
 			// Revert the current block.
 			builder.SetCurrentBlock(current)
+		}
+
+		if brIfMerge && argNum == 0 && !hinted && !sealTargetBlk {
+			v = c.mergeBrIfs(v, labelIndex)
 		}
 
 		// Insert the conditional jump to the target block.
@@ -1739,6 +1817,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		if state.unreachable {
 			break
 		}
+		if c.inlineBase > 0 { // Out of a body inlineSelf lowers: to the end of its frame.
+			targetBlk, argNum := state.brTargetArgNumFor(uint32(len(state.controlFrames) - c.inlineBase))
+			c.insertJumpToBlock(c.nPeekDup(argNum), targetBlk)
+			state.unreachable = true
+			break
+		}
 		if c.needListener {
 			c.callListenerAfter()
 		}
@@ -1779,6 +1863,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 		c.addLoopWork(c.callWork(fnIndex))
 		if c.isInlinableLeaf(fnIndex) {
 			c.inlineLeaf(fnIndex)
+			break
+		}
+		if c.isInlinableSelf(fnIndex) {
+			c.inlineSelf(fnIndex)
 			break
 		}
 		c.lowerCall(fnIndex)
@@ -4215,6 +4303,9 @@ func (c *Compiler) lowerCall(fnIndex uint32) {
 	} else {
 		call.AsCall(ssa.FuncRef(funcRefOrPtrValue), sig, args)
 	}
+	if c.inlineBase > 0 {
+		call.MarkInlinedCall()
+	}
 	builder.InsertInstruction(call)
 	// A callee that provably cannot throw (wasm.Module.FunctionMayThrow) is not a point a throw resumes at.
 	if mayThrow := c.m.FunctionMayThrow; mayThrow == nil || mayThrow[fnIndex] {
@@ -4531,8 +4622,16 @@ func (c *Compiler) emitPreemptCheck() (slow ssa.BasicBlock, check *ssa.Instructi
 // rather than given a masked check. The masked test is one fused uop an iteration,
 // a share of the loop that shrinks as the body grows, while the limit a
 // strip-mined loop carries takes a register for the whole loop, which a large
-// body is likelier to be short of.
-const stripMineMaxBody = 64
+// body is likelier to be short of. arm64 has registers to spare, and its masked
+// test is an instruction and a branch of its own.
+var stripMineMaxBody = stripMineLimit()
+
+func stripMineLimit() uint64 {
+	if runtime.GOARCH == "arm64" {
+		return 256
+	}
+	return 64
+}
 
 // preemptBudget is how much wasm code, in bytes, a loop may run between two
 // preemption checks: about as long as a stop-the-world is made to wait.
@@ -4951,8 +5050,45 @@ func (c *Compiler) staticUpperBoundU32Depth(v ssa.Value, depth int) (uint64, boo
 				return xBound << shift, true
 			}
 		}
+	case ssa.OpcodeUshr:
+		if shift, ok := c.constUpperBoundU32(y); ok && v.Type() == ssa.TypeI32 {
+			xBound, xOK := c.staticUpperBoundU32Depth(x, depth+1)
+			if !xOK {
+				xBound = uint64(^uint32(0))
+			}
+			return xBound >> (shift & 31), true
+		}
+	case ssa.OpcodeIreduce:
+		// The low half of a value that fits in it, as a division by a constant leaves its result.
+		if b := c.staticUpperBoundU64(x, depth+1); b <= uint64(^uint32(0)) {
+			return b, true
+		}
 	}
 	return 0, false
+}
+
+// staticUpperBoundU64 returns an inclusive upper bound for the unsigned 64-bit value v: all ones when
+// it knows none better. It covers the shapes a division by a constant lowers to.
+func (c *Compiler) staticUpperBoundU64(v ssa.Value, depth int) uint64 {
+	def := c.ssaBuilder.InstructionOfValue(v)
+	if def == nil || depth > 4 {
+		return ^uint64(0)
+	}
+	if def.Constant() {
+		return def.ConstantVal()
+	}
+	x, y := def.Arg2()
+	switch def.Opcode() {
+	case ssa.OpcodeUExtend:
+		if b, ok := c.staticUpperBoundU32Depth(def.Arg(), depth+1); ok {
+			return b
+		}
+		return uint64(^uint32(0))
+	case ssa.OpcodeUmulhi:
+		hi, _ := bits.Mul64(c.staticUpperBoundU64(x, depth+1), c.staticUpperBoundU64(y, depth+1))
+		return hi
+	}
+	return ^uint64(0)
 }
 
 // recordRangeSafeBound materializes the absolute address for a bounds-check-
@@ -5058,14 +5194,22 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 	// Note: memLen is already zero extended to 64-bit space at the load time.
 	memLen := c.getMemoryLenValue(memIndex, false)
 
-	// baseAddrPlusCeil = baseAddr + ceil
-	baseAddrPlusCeil := builder.AllocateInstruction()
-	baseAddrPlusCeil.AsIadd(extBaseAddr, ceilConst.Return())
-	builder.InsertInstruction(baseAddrPlusCeil)
-
-	// Check for out of bounds memory access: `memLen >= baseAddrPlusCeil`.
 	cmp := builder.AllocateInstruction()
-	cmp.AsIcmp(memLen, baseAddrPlusCeil.Return(), ssa.IntegerCmpCondUnsignedLessThan)
+	if constOffset == 0 && ceil <= memoryMinSizeInBytes {
+		// The address is the base itself: it is in bounds while `baseAddr <= memLen - ceil`, which the
+		// memory's minimum size keeps from wrapping. The limit is the same for every access of this size, and
+		// stays in a register across a loop that does not change the memory's length (see passLoopInvariantCodeMotionOpt).
+		limit := builder.AllocateInstruction().AsIsub(memLen, ceilConst.Return()).Insert(builder).Return()
+		cmp.AsIcmp(extBaseAddr, limit, ssa.IntegerCmpCondUnsignedGreaterThan)
+	} else {
+		// baseAddrPlusCeil = baseAddr + ceil
+		baseAddrPlusCeil := builder.AllocateInstruction()
+		baseAddrPlusCeil.AsIadd(extBaseAddr, ceilConst.Return())
+		builder.InsertInstruction(baseAddrPlusCeil)
+
+		// Check for out of bounds memory access: `memLen >= baseAddrPlusCeil`.
+		cmp.AsIcmp(memLen, baseAddrPlusCeil.Return(), ssa.IntegerCmpCondUnsignedLessThan)
+	}
 	builder.InsertInstruction(cmp)
 	exitIfNZ := builder.AllocateInstruction()
 	exitIfNZ.AsExitIfTrueWithCode(c.execCtxPtrValue, cmp.Return(), c.memoryOutOfBoundsCode())
@@ -5199,6 +5343,23 @@ func (c *Compiler) memOpSetup64(memIndex wasm.Index, baseAddr ssa.Value, constOf
 func (c *Compiler) atomicMemOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
 	builder := c.ssaBuilder
 
+	// An access both misaligned and out of bounds traps as misaligned, as the interpreter has it: the
+	// effective address's alignment is checked first, which is the host address's, the memory's base
+	// being page aligned. An effective address past 2^64 is out of bounds before anything.
+	ea := baseAddr
+	if !c.memoryIsIndex64(memIndex) {
+		ea = builder.AllocateInstruction().AsUExtend(baseAddr, 32, 64).Insert(builder).Return()
+	}
+	if constOffset != 0 {
+		k := builder.AllocateInstruction().AsIconst64(constOffset).Insert(builder).Return()
+		ea = builder.AllocateInstruction().AsIadd(ea, k).Insert(builder).Return()
+		if c.memoryIsIndex64(memIndex) {
+			wrapped := builder.AllocateInstruction().AsIcmp(ea, baseAddr, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
+			builder.AllocateInstruction().AsExitIfTrueWithCode(c.execCtxPtrValue, wrapped, nativeapi.ExitCodeMemoryOutOfBounds).Insert(builder)
+		}
+	}
+	c.memAlignmentCheck(ea, operationSizeInBytes)
+
 	addrWithoutOffset := c.memOpSetup(memIndex, baseAddr, constOffset, operationSizeInBytes)
 	var addr ssa.Value
 	// memOpSetup64 has already folded the offset into the address it returns,
@@ -5209,9 +5370,6 @@ func (c *Compiler) atomicMemOpSetup(memIndex wasm.Index, baseAddr ssa.Value, con
 		offset := builder.AllocateInstruction().AsIconst64(constOffset).Insert(builder).Return()
 		addr = builder.AllocateInstruction().AsIadd(addrWithoutOffset, offset).Insert(builder).Return()
 	}
-
-	c.memAlignmentCheck(addr, operationSizeInBytes)
-
 	return addr
 }
 
@@ -5871,17 +6029,17 @@ func (c *Compiler) getMemoryBaseValue(memIndex wasm.Index, forceReload bool) ssa
 	var ret ssa.Value
 	if memIndex < c.m.ImportMemoryCount {
 		loadMemInstPtr := builder.AllocateInstruction()
-		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
+		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64).MarkContextLoad()
 		builder.InsertInstruction(loadMemInstPtr)
 		memInstPtr := loadMemInstPtr.Return()
 
 		loadBufPtr := builder.AllocateInstruction()
-		loadBufPtr.AsLoad(memInstPtr, memoryInstanceBufOffset, ssa.TypeI64)
+		loadBufPtr.AsLoad(memInstPtr, memoryInstanceBufOffset, ssa.TypeI64).MarkContextLoad()
 		builder.InsertInstruction(loadBufPtr)
 		ret = loadBufPtr.Return()
 	} else {
 		load := builder.AllocateInstruction()
-		load.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
+		load.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64).MarkContextLoad()
 		builder.InsertInstruction(load)
 		ret = load.Return()
 	}
@@ -5905,7 +6063,7 @@ func (c *Compiler) getMemoryLenValue(memIndex wasm.Index, forceReload bool) ssa.
 	var ret ssa.Value
 	if memIndex < c.m.ImportMemoryCount {
 		loadMemInstPtr := builder.AllocateInstruction()
-		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64)
+		loadMemInstPtr.AsLoad(c.moduleCtxPtrValue, opaqueOffset.U32(), ssa.TypeI64).MarkContextLoad()
 		builder.InsertInstruction(loadMemInstPtr)
 		memInstPtr := loadMemInstPtr.Return()
 
@@ -5915,7 +6073,7 @@ func (c *Compiler) getMemoryLenValue(memIndex wasm.Index, forceReload bool) ssa.
 			addr := builder.AllocateInstruction().AsIadd(memInstPtr, sizeOffset).Insert(builder).Return()
 			loadBufSizePtr.AsAtomicLoad(addr, 8, ssa.TypeI64)
 		} else {
-			loadBufSizePtr.AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI64)
+			loadBufSizePtr.AsLoad(memInstPtr, memoryInstanceSizeOffset, ssa.TypeI64).MarkContextLoad()
 		}
 		builder.InsertInstruction(loadBufSizePtr)
 
@@ -5931,7 +6089,7 @@ func (c *Compiler) getMemoryLenValue(memIndex wasm.Index, forceReload bool) ssa.
 			// 65536-page (the legal maximum) memory has a byte length of
 			// exactly 2^32, which a 32-bit load truncates to zero, making
 			// every access on such a memory incorrectly trap as out-of-bounds.
-			load.AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI64)
+			load.AsLoad(c.moduleCtxPtrValue, (opaqueOffset + 8).U32(), ssa.TypeI64).MarkContextLoad()
 		}
 		builder.InsertInstruction(load)
 		ret = load.Return()
@@ -6468,6 +6626,9 @@ func (c *Compiler) results() int {
 	return len(c.wasmFunctionTyp.Results)
 }
 
+// brTableChainMax is the most labels, the default's included, a br_table is lowered as comparisons for.
+const brTableChainMax = 4
+
 func (c *Compiler) lowerBrTable(labels []uint32, index ssa.Value) {
 	state := c.state()
 	builder := c.ssaBuilder
@@ -6478,6 +6639,36 @@ func (c *Compiler) lowerBrTable(labels []uint32, index ssa.Value) {
 		numArgs = len(f.blockType.Params)
 	} else {
 		numArgs = len(f.blockType.Results)
+	}
+
+	// A few labels are a chain of comparisons: a conditional branch on each is cheaper than a jump through
+	// a table, which also has to clamp the index to the default first. Any other index takes the default.
+	if len(labels) <= brTableChainMax {
+		for i, l := range labels[:len(labels)-1] {
+			targetBlk, _ := state.brTargetArgNumFor(l)
+			args := c.nPeekDup(numArgs)
+			if c.needListener && targetBlk.ReturnBlock() {
+				// A return calls the listener first, which insertJumpToBlock does: in a block of its own.
+				current, ret := builder.CurrentBlock(), builder.AllocateBasicBlock()
+				builder.SetCurrentBlock(ret)
+				c.insertJumpToBlock(args, targetBlk)
+				builder.SetCurrentBlock(current)
+				targetBlk, args = ret, ssa.ValuesNil
+				defer builder.Seal(ret)
+			}
+			k := builder.AllocateInstruction().AsIconst32(uint32(i)).Insert(builder).Return()
+			eq := builder.AllocateInstruction().AsIcmp(index, k, ssa.IntegerCmpCondEqual).Insert(builder).Return()
+			builder.AllocateInstruction().AsBrnz(eq, args, targetBlk).Insert(builder)
+			next := builder.AllocateBasicBlock()
+			c.insertJumpToBlock(ssa.ValuesNil, next)
+			c.finalizeKnownSafeBoundsAtTheEndOfBlock(builder.CurrentBlock().ID())
+			builder.SetCurrentBlock(next)
+			builder.Seal(next)
+			c.initializeCurrentBlockKnownBounds()
+		}
+		targetBlk, _ := state.brTargetArgNumFor(labels[len(labels)-1])
+		c.insertJumpToBlock(c.nPeekDup(numArgs), targetBlk)
+		return
 	}
 
 	varPool := builder.VarLengthPool()
@@ -7143,4 +7334,35 @@ func (c *Compiler) gcStoreElement(ref, index, v ssa.Value) {
 	lo, hi := c.gcSplitWords(v)
 	c.callGC(wasm.GCArraySet, ref, index, lo)
 	c.callGC(wasm.GCArraySet, ref, index, hi, c.gcConst(2))
+}
+
+// mulByPowerOfTwo returns x times y as a left shift where one of them is a constant power of two, which
+// the backends fold into an add's shifted operand or an address, as they do not a multiplication.
+func (c *Compiler) mulByPowerOfTwo(x, y ssa.Value) (ssa.Value, bool) {
+	builder := c.ssaBuilder
+	k := builder.InstructionOfValue(y)
+	if k == nil || k.Opcode() != ssa.OpcodeIconst {
+		x, y = y, x
+		if k = builder.InstructionOfValue(y); k == nil || k.Opcode() != ssa.OpcodeIconst {
+			return ssa.ValueInvalid, false
+		}
+	}
+	n := k.ConstantVal()
+	if x.Type() == ssa.TypeI32 {
+		n = uint64(uint32(n))
+	}
+	switch {
+	case n == 0 || n&(n-1) != 0:
+		return ssa.ValueInvalid, false
+	case n == 1:
+		return x, true
+	}
+	amount := builder.AllocateInstruction()
+	if x.Type() == ssa.TypeI32 {
+		amount.AsIconst32(uint32(bits.TrailingZeros64(n)))
+	} else {
+		amount.AsIconst64(uint64(bits.TrailingZeros64(n)))
+	}
+	shift := builder.AllocateInstruction().AsIshl(x, amount.Insert(builder).Return()).Insert(builder)
+	return shift.Return(), true
 }

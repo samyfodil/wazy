@@ -560,9 +560,8 @@ func TestMachine_lowerToAddressMode_scaledIndex(t *testing.T) {
 				sh := insertI32Const(ctx, b, 2)
 				return insertIadd(ctx, b, p, insertIshl(ctx, b, idx, sh.Return()).Return()).Return()
 			},
-			// The shift stays a real lsl; the address falls back to base+imm9 with the shifted
-			// value folded into the base (i.e. no scaled addressing mode).
-			expKind: addressModeKindRegSignedImm9,
+			// The shift stays a real lsl, whose result is the unscaled index of [base, index].
+			expKind: addressModeKindRegReg,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -802,11 +801,10 @@ func TestMachine_lowerToAddressModeFromAddends(t *testing.T) {
 			exp:           addressMode{kind: addressModeKindRegUnsignedImm12, rn: nextVReg, imm: 4095 * 8},
 		},
 		{
-			name:          "two a64 with imm9",
+			name:          "two a64 and no offset",
 			a64s:          []regalloc.VReg{x1, x2},
 			dstSizeInBits: 64,
-			insts:         []string{"add x100?, x1, x2"},
-			exp:           addressMode{kind: addressModeKindRegSignedImm9, rn: nextVReg, imm: 0},
+			exp:           addressMode{kind: addressModeKindRegReg, rn: x1, rm: x2, extOp: extendOpUXTX},
 		},
 		{
 			name:          "two a64 with imm9",

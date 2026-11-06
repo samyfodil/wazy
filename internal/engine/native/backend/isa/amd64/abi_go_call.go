@@ -517,7 +517,11 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 	// .ok:
 	//		sub $requiredStackSize, %rsp ;; Reverse the temporary update.
 	// .cont:
-	cur = m.addRSP(-int32(requiredStackSize), cur)
+	// The stored limit is raised by backend.StackCheckBiasBytes, so only the excess is checked for.
+	adjust := max(requiredStackSize-backend.StackCheckBiasBytes, 0)
+	if adjust > 0 {
+		cur = m.addRSP(-int32(adjust), cur)
+	}
 	cur = linkInstr(cur, m.allocateInstr().asCmpRmiR(true,
 		newOperandMem(m.newAmodeImmReg(nativeapi.ExecutionContextOffsetStackBottomPtr.U32(), raxVReg)),
 		rspVReg, true))
@@ -525,7 +529,9 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 	ja := m.allocateInstr()
 	cur = linkInstr(cur, ja)
 
-	cur = m.addRSP(int32(requiredStackSize), cur)
+	if adjust > 0 {
+		cur = m.addRSP(int32(adjust), cur)
+	}
 
 	// Save the temporary.
 
@@ -549,7 +555,9 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 	cur = linkInstr(cur, okInstr)
 	ja.asJmpIf(condNBE, newOperandLabel(ok))
 	// On the ok path, we only need to reverse the temporary update.
-	cur = m.addRSP(int32(requiredStackSize), cur)
+	if adjust > 0 {
+		cur = m.addRSP(int32(adjust), cur)
+	}
 
 	// .cont:
 	contInstr, cont := m.allocateBrTarget()

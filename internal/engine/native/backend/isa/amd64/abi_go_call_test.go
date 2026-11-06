@@ -435,10 +435,10 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 		{
 			requiredStackSize: 0x1000,
 			exp: `
-	sub $4096, %rsp
+	sub $3840, %rsp
 	cmpq 40(%rax), %rsp
 	jnbe L1
-	add $4096, %rsp
+	add $3840, %rsp
 	pushq %r15
 	movabsq $4096, %r15
 	mov.q %r15, 64(%rax)
@@ -446,17 +446,15 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 	callq *80(%rax)
 	jmp L2
 L1:
-	add $4096, %rsp
+	add $3840, %rsp
 L2:
 `,
 		},
 		{
 			requiredStackSize: 0x10,
 			exp: `
-	sub $16, %rsp
 	cmpq 40(%rax), %rsp
 	jnbe L1
-	add $16, %rsp
 	pushq %r15
 	movabsq $16, %r15
 	mov.q %r15, 64(%rax)
@@ -464,7 +462,6 @@ L2:
 	callq *80(%rax)
 	jmp L2
 L1:
-	add $16, %rsp
 L2:
 `,
 		},

@@ -20,6 +20,8 @@ func NewBackend() backend.Machine {
 		cpuFeatures:                         platform.CpuFeatures,
 		regAlloc:                            regalloc.NewAllocator[*instruction, *labelPosition, *regAllocFn](regInfo),
 		spillSlots:                          map[regalloc.VRegID]int64{},
+		threadBegins:                        map[*instruction]label{},
+		remat:                               map[regalloc.VRegID]uint64{},
 		amodePool:                           nativeapi.NewPool[amode](nil),
 		labelPositionPool:                   nativeapi.NewIDedPool[labelPosition](resetLabelPosition),
 		instrPool:                           nativeapi.NewPool[instruction](resetInstruction),
@@ -94,6 +96,16 @@ type (
 
 		labelResolutionPends []labelResolutionPend
 
+		// remat holds the bits of each float constant LICM pinned, by its VReg: spilling one stores
+		// nothing and reloading it loads the constant again. See insertReloadRegisterAt.
+		remat map[regalloc.VRegID]uint64
+		// threadTargets and threadBegins are threadJumps' scratch.
+		threadTargets []label
+		threadBegins  map[*instruction]label
+		// threadJumpsBuf is threadJumps' scratch.
+		threadJumpsBuf, threadCondJumpsBuf []*instruction
+		// foldRegs is foldReloads' scratch.
+		foldRegs []regalloc.VReg
 		// jmpTableTargets holds the labels of the jump table targets.
 		jmpTableTargets [][]uint32
 		// jmpTableTargetNext is the index to the jmpTableTargets slice to be used for the next jump table.
@@ -236,6 +248,7 @@ func (m *machine) getOrCreateTrapIsland(code nativeapi.ExitCode) label {
 
 // Reset implements backend.Machine.
 func (m *machine) Reset() {
+	clear(m.remat)
 	m.consts = m.consts[:0]
 	m.trapIslands = m.trapIslands[:0]
 	m.preemptIslands = m.preemptIslands[:0]
@@ -551,6 +564,17 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 		return
 	}
 
+	if m.c.MatchInstr(cvalDef, ssa.OpcodeVanyTrue) {
+		m.insertAnyTrueTest(cvalDef.Instr.Arg())
+		cc := condNZ
+		if b.Opcode() == ssa.OpcodeBrz {
+			cc = condZ
+		}
+		m.insert(m.allocateInstr().asJmpIf(cc, newOperandLabel(target)))
+		cvalDef.Instr.MarkLowered()
+		return
+	}
+
 	switch m.c.MatchInstrOneOf(cvalDef, condBranchMatches[:]) {
 	case ssa.OpcodeIcmp:
 		cvalInstr := cvalDef.Instr
@@ -635,11 +659,19 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		panic("BUG: " + op.String() + " must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
-	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.
+	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const:
+		// A constant is computed where it is used, but one LICM pinned is an ordinary value.
+		if !instr.Constant() {
+			vr := m.c.VRegOf(instr.Return())
+			m.InsertLoadConstantBlockArg(instr, vr)
+			m.remat[vr.ID()] = instr.ConstantVal()
+		}
 	case ssa.OpcodeCall, ssa.OpcodeCallIndirect:
 		m.lowerCall(instr)
 	case ssa.OpcodeYield:
 		m.lowerYield(instr)
+	case ssa.OpcodeVecMap:
+		m.lowerVecMap(instr)
 	case ssa.OpcodeStore, ssa.OpcodeIstore8, ssa.OpcodeIstore16, ssa.OpcodeIstore32:
 		m.lowerStore(instr)
 	case ssa.OpcodeIadd:
@@ -746,6 +778,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerVallTrue(instr)
 	case ssa.OpcodeVhighBits:
 		m.lowerVhighBits(instr)
+	case ssa.OpcodeVIaddReduce:
+		m.lowerVIaddReduce(instr)
 	case ssa.OpcodeVbnot:
 		m.lowerVbnot(instr)
 	case ssa.OpcodeVband:
@@ -1926,16 +1960,12 @@ func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.E
 	m.insert(jmpIf)
 }
 
+// tryLowerBandToFlag sets the flags for comparing x, an and, with y, zero, with a test of the and's
+// operands. It reports false, emitting nothing, for any other comparison: in particular one of zero with
+// an and, whose condition the test's flags would answer for the operands the other way round.
 func (m *machine) tryLowerBandToFlag(x, y backend.SSAValueDefinition) (ok bool) {
 	var target backend.SSAValueDefinition
 	var got bool
-	if x.IsFromInstr() && x.Instr.Constant() && x.Instr.ConstantVal() == 0 {
-		if m.c.MatchInstr(y, ssa.OpcodeBand) {
-			target = y
-			got = true
-		}
-	}
-
 	if y.IsFromInstr() && y.Instr.Constant() && y.Instr.ConstantVal() == 0 {
 		if m.c.MatchInstr(x, ssa.OpcodeBand) {
 			target = x
@@ -2026,9 +2056,16 @@ func (m *machine) lowerAluRmiROp(si *ssa.Instruction, op aluRmiROpcode) {
 	// (C7) and dropped: real producers canonicalize the constant to y, so the
 	// swap fired 0 times across Go/Rust/TinyGo modules -- it only ever helps
 	// hand-written wasm, for the cost of a Constant() check on every ALU op.
+	rd := m.c.VRegOf(si.Return())
+	if op == aluRmiROpcodeMul && yDef.IsFromInstr() && yDef.Instr.Constant() {
+		if k, ok := asImm32Operand(yDef.Instr.ConstantVal(), !_64); ok {
+			yDef.Instr.MarkLowered()
+			m.insert(m.allocateInstr().asImulImm(m.getOperand_Mem_Reg(xDef), k.imm32(), rd, _64))
+			return
+		}
+	}
 	rn := m.getOperand_Reg(xDef)
 	rm := m.getOperand_Mem_Imm32_Reg(yDef)
-	rd := m.c.VRegOf(si.Return())
 
 	// An add is what LEA computes, and LEA is three-operand: it reads rn and rm and
 	// writes rd, so neither the copy in nor the copy out below is needed. LEA leaves the
@@ -2170,17 +2207,22 @@ func (m *machine) lowerXmmRmR(instr *ssa.Instruction) {
 	}
 
 	xDef, yDef := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
-	rn := m.getOperand_Reg(yDef)
+	// A scalar operation reads its second operand from memory as well as from a register, and a load
+	// only it uses folds into it.
+	rn := m.getOperand_Mem_Reg(yDef)
 	rm := m.getOperand_Reg(xDef)
-	rd := m.c.VRegOf(instr.Return())
+	m.insertXmmBinary(op, rn, rm.reg(), m.c.VRegOf(instr.Return()))
+}
 
-	// rm is being overwritten, so we first copy its value to a temp register,
-	// in case it is referenced again later.
-	tmp := m.copyToTmp(rm.reg())
-
-	xmm := m.allocateInstr().asXmmRmR(op, rn, tmp)
-	m.insert(xmm)
-
+// insertXmmBinary inserts rd = src1 op src2: in AVX's three-operand form where there is one, which
+// overwrites neither, and otherwise as SSE's two-operand form on a copy of src1.
+func (m *machine) insertXmmBinary(op sseOpcode, src2 operand, src1, rd regalloc.VReg) {
+	if m.cpuFeatures.Has(platform.CpuFeatureAmd64AVX) && hasVexForm(op) {
+		m.insert(m.allocateInstr().asXmmRmRVex(op, src2, src1, rd))
+		return
+	}
+	tmp := m.copyToTmp(src1)
+	m.insert(m.allocateInstr().asXmmRmR(op, src2, tmp))
 	m.copyTo(tmp, rd)
 }
 
@@ -2332,6 +2374,7 @@ func (m *machine) lowerCall(si *ssa.Instruction) {
 	if isDirectCall {
 		call := m.allocateInstr().asCall(directCallee, calleeABI)
 		call.mayThrow = si.MayThrow()
+		call.b1 = si.InlinedCall()
 		m.insert(call)
 	} else {
 		ptrOp := m.getOperand_Mem_Reg(m.c.ValueDefinition(indirectCalleePtr))
@@ -2675,7 +2718,7 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 	for i := range m.labelResolutionPends {
 		p := &m.labelResolutionPends[i]
 		switch p.instr.kind {
-		case jmp, jmpIf, lea, xmmUnaryRmR:
+		case jmp, jmpIf, lea, xmmUnaryRmR, xmmRmRVex:
 			target := p.instr.jmpLabel()
 			targetOffset := m.labelPositionPool.Get(int(target)).binaryOffset
 			imm32Offset := p.imm32Offset
@@ -2910,8 +2953,19 @@ func (m *machine) lowerIDivRem(si *ssa.Instruction, isDiv bool, signed bool) {
 
 	dividend := m.getOperand_Reg(m.c.ValueDefinition(x))
 	divisor := m.getOperand_Reg(m.c.ValueDefinition(y))
-	ctxVReg := m.c.VRegOf(execCtx)
 	tmpGp := m.c.AllocateVReg(si.Return().Type())
+	// As for a bounds check, a division traps through the shared islands, which reload the execution
+	// context themselves, unless debug info wants each trap where it happened: then it needs the context
+	// in a register, which in a loop is one more value kept live, or reloaded, on every iteration.
+	ctxVReg := regalloc.VRegInvalid
+	if si.SourceOffset().Valid() {
+		ctxVReg = m.c.VRegOf(execCtx)
+	} else {
+		m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerDivisionByZero)
+		if signed && isDiv {
+			m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerOverflow)
+		}
+	}
 
 	m.copyTo(dividend.reg(), raxVReg)
 	m.insert(m.allocateInstr().asDefineUninitializedReg(rdxVReg))
@@ -2931,18 +2985,24 @@ func (m *machine) lowerIDivRemSequenceAfterRegAlloc(i *instruction) {
 
 	dividend := raxVReg
 
+	shared := !execCtx.Valid() // The traps go to the shared islands lowerIDivRem made.
+
 	// Ensure yr is not zero.
 	test := m.allocateInstr()
 	test.asCmpRmiR(false, newOperandReg(divisor), divisor, _64)
 	m.insert(test)
 
-	jnz := m.allocateInstr()
-	m.insert(jnz)
+	if shared {
+		m.insert(m.allocateInstr().asJmpIf(condZ, newOperandLabel(m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerDivisionByZero))))
+	} else {
+		jnz := m.allocateInstr()
+		m.insert(jnz)
 
-	nz := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerDivisionByZero)
+		nz := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerDivisionByZero)
 
-	// If not zero, we can proceed with the division.
-	jnz.asJmpIf(condNZ, newOperandLabel(nz))
+		// If not zero, we can proceed with the division.
+		jnz.asJmpIf(condNZ, newOperandLabel(nz))
+	}
 
 	var ifRemNeg1 *instruction
 	if signed {
@@ -2987,9 +3047,16 @@ func (m *machine) lowerIDivRemSequenceAfterRegAlloc(i *instruction) {
 			// Trap if we are trying to do (math.MinInt32 / -1) or (math.MinInt64 / -1),
 			// as that is the overflow in division as the result becomes 2^31 which is larger than
 			// the maximum of signed 32-bit int (2^31-1).
-			end := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerOverflow)
-			ifNotNeg1.asJmpIf(condNZ, newOperandLabel(end))
-			ifNotMinInt.asJmpIf(condNZ, newOperandLabel(end))
+			if shared {
+				cont, contLabel := m.allocateBrTarget()
+				ifNotNeg1.asJmpIf(condNZ, newOperandLabel(contLabel))
+				ifNotMinInt.asJmpIf(condZ, newOperandLabel(m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerOverflow)))
+				m.insert(cont)
+			} else {
+				end := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerOverflow)
+				ifNotNeg1.asJmpIf(condNZ, newOperandLabel(end))
+				ifNotMinInt.asJmpIf(condNZ, newOperandLabel(end))
+			}
 		} else {
 			// If it is remainder, zeros DX register and compare the divisor to -1.
 			xor := m.allocateInstr().asZeros(rdxVReg)
@@ -3664,15 +3731,11 @@ func (m *machine) lowerFcvtFromUint(rn, rd operand, src64, dst64 bool) {
 }
 
 func (m *machine) lowerVanyTrue(instr *ssa.Instruction) {
-	x := instr.Arg()
-	rm := m.getOperand_Reg(m.c.ValueDefinition(x))
 	rd := m.c.VRegOf(instr.Return())
 
 	tmp := m.c.AllocateVReg(ssa.TypeI32)
 
-	cmp := m.allocateInstr()
-	cmp.asXmmCmpRmR(sseOpcodePtest, rm, rm.reg())
-	m.insert(cmp)
+	m.insertAnyTrueTest(instr.Arg())
 
 	setcc := m.allocateInstr()
 	setcc.asSetcc(condNZ, tmp)
@@ -3684,6 +3747,25 @@ func (m *machine) lowerVanyTrue(instr *ssa.Instruction) {
 	m.insert(and)
 
 	m.copyTo(tmp, rd)
+}
+
+// insertAnyTrueTest sets ZF exactly when no bit of the vector x is set. ptest ANDs its operands, so
+// for x = a & b, used nowhere else, it tests a and b without computing x.
+func (m *machine) insertAnyTrueTest(x ssa.Value) {
+	def := m.c.ValueDefinition(x)
+	a, b := x, x
+	if m.c.MatchInstr(def, ssa.OpcodeVband) {
+		a, b = def.Instr.Arg2()
+		def.Instr.MarkLowered()
+	}
+	rm := m.getOperand_Reg(m.c.ValueDefinition(a))
+	rb := rm
+	if b != a {
+		rb = m.getOperand_Reg(m.c.ValueDefinition(b))
+	}
+	cmp := m.allocateInstr()
+	cmp.asXmmCmpRmR(sseOpcodePtest, rb, rm.reg())
+	m.insert(cmp)
 }
 
 func (m *machine) lowerVallTrue(instr *ssa.Instruction) {
@@ -3728,6 +3810,21 @@ func (m *machine) lowerVallTrue(instr *ssa.Instruction) {
 	m.insert(and)
 
 	m.copyTo(tmp2, rd)
+}
+
+// lowerVIaddReduce adds the upper half of the vector onto the lower, then the second lane onto the first.
+func (m *machine) lowerVIaddReduce(instr *ssa.Instruction) {
+	x := m.c.VRegOf(instr.Arg())
+	// pshufd writes its destination without defining it, so each shuffles a copy in place.
+	halves := m.copyToTmp(x)
+	m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePshufd, 0b01_00_11_10, newOperandReg(halves), halves))
+	pairs := m.c.AllocateVReg(ssa.TypeV128)
+	m.insertXmmBinary(sseOpcodePaddd, newOperandReg(halves), x, pairs)
+	odd := m.copyToTmp(pairs)
+	m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePshufd, 0b10_11_00_01, newOperandReg(odd), odd))
+	sum := m.c.AllocateVReg(ssa.TypeV128)
+	m.insertXmmBinary(sseOpcodePaddd, newOperandReg(odd), pairs, sum)
+	m.insert(m.allocateInstr().asXmmToGpr(sseOpcodeMovd, sum, m.c.VRegOf(instr.Return()), false))
 }
 
 func (m *machine) lowerVhighBits(instr *ssa.Instruction) {
@@ -3857,6 +3954,47 @@ func (m *machine) lowerSplat(x, ret ssa.Value, lane ssa.VecLane) {
 }
 
 func (m *machine) lowerShuffle(x, y ssa.Value, lo, hi uint64, ret ssa.Value) {
+	var lanes [16]byte
+	for i := 0; i < 8; i++ {
+		lanes[i], lanes[8+i] = byte(lo>>(i*8)), byte(hi>>(i*8))
+	}
+	// Sixteen bytes in a row of x followed by y, a window sliding over the two, is one palignr.
+	window := true
+	for i, l := range lanes {
+		window = window && l == lanes[0]+byte(i)
+	}
+	if window && lanes[0] > 0 && lanes[0] < 16 {
+		xx := m.getOperand_Reg(m.c.ValueDefinition(x))
+		yy := m.getOperand_Reg(m.c.ValueDefinition(y))
+		tmp := m.copyToTmp(yy.reg())
+		m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePalignr, lanes[0], xx, tmp))
+		m.copyTo(tmp, m.c.VRegOf(ret))
+		return
+	}
+	// Every lane from one of the two is one pshufb.
+	fromX, fromY := true, true
+	for _, l := range lanes {
+		fromX, fromY = fromX && l < 16, fromY && l >= 16
+	}
+	if fromX || fromY {
+		src := x
+		var mask [2]uint64
+		for i, l := range lanes {
+			if fromY {
+				l -= 16
+			}
+			mask[i/8] |= uint64(l) << (i % 8 * 8)
+		}
+		if fromY {
+			src = y
+		}
+		ss := m.getOperand_Reg(m.c.ValueDefinition(src))
+		tmp := m.copyToTmp(ss.reg())
+		m.insert(m.allocateInstr().asXmmRmR(sseOpcodePshufb, newOperandReg(m.loadV128Const(mask[0], mask[1])), tmp))
+		m.copyTo(tmp, m.c.VRegOf(ret))
+		return
+	}
+
 	var xMask, yMask [2]uint64
 	for i := 0; i < 8; i++ {
 		loLane := byte(lo >> (i * 8))
@@ -3902,32 +4040,35 @@ func (m *machine) lowerShuffle(x, y ssa.Value, lo, hi uint64, ret ssa.Value) {
 	m.copyTo(tmpY, m.c.VRegOf(ret))
 }
 
+// loadV128Const loads a 16-byte constant from the constant pool into a new register: the pool is not
+// aligned, which a legacy SSE memory operand would need to be.
+func (m *machine) loadV128Const(lo, hi uint64) regalloc.VReg {
+	l, pos := m.allocateLabel()
+	m.consts = append(m.consts, _const{lo: lo, hi: hi, label: l, labelPos: pos})
+	tmp := m.c.AllocateVReg(ssa.TypeV128)
+	m.insert(m.allocateInstr().asXmmUnaryRmR(sseOpcodeMovdqu, newOperandMem(m.newAmodeRipRel(l)), tmp))
+	return tmp
+}
+
 func (m *machine) lowerVbBinOpUnaligned(op sseOpcode, x, y, ret ssa.Value) {
 	rn := m.getOperand_Reg(m.c.ValueDefinition(x))
 	rm := m.getOperand_Reg(m.c.ValueDefinition(y))
-	rd := m.c.VRegOf(ret)
-
-	tmp := m.copyToTmp(rn.reg())
-
-	binOp := m.allocateInstr()
-	binOp.asXmmRmR(op, rm, tmp)
-	m.insert(binOp)
-
-	m.copyTo(tmp, rd)
+	m.insertXmmBinary(op, rm, rn.reg(), m.c.VRegOf(ret))
 }
 
 func (m *machine) lowerVbBinOp(op sseOpcode, x, y, ret ssa.Value) {
 	rn := m.getOperand_Reg(m.c.ValueDefinition(x))
-	rm := m.getOperand_Mem_Reg(m.c.ValueDefinition(y))
-	rd := m.c.VRegOf(ret)
-
-	tmp := m.copyToTmp(rn.reg())
-
-	binOp := m.allocateInstr()
-	binOp.asXmmRmR(op, rm, tmp)
-	m.insert(binOp)
-
-	m.copyTo(tmp, rd)
+	yDef := m.c.ValueDefinition(y)
+	var rm operand
+	if m.cpuFeatures.Has(platform.CpuFeatureAmd64AVX) && hasVexForm(op) && m.c.MatchInstr(yDef, ssa.OpcodeLoad) {
+		// A VEX instruction's memory operand need not be aligned, so the load of a vector folds into it.
+		ptr, offset, _ := yDef.Instr.LoadData()
+		rm = newOperandMem(m.lowerToAddressMode(ptr, offset))
+		yDef.Instr.MarkLowered()
+	} else {
+		rm = m.getOperand_Mem_Reg(yDef)
+	}
+	m.insertXmmBinary(op, rm, rn.reg(), m.c.VRegOf(ret))
 }
 
 func (m *machine) lowerVFcmp(x, y ssa.Value, c ssa.FloatCmpCond, ret ssa.Value, lane ssa.VecLane) {

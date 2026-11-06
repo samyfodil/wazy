@@ -237,15 +237,25 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 		r = result.Reg
 	}
 
+	// A 32-bit result fills its whole 64-bit slot, zero-extended as api.EncodeI32 and api.EncodeF32 do:
+	// the slot held a parameter before.
+	switch result.Type {
+	case ssa.TypeI32:
+		if r != tmpIntReg {
+			cur = linkInstr(cur, m.allocateInstr().asMovzxRmR(extModeLQ, newOperandReg(r), tmpIntReg))
+			r = tmpIntReg
+		}
+	case ssa.TypeF32:
+		cur = linkInstr(cur, m.allocateInstr().asXmmToGpr(sseOpcodeMovd, r, tmpIntReg, false))
+		r = tmpIntReg
+	}
 	store := m.allocateInstr()
 	a := newOperandMem(m.newAmodeImmReg(offsetInResultSlice, resultSlicePtr))
 	switch result.Type {
-	case ssa.TypeI32:
-		store.asMovRM(r, a, 4)
+	case ssa.TypeI32, ssa.TypeF32:
+		store.asMovRM(r, a, 8)
 	case ssa.TypeI64:
 		store.asMovRM(r, a, 8)
-	case ssa.TypeF32:
-		store.asXmmMovRM(sseOpcodeMovss, r, a)
 	case ssa.TypeF64:
 		store.asXmmMovRM(sseOpcodeMovsd, r, a)
 	case ssa.TypeV128:

@@ -258,7 +258,7 @@ func alignedStackTop(s []byte) uintptr {
 // (10240) and only ever grows, so base+MARGIN < len(stack) always holds. See
 // the invariant proof on backend.StackBoundsCheckMarginBytes.
 func (c *callEngine) stackCheckLimitPtr(base int) *byte {
-	return &c.stack[base+backend.StackBoundsCheckMarginBytes]
+	return &c.stack[base+backend.StackBoundsCheckMarginBytes+backend.StackCheckBiasBytes]
 }
 
 // stackReleasesBeforeKeep is how many calls a callEngine gives its stack back to the pool for before it
@@ -334,6 +334,29 @@ func (c *callEngine) addFrame(builder wasmdebug.ErrorBuilder, addr uintptr) (def
 		}
 	}
 	return
+}
+
+// withInlinedFrames returns addrs, return addresses, with each one a call from a copy of the body of the
+// function holding it returns to twice: once for the copy, then for the function (see
+// frontend.Compiler.inlineSelf). It returns addrs itself when there is none.
+func withInlinedFrames(addrs []uintptr) []uintptr {
+	n := 0
+	for _, a := range addrs {
+		if inlinedCallAt(a) {
+			n++
+		}
+	}
+	if n == 0 {
+		return addrs
+	}
+	out := make([]uintptr, 0, len(addrs)+n)
+	for _, a := range addrs {
+		if inlinedCallAt(a) {
+			out = append(out, a)
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // addInlinedFrame adds the frame of the local function index, whose body the compiler lowered
@@ -607,12 +630,12 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 				if lsn != nil {
 					listeners = append(listeners, listenerForAbort{def, lsn})
 				}
-				returnAddrs := unwindStack(
+				returnAddrs := withInlinedFrames(unwindStack(
 					uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)),
 					c.execCtx.framePointerBeforeGoCall,
 					c.stackTop,
 					nil,
-				)
+				))
 				if len(returnAddrs) > 1 {
 					for _, retAddr := range returnAddrs[:len(returnAddrs)-1] { // the last return addr is the trampoline, so we skip it.
 						def, lsn = c.addFrame(builder, retAddr)
@@ -1206,7 +1229,7 @@ func (si *stackIterator) reset(c *callEngine, onHostCall bool) {
 		si.retAddrs = si.retAddrs[:0]
 	}
 	si.retAddrs = unwindStack(uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall, c.stackTop, si.retAddrs)
-	si.retAddrs = si.retAddrs[:len(si.retAddrs)-1] // the last return addr is the trampoline, so we skip it.
+	si.retAddrs = withInlinedFrames(si.retAddrs[:len(si.retAddrs)-1]) // the last return addr is the trampoline, so we skip it.
 	si.retAddrCursor = 0
 	si.eng = c.parent.parent.parent
 }

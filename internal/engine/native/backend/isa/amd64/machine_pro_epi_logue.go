@@ -10,8 +10,10 @@ import (
 func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
+	m.foldReloads()
 	m.emitTrapIslands()
 	m.emitPreemptIslands()
+	m.threadJumps()
 }
 
 // emitPreemptIslands materializes the out-of-line halves of masked preemption
@@ -421,8 +423,9 @@ func (m *machine) setupEpilogueAfter(cur *instruction) {
 	//          +-----------------+ <--- RSP
 	//             (low address)
 
-	if size := m.spillSlotSize; size > 0 {
-		// Simply increase the RSP to free the spill slots.
+	if size := m.spillSlotSize; size > 0 && len(m.clobberedRegs) > 0 {
+		// Simply increase the RSP to free the spill slots, for the clobbered registers to be popped. With
+		// none, restoring RSP from RBP below frees them.
 		// 		add $size, %rsp
 		cur = linkInstr(cur, m.allocateInstr().asAluRmiR(aluRmiROpcodeAdd, newOperandImm32(uint32(size)), rspVReg, true))
 	}

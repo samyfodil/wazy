@@ -15,9 +15,13 @@ import (
 type (
 	// machine implements backend.Machine.
 	machine struct {
-		compiler   backend.Compiler
-		currentABI *backend.FunctionABI
-		instrPool  nativeapi.Pool[instruction]
+		compiler backend.Compiler
+		// paramBlocks is the block each block parameter belongs to, indexed by value ID, and zextVisiting
+		// zeroExtendedParam's scratch.
+		paramBlocks  []ssa.BasicBlock
+		zextVisiting []ssa.Value
+		currentABI   *backend.FunctionABI
+		instrPool    nativeapi.Pool[instruction]
 		// labelPositionPool is the pool of labelPosition. The id is the label where
 		// if the label is less than the maxSSABlockID, it's the ssa.BasicBlockID.
 		labelPositionPool nativeapi.IDedPool[labelPosition]
@@ -60,6 +64,12 @@ type (
 		// condBrRelocs holds the conditional branches which need offset relocation.
 		condBrRelocs []condBrReloc
 
+		// threadTargets and threadBegins are threadJumps' scratch.
+		threadTargets []label
+		threadBegins  map[*instruction]label
+		// threadJumpsBuf is threadJumps' scratch.
+		threadJumpsBuf, threadCondJumpsBuf []*instruction
+		threadReferenced                   []bool
 		// jmpTableTargets holds the labels of the jump table targets.
 		jmpTableTargets [][]uint32
 		// jmpTableTargetNext is the index to the jmpTableTargets slice to be used for the next jump table.
@@ -117,6 +127,9 @@ type (
 		// Also note that this is only known after register allocation.
 		spillSlotSize int64
 		spillSlots    map[regalloc.VRegID]int64 // regalloc.VRegID to offset.
+		// remat holds the bits of each constant LICM pinned, by its VReg: spilling one stores
+		// nothing and reloading it loads the constant again. See insertReloadRegisterAt.
+		remat map[regalloc.VRegID]uint64
 		// clobberedRegs holds real-register backed VRegs saved at the function prologue, and restored at the epilogue.
 		clobberedRegs []regalloc.VReg
 
@@ -204,6 +217,8 @@ func resetLabelPosition(l *labelPosition) {
 func NewBackend() backend.Machine {
 	m := &machine{
 		spillSlots:        make(map[regalloc.VRegID]int64),
+		remat:             map[regalloc.VRegID]uint64{},
+		threadBegins:      map[*instruction]label{},
 		regAlloc:          regalloc.NewAllocator[*instruction, *labelPosition, *regAllocFn](regInfo),
 		amodePool:         nativeapi.NewPool[addressMode](resetAddressMode),
 		instrPool:         nativeapi.NewPool[instruction](resetInstruction),
@@ -306,13 +321,21 @@ func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
 	return 16, 24
 }
 
+// needsCtxSlot reports whether this function reserves the fixed exec-context slot at the bottom of the
+// spill region: for the EH path, and for the shared conditional-trap islands, which reload the execution
+// context from it rather than have every trap site copy it to a register (see lowerExitIfTrueWithCodeShared
+// and emitTrapIslands). Trap islands are created during lowering, so len(trapIslands) is final by RegAlloc.
+func (m *machine) needsCtxSlot() bool {
+	return m.hasEHContext || len(m.trapIslands) > 0
+}
+
 // RegAlloc implements backend.Machine Function.
 func (m *machine) RegAlloc() {
 	// Reserve the fixed execCtx/moduleCtx slots at the bottom of the
 	// spill-slot region before the allocator hands out any of its own slots,
 	// so the reserved offsets ([SP+16]/[SP+24]) are stable regardless of how
 	// many spill slots this function ends up needing.
-	if m.hasEHContext {
+	if m.needsCtxSlot() {
 		m.spillSlotSize = ehCtxReservedSlotSize
 	}
 	m.regAllocStarted = true
@@ -323,6 +346,7 @@ func (m *machine) RegAlloc() {
 
 // Reset implements backend.Machine.
 func (m *machine) Reset() {
+	clear(m.remat)
 	m.clobberedRegs = m.clobberedRegs[:0]
 	for key := range m.spillSlots {
 		m.clobberedRegs = append(m.clobberedRegs, regalloc.VReg(key))
@@ -393,6 +417,18 @@ func (m *machine) getOrCreateTrapIsland(code nativeapi.ExitCode) label {
 func (m *machine) StartLoweringFunction(maxBlockID ssa.BasicBlockID) {
 	m.maxSSABlockID = label(maxBlockID)
 	m.nextLabel = label(maxBlockID) + 1
+	clear(m.paramBlocks)
+	m.paramBlocks = m.paramBlocks[:0]
+	builder := m.compiler.SSABuilder()
+	for blk := builder.BlockIteratorBegin(); blk != nil; blk = builder.BlockIteratorNext() {
+		for i := range blk.Params() {
+			id := int(blk.Param(i).ID())
+			for len(m.paramBlocks) <= id {
+				m.paramBlocks = append(m.paramBlocks, nil)
+			}
+			m.paramBlocks[id] = blk
+		}
+	}
 }
 
 // SetCurrentABI implements backend.Machine SetCurrentABI.
@@ -633,7 +669,7 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 			for i := range targets {
 				l := label(targets[i])
 				offsetOfTarget := m.labelPositionPool.Get(int(l)).binaryOffset
-				diff := offsetOfTarget - (currentOffset + brTableSequenceOffsetTableBegin)
+				diff := offsetOfTarget - (currentOffset + cur.brTableBegin())
 				targets[i] = uint32(diff)
 			}
 			cur.brTableSequenceOffsetsResolved()
