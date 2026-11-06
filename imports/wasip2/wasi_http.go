@@ -197,6 +197,9 @@ type httpCapture struct {
 type wasiHTTP struct {
 	mu sync.Mutex
 
+	// maxResponseBytes caps one outgoing body's buffer; 0 means unlimited.
+	maxResponseBytes int64
+
 	// getResources yields the owning Instance's handle table, set by the
 	// resource hook (see withResourcesHook): host funcs that mint a nested
 	// own<T> handle need it directly, exactly like wasi_fs.go.
@@ -421,6 +424,9 @@ func (h *wasiHTTP) bodyStreamWrite(rep uint32, buf []byte) (found bool, err erro
 	}
 	if b.finished {
 		return true, fmt.Errorf("wasi:http/types: outgoing-body written after finish")
+	}
+	if h.maxResponseBytes > 0 && int64(b.buf.Len())+int64(len(buf)) > h.maxResponseBytes {
+		return true, fmt.Errorf("wasi:http/types: outgoing body exceeds the %d byte response limit", h.maxResponseBytes)
 	}
 	b.buf.Write(buf)
 	return true, nil

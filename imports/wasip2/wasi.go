@@ -297,6 +297,15 @@ type WASIConfig struct {
 	// scratch backend. Has no effect unless EnableHTTP is also true.
 	HTTPClient *http.Client
 
+	// MaxResponseBytes, when > 0, caps how many bytes a guest may write into one
+	// outgoing http body. wazy buffers a whole response in host memory before
+	// ServeHTTP writes it out, so without a cap a guest that loops on
+	// output-stream.write can allocate gigabytes of host memory per second.
+	// A write that would pass the cap fails the host call, which traps the
+	// guest, so ServeHTTP answers 500. Zero, the default, means no cap. Has no
+	// effect unless EnableHTTP is also true.
+	MaxResponseBytes int64	
+
 	// WallClock, when non-nil, is the source wasi:clocks/wall-clock.now reads
 	// the current time from. Nil uses time.Now. It is the one injectable clock
 	// surface (monotonic-clock stays real so std::thread::sleep genuinely
@@ -757,6 +766,7 @@ func WithWASI(cfg WASIConfig) []component.Option {
 	}
 	if cfg.EnableHTTP {
 		httphost.client = cfg.HTTPClient
+		httphost.maxResponseBytes = cfg.MaxResponseBytes
 		// incoming-body.stream reuses the fs input-stream path: mint an
 		// fsStreamNode over the response bytes, served by the already-registered
 		// [method]input-stream.blocking-read (fs.streamRead), EOF included.
