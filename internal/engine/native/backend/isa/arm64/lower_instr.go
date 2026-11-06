@@ -2335,9 +2335,11 @@ func zeroExtends32(instr *ssa.Instruction) bool {
 	switch instr.Opcode() {
 	case
 		ssa.OpcodeIadd, ssa.OpcodeIsub, ssa.OpcodeLoad,
-		ssa.OpcodeBand, ssa.OpcodeBor, ssa.OpcodeBnot,
+		ssa.OpcodeBand, ssa.OpcodeBor, ssa.OpcodeBxor, ssa.OpcodeBnot,
 		ssa.OpcodeIshl, ssa.OpcodeUshr, ssa.OpcodeSshr,
 		ssa.OpcodeRotl, ssa.OpcodeRotr,
+		ssa.OpcodeImul, ssa.OpcodeUdiv, ssa.OpcodeSdiv, ssa.OpcodeUrem, ssa.OpcodeSrem,
+		ssa.OpcodeClz, ssa.OpcodeCtz, ssa.OpcodeSelect,
 		ssa.OpcodeUload8, ssa.OpcodeUload16, ssa.OpcodeUload32:
 		return true
 	default:

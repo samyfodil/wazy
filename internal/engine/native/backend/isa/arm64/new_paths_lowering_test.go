@@ -795,8 +795,10 @@ func Test_aliasZeroExtended32(t *testing.T) {
 	iadd32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
 		return b.AllocateInstruction().AsIadd(arg, arg)
 	}
-	imul32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
-		return b.AllocateInstruction().AsImul(arg, arg)
+	popcnt32 := func(b ssa.Builder, arg ssa.Value) *ssa.Instruction {
+		i := b.AllocateInstruction()
+		i.AsPopcnt(arg)
+		return i
 	}
 
 	t.Run("zero-extending producer: aliased, nothing emitted", func(t *testing.T) {
@@ -805,7 +807,7 @@ func Test_aliasZeroExtended32(t *testing.T) {
 		require.Equal(t, "nop0", formatEmittedInstructionsInCurrentBlock(m))
 	})
 	t.Run("other producer: not aliased, uxtw emitted", func(t *testing.T) {
-		ctx, m, ext := setup(t, imul32, false, 32, 64)
+		ctx, m, ext := setup(t, popcnt32, false, 32, 64)
 		require.Equal(t, intToVReg(3), ctx.VRegOf(ext.Return()))
 		require.Equal(t, "uxtw x3?, w2?\nnop0", formatEmittedInstructionsInCurrentBlock(m))
 	})

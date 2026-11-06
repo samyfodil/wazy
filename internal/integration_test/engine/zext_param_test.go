@@ -34,10 +34,15 @@ func TestZextParam(t *testing.T) {
 		require.NoError(t, err)
 		mods[interp] = m
 	}
-	for _, fn := range []string{"param", "masked"} {
+	// The loops run n times; ops takes any n.
+	for _, fn := range []string{"param", "masked", "ops"} {
+		ps, ns := []uint64{0, 3, 20, 65530}, []uint64{0, 1, 5, 9}
+		if fn == "ops" {
+			ps, ns = append(ps, 0x80000000, 0xffffffff), append(ns, 0x80000001, 0xfffffff9)
+		}
 		for _, top := range []uint64{0, 1 << 32, 0xffffffff_00000000} {
-			for _, p := range []uint64{0, 3, 20, 65530} {
-				for _, n := range []uint64{0, 1, 5, 9} {
+			for _, p := range ps {
+				for _, n := range ns {
 					args := []uint64{top | p, top | n}
 					want, wantErr := mods[true].ExportedFunction(fn).Call(ctx, args...)
 					got, err := mods[false].ExportedFunction(fn).Call(ctx, args...)
