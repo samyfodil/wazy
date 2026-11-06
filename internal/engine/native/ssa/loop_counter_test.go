@@ -31,6 +31,7 @@ type countedLoop struct {
 	joined             bool   // pass the start through a parameter whose other predecessor passes it back
 	midExit            bool   // leave by a branch out where the comparison fails, and go back unconditionally
 	skipExit           bool   // ... past a branch that may go straight to the back edge, skipping it
+	joinNext           bool   // pass next on through a parameter of a join both sides of a branch feed it
 	typ                Type
 }
 
@@ -128,6 +129,19 @@ func (l countedLoop) build() (*builder, BasicBlock, BasicBlock) {
 		brz.AsBrz(other, ValuesNil.Append(&b.varLengthPool, other), header)
 		b.InsertInstruction(brz)
 		continueIn()
+	}
+	if l.joinNext {
+		left, right, join := b.AllocateBasicBlock(), b.AllocateBasicBlock(), b.AllocateBasicBlock()
+		b.AllocateInstruction().AsBrnz(p, ValuesNil, left).Insert(b)
+		b.AllocateInstruction().AsJump(ValuesNil, right).Insert(b)
+		for _, side := range []BasicBlock{left, right} {
+			b.Seal(side)
+			b.SetCurrentBlock(side)
+			b.AllocateInstruction().AsJump(ValuesNil.Append(&b.varLengthPool, next), join).Insert(b)
+		}
+		b.Seal(join)
+		b.SetCurrentBlock(join)
+		next = join.AddParam(b, l.typ)
 	}
 	args := ValuesNil
 	if l.untested {
@@ -258,6 +272,7 @@ func TestTripBound(t *testing.T) {
 		{name: "unconditional", loop: countedLoop{step: 1, jumpBack: true}},
 		{name: "exit mid-loop", loop: countedLoop{start: 0, step: 8, bound: 320, cc: IntegerCmpCondNotEqual, cmpParam: true, midExit: true}, trips: 41, ok: true},
 		{name: "exit mid-loop on next", loop: countedLoop{start: 0, step: 1, bound: 10, cc: IntegerCmpCondUnsignedLessThan, midExit: true}, trips: 10, ok: true},
+		{name: "next through a join", loop: countedLoop{start: 0, step: 1, bound: 10, cc: IntegerCmpCondUnsignedLessThan, joinNext: true}, trips: 10, ok: true},
 		{name: "exit mid-loop that can be skipped", loop: countedLoop{start: 0, step: 1, bound: 10, cc: IntegerCmpCondUnsignedLessThan, midExit: true, skipExit: true}},
 		{name: "i64", loop: countedLoop{typ: TypeI64, start: 0, step: 1, bound: 100, cc: IntegerCmpCondUnsignedLessThan}, trips: 100, ok: true},
 	} {

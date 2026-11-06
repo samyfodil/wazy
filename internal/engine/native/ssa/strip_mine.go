@@ -80,7 +80,7 @@ func (b *builder) StripMine(header, preheader, body BasicBlock, lc LoopCounter, 
 	pre.removeInstruction(entry)
 	b.currentBB = pre
 	x0 := lc.Start
-	if t.x == lc.Next {
+	if lc.isNext(t.x) {
 		x0 = b.AllocateInstruction().AsIadd(lc.Start, b.iconst(typ, lc.Step)).Insert(b).Return()
 	}
 	if t.nIsConst {
@@ -283,7 +283,7 @@ func (b *builder) findExitTest(h, body *basicBlock, lc LoopCounter) (t exitTest,
 	if !goOnIfTrue {
 		cc = cc.Inverted()
 	}
-	counter := func(v Value) bool { return v == lc.Param || (t.backEdge && v == lc.Next) }
+	counter := func(v Value) bool { return v == lc.Param || (t.backEdge && lc.isNext(v)) }
 	switch {
 	case counter(x):
 	case y.Valid() && counter(y):

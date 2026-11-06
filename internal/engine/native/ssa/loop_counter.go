@@ -20,6 +20,9 @@ type LoopCounter struct {
 	BackEdge *Instruction
 	// preheader is the block the loop is entered from, and header the loop's.
 	preheader, header *basicBlock
+	// nextIn is, where Next reaches the back edge through a parameter of the back edge's block that
+	// every edge into it passes Next, that parameter: the value the block's tests see. See isNext.
+	nextIn Value
 }
 
 // FindLoopCounter returns the counter of the loop headed by header, entered from
@@ -34,12 +37,47 @@ type LoopCounter struct {
 //
 // The header must be sealed, so that every value the loop carries is one of its
 // parameters.
+// isNext reports whether v is the counter's value on the back edge, Next or the parameter it reaches
+// it through.
+func (lc LoopCounter) isNext(v Value) bool {
+	return v == lc.Next || lc.nextIn.Valid() && v == lc.nextIn
+}
+
+// sameIncoming returns the value every edge into blk passes for v, a parameter of blk, other than v
+// itself, or v where v is not one or they differ. Building SSA leaves such a parameter for a local that
+// branches in a loop set alike, until a pass takes it out.
+func (b *builder) sameIncoming(blk *basicBlock, v Value) Value {
+	j := slices.Index(blk.params.View(), v)
+	if j < 0 {
+		return v
+	}
+	u := ValueInvalid
+	for _, p := range blk.preds {
+		args := p.branch.vs.View()
+		if j >= len(args) {
+			return v
+		}
+		switch a := b.resolveAlias(args[j]); {
+		case a == v:
+		case u.Valid() && a != u:
+			return v
+		default:
+			u = a
+		}
+	}
+	if !u.Valid() {
+		return v
+	}
+	return u
+}
+
 func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter, ok bool) {
 	h := header.(*basicBlock)
 	if !h.sealed {
 		return
 	}
 	var entry, back *Instruction
+	var from *basicBlock
 	for _, p := range h.preds {
 		switch {
 		case BasicBlock(p.blk) == preheader:
@@ -47,7 +85,7 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 		case back != nil:
 			return // a second back edge
 		default:
-			back = p.branch
+			back, from = p.branch, p.blk
 		}
 	}
 	if entry == nil || back == nil || entry.opcode != OpcodeJump {
@@ -75,7 +113,10 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 		if !p.Type().IsInt() {
 			continue
 		}
-		next := b.resolveAlias(backArgs[j])
+		next, nextIn := b.resolveAlias(backArgs[j]), ValueInvalid
+		if u := b.sameIncoming(from, next); u != next {
+			next, nextIn = u, next
+		}
 		def := b.InstructionOfValue(next)
 		if def == nil {
 			continue
@@ -99,10 +140,10 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 		}
 		c := LoopCounter{
 			Param: p, Next: next, Step: step, Start: b.resolveAlias(entryArgs[j]), BackEdge: back,
-			preheader: preheader.(*basicBlock), header: h,
+			preheader: preheader.(*basicBlock), header: h, nextIn: nextIn,
 		}
 		for _, v := range tested {
-			if v.Valid() && (v == p || v == next) {
+			if v.Valid() && (v == p || c.isNext(v)) {
 				return c, true
 			}
 		}
@@ -137,7 +178,7 @@ func (b *builder) testTrips(lc LoopCounter, t loopTest, lo, hi uint64) (trips ui
 	x := b.resolveAlias(t.cond)
 	var bound uint64
 	cc := IntegerCmpCondNotEqual
-	if x != lc.Next && x != lc.Param {
+	if !lc.isNext(x) && x != lc.Param {
 		cond := b.InstructionOfValue(x)
 		if cond == nil || cond.opcode != OpcodeIcmp {
 			return
@@ -155,6 +196,9 @@ func (b *builder) testTrips(lc LoopCounter, t loopTest, lo, hi uint64) (trips ui
 	}
 	if !t.onTrue {
 		cc = cc.Inverted()
+	}
+	if lc.isNext(x) {
+		x = lc.Next
 	}
 
 	typ := lc.Param.Type()
