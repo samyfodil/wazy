@@ -731,6 +731,24 @@ func (i *instruction) asBrTableSequence(indexReg regalloc.VReg, targetIndex, tar
 	i.u2 = uint64(targetCounts)
 }
 
+// asBoundedBrTableSequence is asBrTableSequence for an index it bounds itself: one past the last
+// target but the default, which is the last, goes to the default. See encodeBrTableSequence.
+func (i *instruction) asBoundedBrTableSequence(indexReg regalloc.VReg, targetIndex, targetCounts int) {
+	i.asBrTableSequence(indexReg, targetIndex, targetCounts)
+	i.u2 |= 1 << 32
+}
+
+// brTableBounded reports whether the br_table sequence bounds its index.
+func (i *instruction) brTableBounded() bool { return i.u2>>32 != 0 }
+
+// brTableBegin is where the br_table sequence's offset table begins, from its start.
+func (i *instruction) brTableBegin() int64 {
+	if i.brTableBounded() {
+		return brTableSequenceOffsetTableBegin + brTableBoundsCheckSize
+	}
+	return brTableSequenceOffsetTableBegin
+}
+
 func (i *instruction) brTableSequenceOffsetsResolved() {
 	i.rm.data = 1 // indicate that the offsets are resolved, for debugging.
 }
@@ -1686,6 +1704,9 @@ func (i *instruction) String() (str string) {
 	case brTableSequence:
 		targetIndex := i.u1
 		str = fmt.Sprintf("br_table_sequence %s, table_index=%d", formatVRegSized(i.rn.nr(), 64), targetIndex)
+		if i.brTableBounded() {
+			str = fmt.Sprintf("br_table_sequence %s, table_index=%d, bounded", formatVRegSized(i.rn.nr(), 32), targetIndex)
+		}
 	case exitSequence:
 		str = fmt.Sprintf("exit_sequence %s", formatVRegSized(i.rn.nr(), 64))
 	case atomicRmw:
@@ -2809,6 +2830,9 @@ func (i *instruction) size() int64 {
 	case fpuConstPoolData:
 		return int64(i.fpuConstPoolDataWidth()) / 8 // 4, 8 or 16 bytes of raw data.
 	case brTableSequence:
+		if i.brTableBounded() {
+			return i.brTableBegin() + int64(uint32(i.u2))*4 + 4
+		}
 		return 4*4 + int64(i.u2)*4
 	case yield:
 		return 4 * 4

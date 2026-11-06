@@ -2440,6 +2440,33 @@ func Test_encodeBrTableSequence(t *testing.T) {
 	require.Equal(t, "0100000002000000030000000400000005000000060000000700000008000000090000000a000000", hex.EncodeToString(encoded[brTableSequenceOffsetTableBegin:]))
 }
 
+func Test_encodeBoundedBrTableSequence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		targets []uint32
+		// check is the bounds check, the b.hs, and the branch after the table.
+		check, bhs, after string
+	}{
+		// cmp w22, #3; b.hs to the default itself.
+		{name: "default near", targets: []uint32{4, 8, 12, 0x40}, check: "df0e0071", bhs: "a2020054", after: "0c000014"},
+		// Past b.hs's reach: it goes to the branch after the table, which reaches the default.
+		{name: "default far", targets: []uint32{4, 8, 0x400000}, check: "df0a0071", bhs: "02010054", after: "fdff0f14"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, m := newSetupWithMockContext()
+			i := &instruction{}
+			i.asBoundedBrTableSequence(x22VReg, 0, len(tc.targets))
+			m.jmpTableTargets = [][]uint32{tc.targets}
+			i.encode(m)
+			encoded := m.compiler.Buf()
+			require.Equal(t, i.size(), int64(len(encoded)))
+			require.Equal(t, tc.check+tc.bhs, hex.EncodeToString(encoded[:brTableBoundsCheckSize]))
+			require.Equal(t, "9b000010765bb6b87b03168b60031fd6", hex.EncodeToString(encoded[brTableBoundsCheckSize:i.brTableBegin()]))
+			require.Equal(t, tc.after, hex.EncodeToString(encoded[len(encoded)-4:]))
+		})
+	}
+}
+
 func Test_encodeUnconditionalBranch(t *testing.T) {
 	buf := make([]byte, 4)
 

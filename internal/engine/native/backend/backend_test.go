@@ -1986,10 +1986,8 @@ L0 (SSA Block: blk0):
 			afterLoweringARM64: `
 L0 (SSA Block: blk0):
 	mov x130?, x2
-	orr w137?, wzr, #0x6
-	subs wzr, w130?, w137?
-	csel w138?, w137?, w130?, hs
-	br_table_sequence x138?, table_index=0
+	mov x137?, x130?
+	br_table_sequence w137?, table_index=0, bounded
 L7 (SSA Block: blk7):
 	b L6
 L8 (SSA Block: blk8):
@@ -2027,10 +2025,7 @@ L6 (SSA Block: blk6):
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
-	orr w8, wzr, #0x6
-	subs wzr, w2, w8
-	csel w8, w8, w2, hs
-	br_table_sequence x8, table_index=0
+	br_table_sequence w2, table_index=0, bounded
 L7 (SSA Block: blk7):
 	b #0x54 (L6)
 L8 (SSA Block: blk8):

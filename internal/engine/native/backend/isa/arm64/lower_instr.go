@@ -45,6 +45,17 @@ func (m *machine) lowerBrTable(i *ssa.Instruction) {
 	targetBlockCount := len(targetBlockIDs.View())
 	indexOperand := m.getOperand_NR(m.compiler.ValueDefinition(index), extModeNone)
 
+	if targetBlockCount-1 <= 0xfff {
+		// The sequence loads the target's offset over the index, so it takes a copy, which the index
+		// is often not live past to need.
+		copied := m.compiler.AllocateVReg(ssa.TypeI32)
+		m.InsertMove(copied, indexOperand.nr(), ssa.TypeI32)
+		brSequence := m.allocateInstr()
+		brSequence.asBoundedBrTableSequence(copied, m.addJmpTableTarget(targetBlockIDs), targetBlockCount)
+		m.insert(brSequence)
+		return
+	}
+
 	// Firstly, we have to do the bounds check of the index, and
 	// set it to the default target (sitting at the end of the list) if it's out of bounds.
 

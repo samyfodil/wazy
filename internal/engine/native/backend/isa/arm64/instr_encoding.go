@@ -386,7 +386,11 @@ func (i *instruction) encode(m *machine) {
 		)
 	case brTableSequence:
 		targets := m.jmpTableTargets[i.u1]
-		encodeBrTableSequence(c, i.rn.reg(), targets)
+		if i.brTableBounded() {
+			encodeBoundedBrTableSequence(c, i.rn.reg(), targets)
+		} else {
+			encodeBrTableSequence(c, i.rn.reg(), targets)
+		}
 	case fpuToInt, intToFpu:
 		c.Emit4Bytes(encodeCnvBetweenFloatInt(i))
 	case fpuRR:
@@ -2441,6 +2445,34 @@ func encodeAdvancedSIMDTwoMisc(op vecOp, rd, rn uint32, arr vecArrangement) uint
 		panic("unsupported or illegal vecOp: " + op.String())
 	}
 	return q<<30 | u<<29 | 0b01110<<24 | size<<22 | 0b10000<<17 | opcode<<12 | 0b10<<10 | rn<<5 | rd
+}
+
+// brTableBoundsCheckSize is how much longer a bounded br_table sequence is ahead of its table.
+const brTableBoundsCheckSize = 8
+
+// encodeBoundedBrTableSequence encodes encodeBrTableSequence's sequence behind a bounds check of its
+// own, and a branch to the default after the table:
+//
+//	subs wzr, index, #len(targets)-1
+//	b.hs default            ;; or the branch after the table, where the default is out of range
+//	[encodeBrTableSequence]
+//	b default
+//
+// The default needs no clamped index, so nothing waits on the comparison before the table is read. The
+// sequence stays one instruction to the register allocator, which a branch of its own in front would
+// not be. targets holds the offsets of the targets from the table's start, the default's last.
+func encodeBoundedBrTableSequence(c backend.Compiler, index regalloc.VReg, targets []uint32) {
+	n := int64(len(targets))
+	indexNumber := regNumberInEncoding[index.RealReg()]
+	c.Emit4Bytes(encodeAluRRImm12(aluOpSubS, regNumberInEncoding[xzr], indexNumber, uint16(n-1), 0, false))
+	// From the b.hs, the table starts 20 bytes on, and the branch after it 20+4n.
+	def := 20 + int64(int32(targets[n-1]))
+	if def>>2 > maxSignedInt19 || def>>2 < minSignedInt19 {
+		def = 20 + 4*n
+	}
+	c.Emit4Bytes(0b01010100<<24 | uint32(def/4)&0x7ffff<<5 | uint32(hs))
+	encodeBrTableSequence(c, index, targets)
+	c.Emit4Bytes(encodeUnconditionalBranch(false, int64(int32(targets[n-1]))-4*n))
 }
 
 // brTableSequenceOffsetTableBegin is the offset inside the brTableSequence where the table begins after 4 instructions

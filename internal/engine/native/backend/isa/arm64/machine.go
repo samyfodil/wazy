@@ -669,7 +669,7 @@ func (m *machine) resolveRelativeAddresses(ctx context.Context) {
 			for i := range targets {
 				l := label(targets[i])
 				offsetOfTarget := m.labelPositionPool.Get(int(l)).binaryOffset
-				diff := offsetOfTarget - (currentOffset + brTableSequenceOffsetTableBegin)
+				diff := offsetOfTarget - (currentOffset + cur.brTableBegin())
 				targets[i] = uint32(diff)
 			}
 			cur.brTableSequenceOffsetsResolved()
