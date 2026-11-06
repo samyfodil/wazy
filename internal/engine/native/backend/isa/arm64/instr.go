@@ -1193,6 +1193,11 @@ func (i *instruction) String() (str string) {
 			str = fmt.Sprintf("%s %s, %s, %s", op.String(), formatVRegSized(i.rd, 64), formatVRegSized(i.rn.nr(), 64), formatVRegSized(i.rm.nr(), 64))
 			break
 		}
+		if op := aluOp(i.u1); op >= aluOpSMAddL && op <= aluOpUMSubL {
+			str = fmt.Sprintf("%s %s, %s, %s, %s", op.String(),
+				formatVRegSized(i.rd, 64), formatVRegSized(i.rn.nr(), 32), formatVRegSized(i.rm.nr(), 32), formatVRegSized(regalloc.VReg(i.u2), 64))
+			break
+		}
 		str = fmt.Sprintf("%s %s, %s, %s, %s", aluOp(i.u1).String(),
 			formatVRegSized(i.rd, size), formatVRegSized(i.rn.nr(), size), formatVRegSized(i.rm.nr(), size), formatVRegSized(regalloc.VReg(i.u2), size))
 	case aluRRImm12:
@@ -2186,6 +2191,14 @@ func (a aluOp) String() string {
 		return "madd"
 	case aluOpMSub:
 		return "msub"
+	case aluOpSMAddL:
+		return "smaddl"
+	case aluOpSMSubL:
+		return "smsubl"
+	case aluOpUMAddL:
+		return "umaddl"
+	case aluOpUMSubL:
+		return "umsubl"
 	}
 	panic(int(a))
 }
@@ -2239,6 +2252,13 @@ const (
 	// 32/64-bit Unsigned and signed bitfield extract, only for aluRRImmShift: see operandBitfield.
 	aluOpUbfx
 	aluOpSbfx
+
+	// Signed and unsigned 32x32->64-bit multiply-add and multiply-subtract, only for aluRRRR: smull and
+	// umull are these with the zero register to add.
+	aluOpSMAddL
+	aluOpSMSubL
+	aluOpUMAddL
+	aluOpUMSubL
 )
 
 // vecOp determines the type of vector operation. Instructions whose kind is one of

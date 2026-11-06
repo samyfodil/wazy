@@ -219,8 +219,15 @@ func (c *Compiler) lowerClampedSdiv(x, d ssa.Value) bool {
 	enter(positive)
 	x64 := ins().AsSExtend(x, 32, 64).Insert(builder).Return()
 	d64 := ins().AsSExtend(d, 32, 64).Insert(builder).Return()
-	from := ins().AsIadd(x64, ins().AsImul(d64, k64(-lo)).Insert(builder).Return()).Insert(builder).Return()
-	span := ins().AsImul(d64, k64(hi-lo)).Insert(builder).Return()
+	mul := func(v ssa.Value, k int64) ssa.Value {
+		kv := k64(k)
+		if p, ok := c.mulByPowerOfTwo(v, kv); ok {
+			return p
+		}
+		return ins().AsImul(v, kv).Insert(builder).Return()
+	}
+	from := ins().AsIadd(x64, mul(d64, -lo)).Insert(builder).Return()
+	span := mul(d64, hi-lo)
 	in := ins().AsIcmp(from, span, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
 	neg := ins().AsIcmp(x, k32(0), ssa.IntegerCmpCondSignedLessThan).Insert(builder).Return()
 	clamped := ins().AsSelect(neg, k32(lo), k32(hi)).Insert(builder).Return()

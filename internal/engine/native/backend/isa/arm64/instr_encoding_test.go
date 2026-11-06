@@ -1520,6 +1520,18 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "407c0153", setup: func(i *instruction) {
 			i.asALUShift(aluOpLsr, x0VReg, operandNR(x2VReg), operandShiftImm(1), false)
 		}},
+		{want: "207c229b", setup: func(i *instruction) { // smull x0, w1, w2
+			i.asALURRRR(aluOpSMAddL, x0VReg, operandNR(x1VReg), operandNR(x2VReg), xzrVReg, true)
+		}},
+		{want: "200ca29b", setup: func(i *instruction) { // umaddl x0, w1, w2, x3
+			i.asALURRRR(aluOpUMAddL, x0VReg, operandNR(x1VReg), operandNR(x2VReg), x3VReg, true)
+		}},
+		{want: "208c229b", setup: func(i *instruction) { // smsubl x0, w1, w2, x3
+			i.asALURRRR(aluOpSMSubL, x0VReg, operandNR(x1VReg), operandNR(x2VReg), x3VReg, true)
+		}},
+		{want: "208ca29b", setup: func(i *instruction) { // umsubl x0, w1, w2, x3
+			i.asALURRRR(aluOpUMSubL, x0VReg, operandNR(x1VReg), operandNR(x2VReg), x3VReg, true)
+		}},
 		{want: "40380e53", setup: func(i *instruction) {
 			i.asALUShift(aluOpUbfx, x0VReg, operandNR(x2VReg), operandBitfield(14, 1), false)
 		}},

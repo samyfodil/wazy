@@ -1343,6 +1343,17 @@ func encodeAluRRRR(op aluOp, rd, rn, rm, ra, _64bit uint32) uint32 {
 		op31, oO = 0b000, 0b0
 	case aluOpMSub:
 		op31, oO = 0b000, 0b1
+	case aluOpSMAddL, aluOpSMSubL, aluOpUMAddL, aluOpUMSubL:
+		// SMADDL <Xd>, <Wn>, <Wm>, <Xa> = 1|00|11011|001|Rm|0|Ra|Rn|Rd; SMSUBL has o0 set, and UMADDL and
+		// UMSUBL op31 = 101. All are 64-bit only.
+		op31 = 0b001
+		if op == aluOpUMAddL || op == aluOpUMSubL {
+			op31 = 0b101
+		}
+		if op == aluOpSMSubL || op == aluOpUMSubL {
+			oO = 1
+		}
+		_64bit = 1
 	case aluOpSMulH, aluOpUMulH:
 		// SMULH/UMULH belong to the same "Data-processing (3 source)" group, but
 		// they have no Ra operand (the field is fixed to 0b11111) and no 32-bit

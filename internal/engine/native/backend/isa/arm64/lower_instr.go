@@ -1877,19 +1877,82 @@ func (m *machine) tryLowerMulAccumulate(si *ssa.Instruction, mulDef, accDef back
 		return false
 	}
 	a, b := mulDef.Instr.Arg2()
-	rn := m.getOperand_NR(m.compiler.ValueDefinition(a), extModeNone)
-	rm := m.getOperand_NR(m.compiler.ValueDefinition(b), extModeNone)
-	ra := m.getOperand_NR(accDef, extModeNone)
-	mulDef.Instr.MarkLowered()
-
 	op := aluOpMSub
 	if add {
 		op = aluOpMAdd
 	}
+	var rn, rm operand
+	if wn, wm, signed, ok := m.widenedFactors(a, b); ok {
+		rn, rm = wn, wm
+		switch {
+		case signed && add:
+			op = aluOpSMAddL
+		case signed:
+			op = aluOpSMSubL
+		case add:
+			op = aluOpUMAddL
+		default:
+			op = aluOpUMSubL
+		}
+	} else {
+		rn = m.getOperand_NR(m.compiler.ValueDefinition(a), extModeNone)
+		rm = m.getOperand_NR(m.compiler.ValueDefinition(b), extModeNone)
+	}
+	ra := m.getOperand_NR(accDef, extModeNone)
+	mulDef.Instr.MarkLowered()
+
 	mla := m.allocateInstr()
 	mla.asALURRRR(op, m.compiler.VRegOf(si.Return()), rn, rm, ra.nr(), si.Return().Type().Bits() == 64)
 	m.insert(mla)
 	return true
+}
+
+// widenedFactors returns, for a 64-bit multiplication of x and y, the 32-bit values whose product it is
+// where both are extended from 32 bits the same way, only for it, or one is so and the other a constant
+// that fits 32 bits so extended: smull and umull multiply those and extend themselves. signed is which
+// way. It reports false, lowering nothing, otherwise.
+func (m *machine) widenedFactors(x, y ssa.Value) (rn, rm operand, signed, ok bool) {
+	if x.Type() != ssa.TypeI64 {
+		return
+	}
+	xd, yd := m.compiler.ValueDefinition(x), m.compiler.ValueDefinition(y)
+	// extendOf reports whether d is a 32 to 64-bit extend for this multiplication alone, and which way.
+	extendOf := func(d backend.SSAValueDefinition) (signed, ok bool) {
+		if m.compiler.MatchInstr(d, ssa.OpcodeSExtend) || m.compiler.MatchInstr(d, ssa.OpcodeUExtend) {
+			if from, _, s := d.Instr.ExtendData(); from == 32 {
+				return s, true
+			}
+		}
+		return false, false
+	}
+	xs, xok := extendOf(xd)
+	if !xok {
+		xd, yd = yd, xd
+		if xs, xok = extendOf(xd); !xok {
+			return
+		}
+	}
+	src := func(d backend.SSAValueDefinition) operand {
+		d.Instr.MarkLowered()
+		return m.getOperand_NR(m.compiler.ValueDefinition(d.Instr.Arg()), extModeNone)
+	}
+	if ys, yok := extendOf(yd); yok {
+		if ys != xs {
+			return
+		}
+		return src(xd), src(yd), xs, true
+	}
+	if !m.compiler.MatchInstr(yd, ssa.OpcodeIconst) {
+		return
+	}
+	k := yd.Instr.ConstantVal()
+	if xs && int64(k) != int64(int32(k)) || !xs && k>>32 != 0 {
+		return
+	}
+	yd.Instr.MarkLowered()
+	kr := m.compiler.AllocateVReg(ssa.TypeI32)
+	m.lowerConstantI32(kr, int32(k))
+	return src(xd), operandNR(kr), xs, true
 }
 
 // InsertMove implements backend.Machine.
@@ -2475,10 +2538,18 @@ func (m *machine) lowerFcmp(x, y, result ssa.Value, c ssa.FloatCmpCond) {
 
 func (m *machine) lowerImul(x, y, result ssa.Value) {
 	rd := m.compiler.VRegOf(result)
+	if rn, rm, signed, ok := m.widenedFactors(x, y); ok {
+		op := aluOpUMAddL
+		if signed {
+			op = aluOpSMAddL
+		}
+		mul := m.allocateInstr()
+		mul.asALURRRR(op, rd, rn, rm, xzrVReg, true)
+		m.insert(mul)
+		return
+	}
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 	rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
-
-	// TODO: if this comes before Add/Sub, we could merge it by putting it into the place of xzrVReg.
 
 	mul := m.allocateInstr()
 	mul.asALURRRR(aluOpMAdd, rd, rn, rm, xzrVReg, x.Type().Bits() == 64)
