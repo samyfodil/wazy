@@ -636,3 +636,37 @@ func TestPreemptCheckSlowPathTarget(t *testing.T) {
 		})
 	}
 }
+
+// A loop whose body sets a local on the sides of ifs leaves its counter and its bound reaching their tests
+// and the back edge through parameters of the joins the ifs make, which every edge passes one value: the
+// loop is strip-mined as one without the ifs is, its check made once a chunk, not on every iteration.
+func TestPreemptCheckCounterPastJoin(t *testing.T) {
+	const i32 = wasm.ValueTypeI32
+	body := []byte{
+		wasm.OpcodeLoop, 0x40,
+		wasm.OpcodeBlock, 0x40,
+		wasm.OpcodeBlock, 0x40,
+		wasm.OpcodeLocalGet, 1, wasm.OpcodeI32Const, 3, wasm.OpcodeI32And, wasm.OpcodeBrIf, 0,
+		wasm.OpcodeI32Const, 1, wasm.OpcodeLocalSet, 2, wasm.OpcodeBr, 1,
+		wasm.OpcodeEnd,
+		wasm.OpcodeI32Const, 2, wasm.OpcodeLocalSet, 2,
+		wasm.OpcodeEnd,
+		wasm.OpcodeBlock, 0x40,
+		wasm.OpcodeLocalGet, 2, wasm.OpcodeBrIf, 0,
+		wasm.OpcodeI32Const, 5, wasm.OpcodeLocalSet, 2,
+		wasm.OpcodeEnd,
+		wasm.OpcodeLocalGet, 1, wasm.OpcodeI32Const, 1, wasm.OpcodeI32Add, wasm.OpcodeLocalTee, 1,
+		wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Ne, wasm.OpcodeBrIf, 0,
+		wasm.OpcodeEnd,
+		wasm.OpcodeEnd,
+	}
+	m := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{i32}, ParamNumInUint64: 1}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection:     []wasm.Code{{LocalTypes: []wasm.ValueType{i32, i32}, Body: body}},
+	}
+	// Strip-mined, the loop checks on the way in and where it refills its limit; with the check on
+	// every iteration, it would make one at its header and none else.
+	text := lowerLast(t, m, api.CoreFeaturesV2)
+	require.Equal(t, 2, strings.Count(text, "= PreemptRequested\n"), text)
+}

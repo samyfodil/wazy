@@ -20,9 +20,10 @@ type LoopCounter struct {
 	BackEdge *Instruction
 	// preheader is the block the loop is entered from, and header the loop's.
 	preheader, header *basicBlock
-	// nextIn is, where Next reaches the back edge through a parameter of the back edge's block that
-	// every edge into it passes Next, that parameter: the value the block's tests see. See isNext.
-	nextIn Value
+	// same lists the parameters of the loop's blocks that every edge into their block passes one
+	// value, with that value: building SSA leaves them for the locals a body's branches set alike, until
+	// a pass takes them out, so the counter may reach its tests and the back edge through them. See see.
+	same []paramSame
 }
 
 // FindLoopCounter returns the counter of the loop headed by header, entered from
@@ -37,11 +38,27 @@ type LoopCounter struct {
 //
 // The header must be sealed, so that every value the loop carries is one of its
 // parameters.
-// isNext reports whether v is the counter's value on the back edge, Next or the parameter it reaches
-// it through.
-func (lc LoopCounter) isNext(v Value) bool {
-	return v == lc.Next || lc.nextIn.Valid() && v == lc.nextIn
+// paramSame is a parameter every edge into its block passes v for.
+type paramSame struct{ param, v Value }
+
+// see returns the value v stands for: v, past the parameters of lc.same it passes through.
+func (lc LoopCounter) see(b *builder, v Value) Value {
+	v = b.resolveAlias(v)
+	for range len(lc.same) {
+		i := slices.IndexFunc(lc.same, func(s paramSame) bool { return s.param == v })
+		if i < 0 {
+			break
+		}
+		v = b.resolveAlias(lc.same[i].v)
+	}
+	return v
 }
+
+// isNext reports whether v is the counter's value on the back edge.
+func (lc LoopCounter) isNext(b *builder, v Value) bool { return lc.see(b, v) == lc.Next }
+
+// isParam reports whether v is the counter's value at the header.
+func (lc LoopCounter) isParam(b *builder, v Value) bool { return lc.see(b, v) == lc.Param }
 
 // sameIncoming returns the value every edge into blk passes for v, a parameter of blk, other than v
 // itself, or v where v is not one or they differ. Building SSA leaves such a parameter for a local that
@@ -96,6 +113,21 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 	default:
 		return
 	}
+	var same []paramSame
+	if body, ok := b.reachers(h, from, nil, b.loopBodyScratch[:0]); ok {
+		for _, blk := range body {
+			if blk == h {
+				continue
+			}
+			for _, q := range blk.params.View() {
+				if u := b.sameIncoming(blk, q); u != q {
+					same = append(same, paramSame{q, u})
+				}
+			}
+		}
+		b.loopBodyScratch = body
+	}
+	see := LoopCounter{same: same}.see
 	params, backArgs, entryArgs := h.params.View(), back.vs.View(), entry.vs.View()
 	if len(backArgs) != len(params) || len(entryArgs) != len(params) {
 		return
@@ -103,20 +135,17 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 	var testedAt [6]Value
 	tested := testedAt[:0]
 	for _, t := range b.loopTests(h, back) {
-		v := b.resolveAlias(t.cond)
+		v := see(b, t.cond)
 		tested = append(tested, v)
 		if cond := b.InstructionOfValue(v); cond != nil && cond.opcode == OpcodeIcmp {
-			tested = append(tested, b.resolveAlias(cond.v), b.resolveAlias(cond.v2))
+			tested = append(tested, see(b, cond.v), see(b, cond.v2))
 		}
 	}
 	for j, p := range params {
 		if !p.Type().IsInt() {
 			continue
 		}
-		next, nextIn := b.resolveAlias(backArgs[j]), ValueInvalid
-		if u := b.sameIncoming(from, next); u != next {
-			next, nextIn = u, next
-		}
+		next := see(b, backArgs[j])
 		def := b.InstructionOfValue(next)
 		if def == nil {
 			continue
@@ -124,14 +153,14 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 		var step uint64
 		switch def.opcode {
 		case OpcodeIadd:
-			x, y := b.resolveAlias(def.v), b.resolveAlias(def.v2)
+			x, y := see(b, def.v), see(b, def.v2)
 			if c, isConst := b.constantOf(y); isConst && x == p {
 				step = c
 			} else if c, isConst = b.constantOf(x); isConst && y == p {
 				step = c
 			}
 		case OpcodeIsub:
-			if c, isConst := b.constantOf(def.v2); isConst && b.resolveAlias(def.v) == p {
+			if c, isConst := b.constantOf(def.v2); isConst && see(b, def.v) == p {
 				step = -c
 			}
 		}
@@ -140,10 +169,10 @@ func (b *builder) FindLoopCounter(header, preheader BasicBlock) (lc LoopCounter,
 		}
 		c := LoopCounter{
 			Param: p, Next: next, Step: step, Start: b.resolveAlias(entryArgs[j]), BackEdge: back,
-			preheader: preheader.(*basicBlock), header: h, nextIn: nextIn,
+			preheader: preheader.(*basicBlock), header: h, same: same,
 		}
 		for _, v := range tested {
-			if v.Valid() && (v == p || c.isNext(v)) {
+			if v.Valid() && (v == p || v == next) {
 				return c, true
 			}
 		}
@@ -175,10 +204,10 @@ func (b *builder) TripBound(lc LoopCounter) (trips uint64, ok bool) {
 
 // testTrips is TripBound for the loop test t, the counter starting from lo to hi.
 func (b *builder) testTrips(lc LoopCounter, t loopTest, lo, hi uint64) (trips uint64, ok bool) {
-	x := b.resolveAlias(t.cond)
+	x := lc.see(b, t.cond)
 	var bound uint64
 	cc := IntegerCmpCondNotEqual
-	if !lc.isNext(x) && x != lc.Param {
+	if x != lc.Next && x != lc.Param {
 		cond := b.InstructionOfValue(x)
 		if cond == nil || cond.opcode != OpcodeIcmp {
 			return
@@ -186,7 +215,7 @@ func (b *builder) testTrips(lc LoopCounter, t loopTest, lo, hi uint64) (trips ui
 		var y Value
 		var isConst bool
 		x, y, cc = cond.IcmpData()
-		x, y = b.resolveAlias(x), b.resolveAlias(y)
+		x, y = lc.see(b, x), lc.see(b, y)
 		if bound, isConst = b.constantOf(y); !isConst {
 			if bound, isConst = b.constantOf(x); !isConst {
 				return
@@ -196,9 +225,6 @@ func (b *builder) testTrips(lc LoopCounter, t loopTest, lo, hi uint64) (trips ui
 	}
 	if !t.onTrue {
 		cc = cc.Inverted()
-	}
-	if lc.isNext(x) {
-		x = lc.Next
 	}
 
 	typ := lc.Param.Type()
