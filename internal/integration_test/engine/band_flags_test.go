@@ -33,8 +33,8 @@ func TestBandFlags(t *testing.T) {
 		require.NoError(t, err)
 		mods[interp] = m
 	}
-	vals := []uint64{0, 1, 0xff, 0xf0f0, 0x0f0f, 0x80000000, 0xffffffff, 0x12345678}
-	for _, fn := range []string{"gtu", "geu", "ltu", "leu", "gts", "les", "zgtu", "subset"} {
+	vals := []uint64{0, 1, 4, 5, 0xff, 0xf0f0, 0x0f0f, 0x80000000, 0xffffffff, 0x12345678}
+	for _, fn := range []string{"gtu", "geu", "ltu", "leu", "gts", "les", "zgtu", "subset", "rawand", "rawimm", "ifand"} {
 		for _, a := range vals {
 			for _, b := range vals {
 				want, err := mods[true].ExportedFunction(fn).Call(ctx, a, b)

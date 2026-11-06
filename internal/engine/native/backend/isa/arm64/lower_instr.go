@@ -145,6 +145,18 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeBor) && m.lowerTwoIcmpsToFlag(cvalDef.Instr, false, b.Opcode() == ssa.OpcodeBrz, target),
 		m.compiler.MatchInstr(cvalDef, ssa.OpcodeBand) && m.lowerTwoIcmpsToFlag(cvalDef.Instr, true, b.Opcode() == ssa.OpcodeBrz, target):
 		cvalDef.Instr.MarkLowered()
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeBand):
+		// A branch on x & y itself tests it with tst, an ands to the zero register, rather than taking a
+		// register for the and to test with cbnz.
+		m.lowerBitwiseAluOp(cvalDef.Instr, aluOpAnds, true)
+		cvalDef.Instr.MarkLowered()
+		cc := ne
+		if b.Opcode() == ssa.OpcodeBrz {
+			cc = eq
+		}
+		cbr := m.allocateInstr()
+		cbr.asCondBr(cc.asCond(), target, false /* ignored */)
+		m.insert(cbr)
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
 		cvalInstr := cvalDef.Instr
 		x, y, c := cvalInstr.IcmpData()

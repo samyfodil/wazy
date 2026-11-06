@@ -315,8 +315,12 @@ func (m *machine) lowerConstViaBitMaskImmediate(c uint64, dst regalloc.VReg, b64
 //
 // See https://developer.arm.com/documentation/dui0802/b/A64-General-Instructions/MOV--bitmask-immediate-
 func isBitMaskImmediate(x uint64, _64 bool) bool {
+	if !_64 {
+		// A 32-bit operation's pattern is its low half, repeated: element sizes are found in that.
+		x = replicate32(x)
+	}
 	// All zeros and ones are not "bitmask immediate" by definition.
-	if x == 0 || (_64 && x == 0xffff_ffff_ffff_ffff) || (!_64 && x == 0xffff_ffff) {
+	if x == 0 || x == 0xffff_ffff_ffff_ffff {
 		return false
 	}
 
@@ -340,6 +344,12 @@ func isBitMaskImmediate(x uint64, _64 bool) bool {
 		return true
 	}
 	return sequenceOfSetbits(x) || sequenceOfSetbits(^x)
+}
+
+// replicate32 returns the low 32 bits of x in both halves.
+func replicate32(x uint64) uint64 {
+	x = uint64(uint32(x))
+	return x | x<<32
 }
 
 // sequenceOfSetbits returns true if the number's binary representation is the sequence set bit (1).

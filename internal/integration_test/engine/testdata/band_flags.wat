@@ -31,4 +31,16 @@
         (br_if $out (i32.eqz (i32.and (local.get $y) (i32.xor (local.get $x) (i32.const -1))))))
       (return (i32.const 7)))
     (i32.const 9))
+  ;; Branches on an and itself: a register, an immediate that wraps round, and an if, which branches on
+  ;; its being zero, with an arm no select takes.
+  (func (export "rawand") (param $x i32) (param $m i32) (result i32)
+    (block $b (br_if $b (i32.and (local.get $x) (local.get $m))) (return (i32.const 0)))
+    (i32.const 1))
+  (func (export "rawimm") (param $x i32) (param $m i32) (result i32)
+    (block $b (br_if $b (i32.and (local.get $x) (i32.const -5))) (return (i32.const 0)))
+    (i32.const 1))
+  (func (export "ifand") (param $x i32) (param $m i32) (result i32)
+    (if (result i32) (i32.and (local.get $x) (i32.const 0x80000003))
+      (then (i32.div_u (local.get $m) (i32.const 3)))
+      (else (i32.mul (local.get $m) (local.get $x)))))
 )

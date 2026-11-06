@@ -1166,6 +1166,8 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "5255b552", setup: func(i *instruction) { i.asMOVZ(x18VReg, 0xaaaa, 1, false) }},
 		{want: "5255f5d2", setup: func(i *instruction) { i.asMOVZ(x18VReg, 0xaaaa, 3, true) }},
 		{want: "4f020012", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x15VReg, x18VReg, 0x1, false) }},
+		// A 32-bit run that wraps around, given zero-extended: and w0, w1, #0xfffffffb.
+		{want: "20781d12", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x0VReg, x1VReg, 0xfffffffb, false) }},
 		{want: "4f0a0012", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x15VReg, x18VReg, 0x7, false) }},
 		{want: "4f0e0012", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x15VReg, x18VReg, 0xf, false) }},
 		{want: "4f120012", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x15VReg, x18VReg, 0x1f, false) }},

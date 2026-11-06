@@ -3,6 +3,7 @@ package arm64
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"strings"
 	"testing"
 
@@ -85,10 +86,9 @@ func TestMachine_lowerConstantI32(t *testing.T) {
 		{val: 0xffff_0000, exp: []string{"movz w0, #0xffff, lsl 16"}},
 		{val: 0xffff_fffe, exp: []string{"movn w0, #0x1, lsl 0"}},
 		{val: 0x2, exp: []string{"orr w0, wzr, #0x2"}},
-		{val: 0x80000001, exp: []string{
-			"movz w0, #0x1, lsl 0",
-			"movk w0, #0x8000, lsl 16",
-		}},
+		// Two set bits that wrap round the 32-bit pattern: a logical immediate.
+		{val: 0x80000001, exp: []string{"orr w0, wzr, #0x80000001"}},
+		{val: 0x80000003, exp: []string{"orr w0, wzr, #0x80000003"}},
 		{val: 0xf00000f, exp: []string{
 			"movz w0, #0xf, lsl 0",
 			"movk w0, #0xf00, lsl 16",
@@ -190,5 +190,70 @@ func TestFpuConstPooledDemotion(t *testing.T) {
 		// List links survive the rewrite.
 		require.Equal(t, prev, i.prev)
 		require.Equal(t, next, i.next)
+	}
+}
+
+// decodeBitMask is the architecture's DecodeBitMasks for a logical immediate of an operation of width
+// bits (32 or 64), reporting false for a reserved encoding.
+func decodeBitMask(n, imms, immr byte, width uint) (uint64, bool) {
+	v := uint32(n)<<6 | uint32(^imms&0x3f)
+	if v == 0 {
+		return 0, false
+	}
+	l := uint(bits.Len32(v)) - 1
+	esize := uint(1) << l
+	if esize > width {
+		return 0, false
+	}
+	levels := byte(esize - 1)
+	s, r := imms&levels, immr&levels
+	if s == levels {
+		return 0, false
+	}
+	welem := uint64(1)<<(s+1) - 1
+	mask := uint64(1)<<esize - 1
+	if esize == 64 {
+		mask = ^uint64(0)
+	}
+	elem := (welem>>r | welem<<(esize-uint(r))) & mask
+	var x uint64
+	for i := uint(0); i < width; i += esize {
+		x |= elem << i
+	}
+	return x, true
+}
+
+func TestBitMaskImmediate_everyEncoding(t *testing.T) {
+	for _, width := range []uint{32, 64} {
+		_64 := width == 64
+		valid := map[uint64]bool{}
+		for n := byte(0); n <= 1; n++ {
+			if n == 1 && !_64 {
+				continue
+			}
+			for imms := byte(0); imms < 64; imms++ {
+				for immr := byte(0); immr < 64; immr++ {
+					if !_64 && immr >= 32 {
+						continue
+					}
+					if x, ok := decodeBitMask(n, imms, immr, width); ok {
+						valid[x] = true
+					}
+				}
+			}
+		}
+		for x := range valid {
+			require.True(t, isBitMaskImmediate(x, _64), "%#x, %d bits", x, width)
+			immr, imms, n := bitmaskImmediate(x, _64)
+			got, ok := decodeBitMask(n, imms, immr, width)
+			require.True(t, ok, "%#x, %d bits", x, width)
+			require.Equal(t, x, got, "%#x, %d bits", x, width)
+		}
+		for _, x := range []uint64{0, 5, 0x12345678, 0xfffffffa, 0x8000_0001_0000_0001} {
+			if !_64 {
+				x = uint64(uint32(x))
+			}
+			require.Equal(t, valid[x], isBitMaskImmediate(x, _64), "%#x, %d bits", x, width)
+		}
 	}
 }

@@ -1570,6 +1570,9 @@ func encodeAluBitmaskImmediate(op aluOp, rd, rn uint32, imm uint64, _64bit bool)
 }
 
 func bitmaskImmediate(c uint64, is64bit bool) (immr, imms, N byte) {
+	if !is64bit {
+		c = replicate32(c)
+	}
 	var size uint32
 	switch {
 	case c != c>>32|c<<32:
