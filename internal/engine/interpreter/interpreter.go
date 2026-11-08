@@ -114,6 +114,10 @@ type moduleEngine struct {
 	// The index is module instance-scoped.
 	functions []function
 
+	// importRefs is, per imported function, the reference the module defining it gives it: one function has
+	// one funcref however many modules import it, so a host handed two can tell they are the same.
+	importRefs []wasm.Reference
+
 	// parentEngine holds *engine from which this module engine is created from.
 	parentEngine *engine
 }
@@ -779,6 +783,7 @@ func (e *engine) NewModuleEngine(module *wasm.Module, instance *wasm.ModuleInsta
 	me := &moduleEngine{
 		parentEngine: e,
 		functions:    make([]function, len(module.FunctionSection)+int(module.ImportFunctionCount)),
+		importRefs:   make([]wasm.Reference, module.ImportFunctionCount),
 	}
 
 	codes, ok := e.getCompiledFunctions(module, false)
@@ -1250,6 +1255,7 @@ func (e *engine) setLabelAddress(op *uint64, label label, labelAddressResolution
 func (e *moduleEngine) ResolveImportedFunction(index, descFunc, indexInImportedModule wasm.Index, importedModuleEngine wasm.ModuleEngine) {
 	imported := importedModuleEngine.(*moduleEngine)
 	e.functions[index] = imported.functions[indexInImportedModule]
+	e.importRefs[index] = imported.FunctionInstanceReference(indexInImportedModule)
 }
 
 // ResolveImportedMemory implements wasm.ModuleEngine.
@@ -1266,6 +1272,9 @@ func (e *moduleEngine) TypeIDOfReference(ref wasm.Reference) wasm.FunctionTypeID
 
 // FunctionInstanceReference implements the same method as documented on wasm.ModuleEngine.
 func (e *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Reference {
+	if int(funcIndex) < len(e.importRefs) {
+		return e.importRefs[funcIndex]
+	}
 	return wasm.Reference(uintptr(unsafe.Pointer(&e.functions[funcIndex])))
 }
 
@@ -2772,7 +2781,6 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 // compiler to inline its hot-path helpers (popValue, pushValue, drop, etc.)
 // into the dispatch loop. pc++ for these ops is done once by the caller.
 func (ce *callEngine) callNativeFuncRare(ctx context.Context, m *wasm.ModuleInstance, op *unionOperation, frame *callFrame, moduleInst *wasm.ModuleInstance, me *moduleEngine) {
-	functions := me.functions
 	// popValue: a func literal for the same reason as in callNativeFunc (I12) -- this function is
 	// "big" too, and the ~240 pops below were all real CALLs.
 	popValue := func() (v uint64) {
@@ -3173,7 +3181,7 @@ func (ce *callEngine) callNativeFuncRare(ctx context.Context, m *wasm.ModuleInst
 			copy(dstTable[destinationOffset:], srcTable[sourceOffset:sourceOffset+copySize])
 		}
 	case operationKindRefFunc:
-		ce.pushValue(uint64(uintptr(unsafe.Pointer(&functions[op.U1]))))
+		ce.pushValue(uint64(me.FunctionInstanceReference(wasm.Index(op.U1))))
 	case operationKindRefTest:
 		ref := ce.stack[len(ce.stack)-1]
 		if op.B1 == 0 {

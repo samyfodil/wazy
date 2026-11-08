@@ -534,8 +534,11 @@ func evalGCConstExpr(op OpcodeGC, data []byte, stack *[]uint64, typeStack *[]Val
 		if op == OpcodeGCExternConvertAny {
 			to = ValueTypeExternref
 		}
-		pop(1, 1)
-		*stack = append(*stack, 0)
+		var ref uint64
+		if v := pop(1, 1); len(v) == 1 {
+			ref = v[0]
+		}
+		*stack = append(*stack, ref)
 		return 0, to, nil
 	}
 

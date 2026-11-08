@@ -367,8 +367,10 @@ func (m *moduleEngine) TypeIDOfReference(ref wasm.Reference) wasm.FunctionTypeID
 // FunctionInstanceReference implements wasm.ModuleEngine.
 func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Reference {
 	if funcIndex < m.module.Source.ImportFunctionCount {
-		begin, _, _ := m.parent.offsets.ImportedFunctionOffset(funcIndex)
-		return wasm.Reference(uintptr(unsafe.Pointer(&m.opaque[begin])))
+		// The defining module's reference, not this module's import slot: one function has one funcref
+		// however many modules import it, so a host handed two can tell they are the same.
+		imp := &m.importedFunctions[funcIndex]
+		return imp.me.FunctionInstanceReference(imp.indexInModule)
 	}
 	return m.localFuncref(funcIndex)
 }
