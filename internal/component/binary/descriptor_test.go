@@ -531,7 +531,7 @@ func TestReadInstancetypeDesc_ExportIndexOutOfRange(t *testing.T) {
 	}
 
 	var c Component
-	if _, err := c.globalizeLocalRef(desc.Types, ref, map[uint32]uint32{}); err == nil {
+	if _, err := c.globalizeLocalRef(localTypes(desc.Types), ref, map[uint32]uint32{}); err == nil {
 		t.Fatal("globalizeLocalRef: expected an out-of-range error, got nil")
 	}
 }

@@ -161,6 +161,25 @@ func resolveStreamOrFutureElem(comp *binary.Component, resolve abi.Resolver, isF
 	if err != nil {
 		return nil, 0, 0, false, fmt.Errorf("type %d: %w", typeIdx, err)
 	}
+	// abi.Resolver reports an unresolvable index as nil, which reads as "not found"; keep the
+	// decoder's reason for the first one so a failure below says why.
+	var unresolved error
+	resolve = func(inner abi.Resolver) abi.Resolver {
+		return func(idx uint32) binary.TypeDesc {
+			t := inner(idx)
+			if t == nil && unresolved == nil {
+				if _, err := comp.ResolveType(idx); err != nil {
+					unresolved = err
+				}
+			}
+			return t
+		}
+	}(resolve)
+	defer func() {
+		if err != nil && unresolved != nil {
+			err = fmt.Errorf("%w: %w", err, unresolved)
+		}
+	}()
 	var ref *binary.TypeRef
 	if isFuture {
 		fd, ok := td.(binary.FutureDesc)

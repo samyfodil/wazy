@@ -644,13 +644,13 @@ func TestResolveType_OuterAliasBeyondKnownEnclosingComponents(t *testing.T) {
 func TestGlobalizeLocalRef_CycleGuard(t *testing.T) {
 	toOne := uint32(1)
 	toZero := uint32(0)
-	localTypes := []TypeDesc{
+	types := []TypeDesc{
 		TupleDesc{Elements: []TypeRef{{TypeIndex: &toOne}}},  // local 0: tuple<local 1>
 		TupleDesc{Elements: []TypeRef{{TypeIndex: &toZero}}}, // local 1: tuple<local 0>
 	}
 	var c Component
 	start := uint32(0)
-	global, err := c.globalizeLocalRef(localTypes, TypeRef{TypeIndex: &start}, map[uint32]uint32{})
+	global, err := c.globalizeLocalRef(localTypes(types), TypeRef{TypeIndex: &start}, map[uint32]uint32{})
 	if err != nil {
 		t.Fatalf("globalizeLocalRef: %v", err)
 	}
@@ -689,13 +689,13 @@ func TestGlobalizeLocalRef_HandleIsRefusedNotCarriedOver(t *testing.T) {
 			// A record whose field is the handle: the record globalizes, and
 			// the handle inside it is what must not slip through.
 			handle := uint32(1)
-			localTypes := []TypeDesc{
+			types := []TypeDesc{
 				RecordDesc{Fields: []RecordField{{Name: "h", Type: TypeRef{TypeIndex: &handle}}}},
 				tc.desc,
 			}
 			var c Component
 			start := uint32(0)
-			_, err := c.globalizeLocalRef(localTypes, TypeRef{TypeIndex: &start}, map[uint32]uint32{})
+			_, err := c.globalizeLocalRef(localTypes(types), TypeRef{TypeIndex: &start}, map[uint32]uint32{})
 			wantErrContains(t, err, "imported instance's type declarations")
 			wantErrContains(t, err, "local type space")
 		})
