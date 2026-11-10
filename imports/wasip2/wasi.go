@@ -304,7 +304,7 @@ type WASIConfig struct {
 	// A write that would pass the cap fails the host call, which traps the
 	// guest, so ServeHTTP answers 500. Zero, the default, means no cap. Has no
 	// effect unless EnableHTTP is also true.
-	MaxResponseBytes int64	
+	MaxResponseBytes int64
 
 	// WallClock, when non-nil, is the source wasi:clocks/wall-clock.now reads
 	// the current time from. Nil uses time.Now. It is the one injectable clock
