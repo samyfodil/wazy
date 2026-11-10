@@ -44,14 +44,36 @@ func Decode(r io.Reader) (*Component, error) {
 		return nil, fmt.Errorf("read binary: %w", err)
 	}
 
-	return decodeComponent(buf)
+	return decodeRoot(buf)
 }
 
 // DecodeBytes is Decode of b. It copies b, once and to size, where
 // io.ReadAll would grow a buffer to it: the copy is the decoder's own, which
 // the names it decodes are views of, so b stays the caller's to change.
 func DecodeBytes(b []byte) (*Component, error) {
-	return decodeComponent(bytes.Clone(b))
+	return decodeRoot(bytes.Clone(b))
+}
+
+// decodeRoot decodes a top-level component. A nested component's outer
+// aliases resolve only once every component around it is linked, which is
+// here: resolving them now, while nothing else can see the tree, is what lets
+// a frozen component's ResolveType stay a read.
+func decodeRoot(buf []byte) (*Component, error) {
+	c, err := decodeComponent(buf)
+	if err != nil {
+		return nil, err
+	}
+	c.freezeNested()
+	return c, nil
+}
+
+// freezeNested freezes each component nested in c that resolves every alias it
+// has, outer ones included, now that its enclosing components are linked.
+func (c *Component) freezeNested() {
+	for _, n := range c.NestedComponents {
+		n.typesFrozen = n.precomputeImportedAliases() && n.precomputeOuterAliases()
+		n.freezeNested()
+	}
 }
 
 func decodeComponent(buf []byte) (*Component, error) {

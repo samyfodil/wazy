@@ -60,6 +60,18 @@ func TestGlobalizeLocalTypeDesc_EveryKind(t *testing.T) {
 			if t.Element != nil {
 				return []TypeRef{*t.Element}
 			}
+		case FuncDesc:
+			var out []TypeRef
+			for _, p := range t.Params {
+				out = append(out, p.Type)
+			}
+			if t.Results.Unnamed != nil {
+				out = append(out, *t.Results.Unnamed)
+			}
+			for _, r := range t.Results.Named {
+				out = append(out, r.Type)
+			}
+			return out
 		}
 		return nil
 	}
@@ -82,6 +94,8 @@ func TestGlobalizeLocalTypeDesc_EveryKind(t *testing.T) {
 		{"stream bare", StreamDesc{}, 0},
 		{"future", FutureDesc{Element: refp()}, 1},
 		{"future bare", FutureDesc{}, 0},
+		{"func unnamed result", FuncDesc{Params: []FuncParam{{Name: "a", Type: ref()}}, Results: FuncResults{Unnamed: refp()}}, 2},
+		{"func named results", FuncDesc{Results: FuncResults{Named: []FuncResult{{Name: "a", Type: ref()}, {Name: "b", Type: ref()}}}}, 2},
 		// Passed through unchanged: they hold no TypeRefs at all.
 		{"primitive", PrimitiveDesc{Prim: "u32"}, 0},
 		{"flags", FlagsDesc{Names: []string{"a"}}, 0},
@@ -89,9 +103,7 @@ func TestGlobalizeLocalTypeDesc_EveryKind(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Component{}
-			localTypes := []TypeDesc{PrimitiveDesc{Prim: "u32"}}
-
-			got, err := c.globalizeLocalTypeDesc(localTypes, tc.in, map[uint32]uint32{})
+			got, err := c.globalizeLocalTypeDesc(localTypes([]TypeDesc{PrimitiveDesc{Prim: "u32"}}), tc.in, map[uint32]uint32{})
 			if err != nil {
 				t.Fatalf("globalizeLocalTypeDesc: %v", err)
 			}
@@ -148,10 +160,13 @@ func TestGlobalizeLocalTypeDesc_PropagatesRefErrors(t *testing.T) {
 		{"result err", ResultDesc{Err: oobp()}},
 		{"stream", StreamDesc{Element: oobp()}},
 		{"future", FutureDesc{Element: oobp()}},
+		{"func param", FuncDesc{Params: []FuncParam{{Name: "a", Type: oob()}}}},
+		{"func result", FuncDesc{Results: FuncResults{Unnamed: oobp()}}},
+		{"func named result", FuncDesc{Results: FuncResults{Named: []FuncResult{{Name: "a", Type: oob()}}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Component{}
-			if _, err := c.globalizeLocalTypeDesc([]TypeDesc{PrimitiveDesc{Prim: "u32"}}, tc.in, map[uint32]uint32{}); err == nil {
+			if _, err := c.globalizeLocalTypeDesc(localTypes([]TypeDesc{PrimitiveDesc{Prim: "u32"}}), tc.in, map[uint32]uint32{}); err == nil {
 				t.Fatal("accepted an out-of-range local type index")
 			}
 		})
@@ -170,13 +185,12 @@ func TestGlobalizeLocalTypeDesc_RefusesHandlesAndUnknowns(t *testing.T) {
 	}{
 		{"own", "own handle", OwnDesc{ResourceType: 0}},
 		{"borrow", "borrow handle", BorrowDesc{ResourceType: 0}},
-		{"func", "locally-declared func type", FuncDesc{}},
 		{"resource", "locally-declared resource type", ResourceDesc{}},
 		{"instance", "locally-declared instance type", InstanceDesc{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Component{}
-			_, err := c.globalizeLocalTypeDesc(nil, tc.in, map[uint32]uint32{})
+			_, err := c.globalizeLocalTypeDesc(localTypes(nil), tc.in, map[uint32]uint32{})
 			if err == nil {
 				t.Fatalf("accepted a %s", tc.name)
 			}
@@ -192,11 +206,11 @@ func TestGlobalizeLocalTypeDesc_RefusesHandlesAndUnknowns(t *testing.T) {
 func TestGlobalizeLocalRef_SelfReferentialTerminates(t *testing.T) {
 	self := uint32(0)
 	c := &Component{}
-	localTypes := []TypeDesc{
+	src := localTypes([]TypeDesc{
 		OptionDesc{Element: TypeRef{TypeIndex: &self}}, // option<itself>
-	}
+	})
 
-	got, err := c.globalizeLocalRef(localTypes, TypeRef{TypeIndex: &self}, map[uint32]uint32{})
+	got, err := c.globalizeLocalRef(src, TypeRef{TypeIndex: &self}, map[uint32]uint32{})
 	if err != nil {
 		t.Fatalf("globalizeLocalRef: %v", err)
 	}
