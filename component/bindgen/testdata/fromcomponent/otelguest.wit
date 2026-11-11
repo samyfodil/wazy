@@ -1,0 +1,412 @@
+package root:component;
+
+world root {
+  import wasi:otel/types@0.2.0-rc.2;
+  import wasi:clocks/wall-clock@0.2.3;
+  import wasi:otel/tracing@0.2.0-rc.2;
+  import wasi:otel/metrics@0.2.0-rc.2;
+  import wasi:otel/logs@0.2.0-rc.2;
+  import wasi:cli/environment@0.2.3;
+  import wasi:cli/exit@0.2.3;
+  import wasi:io/error@0.2.3;
+  import wasi:io/streams@0.2.3;
+  import wasi:cli/stdin@0.2.3;
+  import wasi:cli/stdout@0.2.3;
+  import wasi:cli/stderr@0.2.3;
+  import wasi:filesystem/types@0.2.3;
+  import wasi:filesystem/preopens@0.2.3;
+
+  export run: func() -> string;
+}
+package wasi:clocks@0.2.3 {
+  interface wall-clock {
+    record datetime {
+      seconds: u64,
+      nanoseconds: u32,
+    }
+  }
+}
+
+
+package wasi:otel@0.2.0-rc.2 {
+  interface types {
+    type key = string;
+
+    type value = string;
+
+    record key-value {
+      key: key,
+      value: value,
+    }
+
+    record %resource {
+      attributes: list<key-value>,
+      schema-url: option<string>,
+    }
+
+    record instrumentation-scope {
+      name: string,
+      version: option<string>,
+      schema-url: option<string>,
+      attributes: list<key-value>,
+    }
+  }
+  interface tracing {
+    use wasi:clocks/wall-clock@0.2.3.{datetime};
+    use types.{key-value, instrumentation-scope};
+
+    type span-id = string;
+
+    type trace-id = string;
+
+    flags trace-flags {
+      sampled,
+    }
+
+    type trace-state = list<tuple<string, string>>;
+
+    record span-context {
+      trace-id: trace-id,
+      span-id: span-id,
+      trace-flags: trace-flags,
+      is-remote: bool,
+      trace-state: trace-state,
+    }
+
+    enum span-kind {
+      client,
+      server,
+      producer,
+      consumer,
+      internal,
+    }
+
+    record event {
+      name: string,
+      time: datetime,
+      attributes: list<key-value>,
+    }
+
+    record link {
+      span-context: span-context,
+      attributes: list<key-value>,
+    }
+
+    variant status {
+      unset,
+      ok,
+      error(string),
+    }
+
+    record span-data {
+      span-context: span-context,
+      parent-span-id: string,
+      span-kind: span-kind,
+      name: string,
+      start-time: datetime,
+      end-time: datetime,
+      attributes: list<key-value>,
+      events: list<event>,
+      links: list<link>,
+      status: status,
+      instrumentation-scope: instrumentation-scope,
+      dropped-attributes: u32,
+      dropped-events: u32,
+      dropped-links: u32,
+    }
+
+    on-start: func(context: span-context);
+
+    on-end: func(span: span-data);
+
+    current-span-context: func() -> span-context;
+  }
+  interface metrics {
+    use types.{%resource, instrumentation-scope, key-value};
+    use wasi:clocks/wall-clock@0.2.3.{datetime};
+    use tracing.{span-id, trace-id};
+
+    variant metric-number {
+      %f64(f64),
+      %s64(s64),
+      %u64(u64),
+    }
+
+    record exemplar {
+      filtered-attributes: list<key-value>,
+      time: datetime,
+      value: metric-number,
+      span-id: span-id,
+      trace-id: trace-id,
+    }
+
+    record gauge-data-point {
+      attributes: list<key-value>,
+      value: metric-number,
+      exemplars: list<exemplar>,
+    }
+
+    record gauge {
+      data-points: list<gauge-data-point>,
+      start-time: option<datetime>,
+      time: datetime,
+    }
+
+    record sum-data-point {
+      attributes: list<key-value>,
+      value: metric-number,
+      exemplars: list<exemplar>,
+    }
+
+    enum temporality {
+      cumulative,
+      delta,
+      low-memory,
+    }
+
+    record sum {
+      data-points: list<sum-data-point>,
+      start-time: datetime,
+      time: datetime,
+      temporality: temporality,
+      is-monotonic: bool,
+    }
+
+    record histogram-data-point {
+      attributes: list<key-value>,
+      count: u64,
+      bounds: list<f64>,
+      bucket-counts: list<u64>,
+      min: option<metric-number>,
+      max: option<metric-number>,
+      sum: metric-number,
+      exemplars: list<exemplar>,
+    }
+
+    record histogram {
+      data-points: list<histogram-data-point>,
+      start-time: datetime,
+      time: datetime,
+      temporality: temporality,
+    }
+
+    record exponential-bucket {
+      offset: s32,
+      counts: list<u64>,
+    }
+
+    record exponential-histogram-data-point {
+      attributes: list<key-value>,
+      count: u64,
+      min: option<metric-number>,
+      max: option<metric-number>,
+      sum: metric-number,
+      scale: s8,
+      zero-count: u64,
+      positive-bucket: exponential-bucket,
+      negative-bucket: exponential-bucket,
+      zero-threshold: f64,
+      exemplars: list<exemplar>,
+    }
+
+    record exponential-histogram {
+      data-points: list<exponential-histogram-data-point>,
+      start-time: datetime,
+      time: datetime,
+      temporality: temporality,
+    }
+
+    variant metric-data {
+      f64-gauge(gauge),
+      f64-sum(sum),
+      f64-histogram(histogram),
+      f64-exponential-histogram(exponential-histogram),
+      u64-gauge(gauge),
+      u64-sum(sum),
+      u64-histogram(histogram),
+      u64-exponential-histogram(exponential-histogram),
+      s64-gauge(gauge),
+      s64-sum(sum),
+      s64-histogram(histogram),
+      s64-exponential-histogram(exponential-histogram),
+    }
+
+    record metric {
+      name: string,
+      description: string,
+      unit: string,
+      data: metric-data,
+    }
+
+    record scope-metrics {
+      scope: instrumentation-scope,
+      metrics: list<metric>,
+    }
+
+    record resource-metrics {
+      %resource: %resource,
+      scope-metrics: list<scope-metrics>,
+    }
+
+    type error = string;
+
+    %export: func(metrics: resource-metrics) -> result<_, error>;
+  }
+  interface logs {
+    use wasi:clocks/wall-clock@0.2.3.{datetime};
+    use types.{value, key-value, %resource, instrumentation-scope};
+    use tracing.{trace-id, span-id, trace-flags};
+
+    record log-record {
+      timestamp: option<datetime>,
+      observed-timestamp: option<datetime>,
+      severity-text: option<string>,
+      severity-number: option<u8>,
+      body: option<value>,
+      attributes: option<list<key-value>>,
+      event-name: option<string>,
+      %resource: option<%resource>,
+      instrumentation-scope: option<instrumentation-scope>,
+      trace-id: option<trace-id>,
+      span-id: option<span-id>,
+      trace-flags: option<trace-flags>,
+    }
+
+    on-emit: func(data: log-record);
+  }
+}
+
+
+package wasi:io@0.2.3 {
+  interface error {
+    resource error;
+  }
+  interface streams {
+    use error.{error};
+
+    resource output-stream {
+      check-write: func() -> result<u64, stream-error>;
+      write: func(contents: list<u8>) -> result<_, stream-error>;
+      blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;
+      blocking-flush: func() -> result<_, stream-error>;
+    }
+
+    resource input-stream;
+
+    variant stream-error {
+      last-operation-failed(error),
+      closed,
+    }
+  }
+}
+
+
+package wasi:cli@0.2.3 {
+  interface environment {
+    get-environment: func() -> list<tuple<string, string>>;
+  }
+  interface exit {
+    exit: func(status: result);
+  }
+  interface stdin {
+    use wasi:io/streams@0.2.3.{input-stream};
+
+    get-stdin: func() -> input-stream;
+  }
+  interface stdout {
+    use wasi:io/streams@0.2.3.{output-stream};
+
+    get-stdout: func() -> output-stream;
+  }
+  interface stderr {
+    use wasi:io/streams@0.2.3.{output-stream};
+
+    get-stderr: func() -> output-stream;
+  }
+}
+
+
+package wasi:filesystem@0.2.3 {
+  interface types {
+    use wasi:io/streams@0.2.3.{error, output-stream};
+    use wasi:clocks/wall-clock@0.2.3.{datetime};
+
+    resource descriptor {
+      write-via-stream: func(offset: filesize) -> result<output-stream, error-code>;
+      append-via-stream: func() -> result<output-stream, error-code>;
+      get-type: func() -> result<descriptor-type, error-code>;
+      stat: func() -> result<descriptor-stat, error-code>;
+    }
+
+    enum error-code {
+      access,
+      would-block,
+      already,
+      bad-descriptor,
+      busy,
+      deadlock,
+      quota,
+      exist,
+      file-too-large,
+      illegal-byte-sequence,
+      in-progress,
+      interrupted,
+      invalid,
+      io,
+      is-directory,
+      loop,
+      too-many-links,
+      message-size,
+      name-too-long,
+      no-device,
+      no-entry,
+      no-lock,
+      insufficient-memory,
+      insufficient-space,
+      not-directory,
+      not-empty,
+      not-recoverable,
+      unsupported,
+      no-tty,
+      no-such-device,
+      overflow,
+      not-permitted,
+      pipe,
+      read-only,
+      invalid-seek,
+      text-file-busy,
+      cross-device,
+    }
+
+    type filesize = u64;
+
+    enum descriptor-type {
+      unknown,
+      block-device,
+      character-device,
+      directory,
+      fifo,
+      symbolic-link,
+      regular-file,
+      socket,
+    }
+
+    type link-count = u64;
+
+    record descriptor-stat {
+      %type: descriptor-type,
+      link-count: link-count,
+      size: filesize,
+      data-access-timestamp: option<datetime>,
+      data-modification-timestamp: option<datetime>,
+      status-change-timestamp: option<datetime>,
+    }
+
+    filesystem-error-code: func(err: borrow<error>) -> option<error-code>;
+  }
+  interface preopens {
+    use types.{descriptor};
+
+    get-directories: func() -> list<tuple<descriptor, string>>;
+  }
+}

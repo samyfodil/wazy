@@ -46,6 +46,14 @@ flags and resource, a Go interface for each import, and a typed wrapper for the 
 //go:generate go run github.com/samyfodil/wazy/cmd/wazy-bindgen -wit store.wit -world app -package store -o bindings.go
 ```
 
+A host running a component it did not build need not have its WIT: `-wasm` reads it from the compiled
+component instead (`wit.FromComponent`, the WIT `wasm-tools component wit` prints), whose world is
+`root`:
+
+```sh
+wazy-bindgen -wasm plugin.wasm -package plugin -o plugin.go
+```
+
 The host then implements the import in Go types, and calls the exports the same way:
 
 ```go

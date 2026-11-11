@@ -1,6 +1,7 @@
 package wit_test
 
 import (
+	_ "embed"
 	"fmt"
 	"maps"
 	"os"
@@ -616,5 +617,28 @@ world w {
 	}
 	if _, err := pkg.World("w").Imports[0].Func.Signature(nil); err == nil || err.Error() != "wit: make: result: no tag for resource local of world w" {
 		t.Errorf("world func: %v", err)
+	}
+}
+
+// testdata/component/app.wasm is world app { import a:b/kv; export run }
+// as a compiled component; FromComponent reads its WIT back as world root.
+//
+//go:embed testdata/component/app.wasm
+var appComponent []byte
+
+func TestFromComponent(t *testing.T) {
+	pkg, err := wit.FromComponent(appComponent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := pkg.World("root")
+	if w == nil || len(w.Imports) != 1 || w.Imports[0].Name != "a:b/kv" || len(w.Exports) != 1 || w.Exports[0].Name != "run" {
+		t.Fatalf("world root: %+v", w)
+	}
+	if pkg.Interface("a:b/kv").Func("get") == nil {
+		t.Error("no a:b/kv#get")
+	}
+	if _, err := wit.FromComponent([]byte("not wasm")); err == nil {
+		t.Error("garbage reads as a component")
 	}
 }

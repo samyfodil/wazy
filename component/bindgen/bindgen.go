@@ -11,7 +11,9 @@
 //     world passes.
 //
 // The generated code depends only on package component and package witgo.
-// cmd/wazy-bindgen runs Generate from the command line, for go generate.
+// cmd/wazy-bindgen runs Generate from the command line, for go generate,
+// on a WIT package or on a compiled component, whose WIT wit.FromComponent
+// reads.
 //
 // A world's WASI imports are not bound by default: wazy's imports/wasip2
 // implements them, and its options go to Instantiate next to the bindings.

@@ -1,0 +1,137 @@
+package root:component;
+
+world root {
+  import wazy:fixed/host@0.1.0;
+  import wasi:io/poll@0.2.12;
+  import wasi:clocks/monotonic-clock@0.2.12;
+  import wasi:io/error@0.2.12;
+  import wasi:io/streams@0.2.12;
+  import wasi:cli/stdout@0.2.12;
+  import wasi:cli/stderr@0.2.12;
+  import wasi:cli/stdin@0.2.12;
+  import wasi:cli/environment@0.2.12;
+  import wasi:cli/exit@0.2.12;
+  import wasi:cli/terminal-input@0.2.12;
+  import wasi:cli/terminal-output@0.2.12;
+  import wasi:cli/terminal-stdin@0.2.12;
+  import wasi:cli/terminal-stdout@0.2.12;
+  import wasi:cli/terminal-stderr@0.2.12;
+
+  export wazy:fixed/api@0.1.0;
+}
+package wazy:fixed@0.1.0 {
+  interface host {
+    record point {
+      x: s32,
+      y: s32,
+    }
+
+    reverse: func(v: list<u32, 4>) -> list<u32, 4>;
+
+    greet: func(name: string) -> list<string, 2>;
+
+    shift: func(ps: list<point, 2>, by: s32) -> list<point, 2>;
+  }
+  interface api {
+    use host.{point};
+
+    run: func(v: list<u32, 4>) -> list<u32, 4>;
+
+    names: func(n: list<string, 2>) -> list<string, 2>;
+
+    points: func(ps: list<point, 2>) -> list<point, 2>;
+
+    matrix: func(m: list<list<u8, 3>, 2>) -> list<list<u8, 3>, 2>;
+
+    wide: func(v: list<u64, 20>) -> u64;
+  }
+}
+
+
+package wasi:io@0.2.12 {
+  interface poll {
+    resource pollable {
+      block: func();
+    }
+
+    poll: func(in: list<borrow<pollable>>) -> list<u32>;
+  }
+  interface error {
+    resource error;
+  }
+  interface streams {
+    use error.{error};
+    use poll.{pollable};
+
+    resource input-stream;
+
+    resource output-stream {
+      check-write: func() -> result<u64, stream-error>;
+      write: func(contents: list<u8>) -> result<_, stream-error>;
+      blocking-flush: func() -> result<_, stream-error>;
+      subscribe: func() -> pollable;
+    }
+
+    variant stream-error {
+      last-operation-failed(error),
+      closed,
+    }
+  }
+}
+
+
+package wasi:clocks@0.2.12 {
+  interface monotonic-clock {
+    use wasi:io/poll@0.2.12.{pollable};
+
+    type duration = u64;
+
+    subscribe-duration: func(when: duration) -> pollable;
+  }
+}
+
+
+package wasi:cli@0.2.12 {
+  interface stdout {
+    use wasi:io/streams@0.2.12.{output-stream};
+
+    get-stdout: func() -> output-stream;
+  }
+  interface stderr {
+    use wasi:io/streams@0.2.12.{output-stream};
+
+    get-stderr: func() -> output-stream;
+  }
+  interface stdin {
+    use wasi:io/streams@0.2.12.{input-stream};
+
+    get-stdin: func() -> input-stream;
+  }
+  interface environment {
+    get-environment: func() -> list<tuple<string, string>>;
+  }
+  interface exit {
+    exit: func(status: result);
+  }
+  interface terminal-input {
+    resource terminal-input;
+  }
+  interface terminal-output {
+    resource terminal-output;
+  }
+  interface terminal-stdin {
+    use terminal-input.{terminal-input};
+
+    get-terminal-stdin: func() -> option<terminal-input>;
+  }
+  interface terminal-stdout {
+    use terminal-output.{terminal-output};
+
+    get-terminal-stdout: func() -> option<terminal-output>;
+  }
+  interface terminal-stderr {
+    use terminal-output.{terminal-output};
+
+    get-terminal-stderr: func() -> option<terminal-output>;
+  }
+}
