@@ -59,6 +59,29 @@ func TestCLI(t *testing.T) {
 	require.Contains(t, stdout.String(), "type Root struct{ inst *component.Instance }")
 	require.Contains(t, stdout.String(), "type Kv interface")
 
+	// A tree of packages, its import path read from the go.mod above it, or
+	// given; and a world using the tree's package for an interface.
+	mod := filepath.Join(dir, "mod")
+	write("mod/go.mod", "module example.com/m\n")
+	code = cli([]string{"-wit", witFile, "-world", "app", "-package", "app", "-out", filepath.Join(mod, "b")}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	kvSrc, err := os.ReadFile(filepath.Join(mod, "b", "c", "d", "kv", "bindings.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(kvSrc), "package kv")
+	appSrc, err := os.ReadFile(filepath.Join(mod, "b", "app", "bindings.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(appSrc), `kv "example.com/m/b/c/d/kv"`)
+	code = cli([]string{"-wit", witFile, "-world", "app", "-package", "app", "-out", filepath.Join(dir, "t"), "-import", "x.com/t"}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	appSrc, err = os.ReadFile(filepath.Join(dir, "t", "app", "bindings.go"))
+	require.NoError(t, err)
+	require.Contains(t, string(appSrc), `kv "x.com/t/c/d/kv"`)
+	stdout.Reset()
+	code = cli([]string{"-wit", witFile, "-world", "app", "-package", "app", "-with", "c:d/kv=x.com/t/c/d/kv"}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	require.Contains(t, stdout.String(), "o = append(o, kv.Options(imports.Kv)...)")
+	require.False(t, strings.Contains(stdout.String(), "type Kv interface"), "-with leaves the interface to its package")
+
 	// The OS words these failures its own way.
 	_, missing := os.Stat("missing.wit")
 	missingWasm := filepath.Join(dir, "missing.wasm")
@@ -73,8 +96,13 @@ func TestCLI(t *testing.T) {
 		want string
 	}{
 		{[]string{"-nope"}, 2, "flag provided but not defined"},
-		{[]string{"-wit", "x.wit", "-package", "p"}, 1, "-world and -package are required"},
-		{[]string{"-wit", "x.wit", "-world", "w"}, 1, "-world and -package are required"},
+		{[]string{"-wit", "x.wit", "-package", "p"}, 1, "-world is required"},
+		{[]string{"-wit", witFile, "-world", "app"}, 1, "-package is required"},
+		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-o", "x", "-out", dir}, 1, "-o and -out are exclusive"},
+		{[]string{"-with", "nope"}, 2, `want interface=import/path, got "nope"`},
+		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-with", "c:d/none=x"}, 1, "world app imports no interface c:d/none"},
+		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-out", filepath.Join(dir, "nomod")}, 1, "no go.mod at or above"},
+		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-out", filepath.Join(out, "x"), "-import", "x.com/t"}, 1, "not a directory"},
 		{[]string{"-wit", "missing.wit", "-world", "w", "-package", "p"}, 1, missing.Error()},
 		{[]string{"-wit", bad, "-world", "w", "-package", "p"}, 1, "wit:"},
 		{[]string{"-wasm", wasm, "-wit", witFile, "-package", "p"}, 1, "-wit and -wasm are exclusive"},

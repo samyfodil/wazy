@@ -54,6 +54,21 @@ component instead (`wit.FromComponent`, the WIT `wasm-tools component wit` print
 wazy-bindgen -wasm plugin.wasm -package plugin -o plugin.go
 ```
 
+Two components that import the same interface can share its bindings, and the code written
+against them. `-out` writes a tree of packages instead of one file: one per imported interface, at
+`<namespace>/<package>/<interface>` (with the version, when there is one), and one for the world.
+An interface's package holds nothing that depends on the world, so every component generated into the
+same tree uses the same one:
+
+```sh
+wazy-bindgen -wasm a.wasm -package a -out bindings
+wazy-bindgen -wasm b.wasm -package b -out bindings
+```
+
+`-with` uses such a package from elsewhere, in either form, for an interface someone else publishes
+bindings of: `-with wasi:http/types=example.com/wasihttp/wasi/http/v0.2.0/types`. Only imported
+interfaces are shared; an exported one is the component's own, and stays in its world's package.
+
 The host then implements the import in Go types, and calls the exports the same way:
 
 ```go

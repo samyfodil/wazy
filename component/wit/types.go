@@ -10,9 +10,10 @@ import (
 // builder lowers WIT types into one component.TypeTable -- the table a single
 // func's Signature hands to WithImportCustom.
 type builder struct {
-	tbl   *component.TypeTable
-	names map[uint32]string
-	tags  Tags
+	tbl    *component.TypeTable
+	names  map[uint32]string
+	owners map[uint32]string
+	tags   Tags
 	// probe builds without tags, for validating at parse time: a resource
 	// with no tag gets 0 rather than an error.
 	probe bool
@@ -31,11 +32,12 @@ type typeKey struct {
 
 func newBuilder(tags Tags, probe bool) *builder {
 	return &builder{
-		tbl:   component.NewTypeTable(),
-		names: map[uint32]string{},
-		tags:  tags,
-		probe: probe,
-		memo:  map[typeKey]component.TypeRef{},
+		tbl:    component.NewTypeTable(),
+		names:  map[uint32]string{},
+		owners: map[uint32]string{},
+		tags:   tags,
+		probe:  probe,
+		memo:   map[typeKey]component.TypeRef{},
 	}
 }
 
@@ -193,7 +195,7 @@ func (b *builder) named(s *scope, name string) (component.TypeRef, error) {
 		return component.TypeRef{}, fmt.Errorf("%s: type %s: %w", ds.where, td.Name, err)
 	}
 	b.memo[key] = ref
-	b.name(ref, td.Name)
+	b.name(ref, td.Name, ds.iface)
 	return ref, nil
 }
 
@@ -224,17 +226,19 @@ func (b *builder) handle(s *scope, name, kind string) (component.TypeRef, error)
 		ref = b.tbl.Borrow(tag)
 	}
 	b.memo[key] = ref
-	b.name(ref, td.Name)
+	b.name(ref, td.Name, ds.iface)
 	return ref, nil
 }
 
-// name records the WIT name of the slot ref interns, unless the slot already
-// has one: an alias of a named type keeps the defining name.
-func (b *builder) name(ref component.TypeRef, name string) {
+// name records the WIT name of the slot ref interns, and the interface
+// defining it, unless the slot already has one: an alias of a named type
+// keeps the defining name.
+func (b *builder) name(ref component.TypeRef, name, owner string) {
 	if ref.TypeIndex == nil {
 		return
 	}
 	if _, ok := b.names[*ref.TypeIndex]; !ok {
 		b.names[*ref.TypeIndex] = name
+		b.owners[*ref.TypeIndex] = owner
 	}
 }

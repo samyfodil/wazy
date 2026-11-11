@@ -642,3 +642,52 @@ func TestFromComponent(t *testing.T) {
 		t.Error("garbage reads as a component")
 	}
 }
+
+// An interface's Types are every value type it defines, used by a func of it
+// or not, owned by it; a use of another's is not one, and resources are its
+// Resources.
+func TestInterfaceTypes(t *testing.T) {
+	pkg, err := wit.Parse("t.wit", `package a:b;
+interface base { record p { x: u32 } }
+interface i {
+  use base.{p};
+  record unused { a: list<p> }
+  type id = u32;
+  type ps = list<p>;
+  resource r;
+  record holder { h: r }
+  enum e { one }
+  f: func(x: e) -> r;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := pkg.Interface("a:b/i").Types(wit.Tags{{Interface: "a:b/i", Name: "r"}: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, ref := range set.Refs {
+		if ref.TypeIndex == nil {
+			got = append(got, ref.Primitive)
+			continue
+		}
+		got = append(got, set.TypeNames[*ref.TypeIndex]+"@"+set.TypeOwners[*ref.TypeIndex])
+	}
+	want := []string{"unused@a:b/i", "u32", "ps@a:b/i", "holder@a:b/i", "e@a:b/i"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	sig, err := pkg.Interface("a:b/i").Func("f").Signature(wit.Tags{{Interface: "a:b/i", Name: "r"}: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx, owner := range sig.TypeOwners {
+		if owner != "a:b/i" {
+			t.Errorf("%s is owned by %q", sig.TypeNames[idx], owner)
+		}
+	}
+	if _, err := pkg.Interface("a:b/i").Types(nil); err == nil {
+		t.Error("a resource with no tag builds")
+	}
+}
