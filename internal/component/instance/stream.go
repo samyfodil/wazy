@@ -135,7 +135,7 @@ func (b *guestBuffer) read(n uint32) ([]abi.Value, error) {
 	}
 	out := make([]abi.Value, n)
 	for i := uint32(0); i < n; i++ {
-		v, err := abi.Load(mem, b.ptr, b.elem, b.resolve)
+		v, err := abi.LoadEnc(mem, b.ptr, b.elem, b.resolve, b.realloc.Encoding)
 		if err != nil {
 			return nil, fmt.Errorf("stream/future buffer read: element %d: %w", i, err)
 		}
@@ -276,6 +276,17 @@ type sharedStream struct {
 	elemSz  uint32
 	align   uint32
 	numeric bool // noneOrNumberType(elem)
+	dropped bool
+
+	// dropNotify[side] records a DROPPED notification OWED to that side but not
+	// yet delivered. The reference has no such field because its End object
+	// itself moves between instances on a transfer, carrying its pending event;
+	// wazy mints a fresh end object on the receiving side, so the debt has to
+	// live on the shared object or a transfer would silently lose it.
+	// idle-drop.wast's transfer-then-park does exactly that: the producer drops
+	// the writable end and returns the readable end as a RESULT, and the
+	// receiver must still find the notification waiting.
+	dropNotify [2]bool
 
 	// elemIn is the Instance whose resolver/TypeSpace elem's type indices
 	// (e.g. an OwnDesc's ResourceType) are relative to -- the instance that
@@ -295,8 +306,6 @@ type sharedStream struct {
 	// the host's for a host-created stream.
 	elemResolve abi.Resolver
 
-	dropped bool
-
 	// readEnd/writeEnd are the LIVE end objects, one per side, so dropping one
 	// end can notify the other even when that other end is IDLE -- the
 	// reference's End.drop reaches its counterpart through End.other
@@ -306,16 +315,6 @@ type sharedStream struct {
 	// side is live at a time: a transfer across a component boundary replaces
 	// the readable end, which re-registers.
 	readEnd, writeEnd endNotifier
-
-	// dropNotify[side] records a DROPPED notification OWED to that side but not
-	// yet delivered. The reference has no such field because its End object
-	// itself moves between instances on a transfer, carrying its pending event;
-	// wazy mints a fresh end object on the receiving side, so the debt has to
-	// live on the shared object or a transfer would silently lose it.
-	// idle-drop.wast's transfer-then-park does exactly that: the producer drops
-	// the writable end and returns the readable end as a RESULT, and the
-	// receiver must still find the notification waiting.
-	dropNotify [2]bool
 
 	// The pending side. pendingInst identifies the guest instance whose
 	// buffer is parked (nil for a host buffer) -- consumed ONLY by the
@@ -720,20 +719,19 @@ func (e *futureEnd) copying() bool          { return e.state == copyCopying || e
 // simpler protocol -- no onCopy (no partial progress), buffers always
 // length 1.
 type sharedFuture struct {
-	elem    binary.TypeDesc
-	elemSz  uint32
-	align   uint32
-	numeric bool
+	elem       binary.TypeDesc
+	elemSz     uint32
+	align      uint32
+	numeric    bool
+	dropped    bool
+	dropNotify [2]bool
 
 	// elemIn and elemResolve are sharedStream's twins -- see their docs.
 	elemIn      *Instance
 	elemResolve abi.Resolver
 
-	dropped bool
-
 	// readEnd/writeEnd, dropNotify: see sharedStream's identical fields.
 	readEnd, writeEnd endNotifier
-	dropNotify        [2]bool
 
 	pendingInst       *Instance
 	pendingBuffer     copyBuffer

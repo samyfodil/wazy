@@ -459,6 +459,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	// space -- used only by canonMemoryAndRealloc (via buildCanonHostModule)
 	// to resolve a canon lower's own "memory" CanonOpt. Safe to define here
 	// for the same forward-declaration reason as coreFuncTarget above.
+	cfg.coreMem = func(idx int) (api.Module, error) { return coreMemTarget(idx) }
 	coreMemTarget = func(idx int) (api.Module, error) {
 		if idx < 0 || idx >= len(coreMemSpace) {
 			return nil, fmt.Errorf("core memory index %d out of range of the %d-entry core memory index space", idx, len(coreMemSpace))
@@ -1980,9 +1981,16 @@ func computeCanonHostFunc(
 				return hostFuncDef{}, "", fmt.Errorf("import %q func %q is lowered synchronously, but was registered via WithAsyncImport; register it with WithImport instead", iface, fname)
 			}
 
-			memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+			memMod, reallocFn, enc, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 			if merr != nil {
 				return hostFuncDef{}, "", fmt.Errorf("import %q func %q: %w", iface, fname, merr)
+			}
+			if enc != abi.UTF8 {
+				// The encoding is this lower's, not the import's: lower the
+				// import from a copy that carries it.
+				h := *hi
+				h.enc = enc
+				hi = &h
 			}
 			// Feature 1 promotion gate (docs/component-model-async-final3-
 			// fable.md §1.1): a SYNC lower whose target is an async lift
@@ -2021,9 +2029,9 @@ func computeCanonHostFunc(
 			def = hostFuncDef{fn: fn, params: sig.params, results: sig.results}
 		}
 
-	case 0x02, 0x03, 0x04, binary.CanonKindResourceDropAsync: // resource.new, resource.drop (sync/async), resource.rep
+	case 0x02, 0x03, 0x04: // resource.new, resource.drop, resource.rep
 		var rerr error
-		def, rerr = resourceCanonHostFuncGraph(comp, cfg, resources, entryName, canon)
+		def, rerr = resourceCanonHostFuncGraph(comp, cfg, in, resources, entryName, canon)
 		if rerr != nil {
 			return hostFuncDef{}, "", rerr
 		}
@@ -2141,21 +2149,26 @@ func computeCanonHostFunc(
 		}
 
 	case binary.CanonKindErrorContextNew:
-		memMod, _, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		memMod, _, enc, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 		if merr != nil {
 			return hostFuncDef{}, "", merr
 		}
-		def = errorContextNewHostFunc(in, memMod)
+		def = errorContextNewHostFunc(in, memMod, enc)
 
 	case binary.CanonKindErrorContextDebugMessage:
-		memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		memMod, reallocFn, enc, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 		if merr != nil {
 			return hostFuncDef{}, "", merr
 		}
-		def = errorContextDebugMessageHostFunc(in, memMod, reallocFn)
+		def = errorContextDebugMessageHostFunc(in, memMod, reallocFn, enc)
 
 	case binary.CanonKindErrorContextDrop:
 		def = errorContextDropHostFunc(in)
+
+	case binary.CanonKindThreadSpawnRef, binary.CanonKindThreadSpawnIndirect, binary.CanonKindThreadAvailableParallelism:
+		// The specification gates these on shared-everything threads, a later
+		// proposal its reference implementation does not define either.
+		return hostFuncDef{}, "", fmt.Errorf("uses %s, which needs the shared-everything threads proposal; wazy does not implement it", binary.CanonKindName(canon.Kind))
 
 	default:
 		return hostFuncDef{}, "", fmt.Errorf("references a canon of kind %#x, which does not produce a core func", canon.Kind)
@@ -2228,29 +2241,43 @@ func buildCanonHostModule(
 // file's package doc). A canon with neither option (most resource-only or
 // memory-free lowers) returns (nil, nil, nil): buildHostWrapper then falls
 // back to the runtime caller, exactly as before this existed.
-func canonMemoryAndRealloc(canon binary.Canon, coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error)) (memMod api.Module, reallocFn api.Function, err error) {
+func canonMemoryAndRealloc(canon binary.Canon, coreMemTarget func(int) (api.Module, error), coreFuncTarget func(int) (api.Module, string, error)) (memMod api.Module, reallocFn api.Function, enc abi.Encoding, err error) {
 	for _, opt := range canon.Opts {
 		switch opt.Kind {
 		case 0x03: // memory
 			mod, merr := coreMemTarget(int(opt.Idx))
 			if merr != nil {
-				return nil, nil, fmt.Errorf("canon lower memory option: %w", merr)
+				return nil, nil, 0, fmt.Errorf("canon lower memory option: %w", merr)
 			}
 			memMod = mod
 
 		case 0x04: // realloc
 			mod, name, rerr := coreFuncTarget(int(opt.Idx))
 			if rerr != nil {
-				return nil, nil, fmt.Errorf("canon lower realloc option: %w", rerr)
+				return nil, nil, 0, fmt.Errorf("canon lower realloc option: %w", rerr)
 			}
 			fn := mod.ExportedFunction(name)
 			if fn == nil {
-				return nil, nil, fmt.Errorf("canon lower realloc option: core instance %q has no exported function %q", mod.Name(), name)
+				return nil, nil, 0, fmt.Errorf("canon lower realloc option: core instance %q has no exported function %q", mod.Name(), name)
 			}
 			reallocFn = fn
 		}
 	}
-	return memMod, reallocFn, nil
+	return memMod, reallocFn, canonEncoding(canon), nil
+}
+
+// canonEncoding is a canon's string-encoding option: utf8 (0x00, and the
+// default), utf16 (0x01) or latin1+utf16 (0x02).
+func canonEncoding(canon binary.Canon) abi.Encoding {
+	for _, opt := range canon.Opts {
+		switch opt.Kind {
+		case 0x01:
+			return abi.UTF16
+		case 0x02:
+			return abi.Latin1UTF16
+		}
+	}
+	return abi.UTF8
 }
 
 // resourceCanonHostFuncGraph is resourceCanonHostFunc's graph-engine
@@ -2269,7 +2296,7 @@ func canonMemoryAndRealloc(canon binary.Canon, coreMemTarget func(int) (api.Modu
 // when it *can* (a resolvable type that is definitely not a resource fails
 // loud, same as resourceCanonHostFunc), and only widens the "can't resolve
 // structurally" case from a hard failure to a warning-free best effort.
-func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *handleTable, name string, canon binary.Canon) (hostFuncDef, error) {
+func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, in *Instance, resources *handleTable, name string, canon binary.Canon) (hostFuncDef, error) {
 	if td, err := comp.ResolveType(canon.TypeIdx); err == nil {
 		if _, ok := td.(binary.ResourceDesc); !ok {
 			return hostFuncDef{}, fmt.Errorf("component/instance: inline export %q: canon type %d is not a resource type (got %T)", name, canon.TypeIdx, td)
@@ -2283,13 +2310,15 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 	switch canon.Kind {
 	case 0x02: // resource.new: rep:i32 -> handle:i32
 		fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+			requireMayLeave(in, "resource.new")
 			rep := api.DecodeU32(stack[0])
 			stack[0] = api.EncodeU32(resources.NewOwn(typeIdx, rep))
 		})
 		return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}, nil
 
-	case 0x03, binary.CanonKindResourceDropAsync: // resource.drop (sync 0x03 / async 0x07): handle:i32 -> ()
+	case 0x03: // resource.drop: handle:i32 -> ()
 		fn := api.GoModuleFunc(func(ctx context.Context, _ api.Module, stack []uint64) {
+			requireMayLeave(in, "resource.drop")
 			h := api.DecodeU32(stack[0])
 			// Own/borrow dispatch BEFORE any destructor lookup (Phase 3): a
 			// borrow drop (handleTable.Drop's borrow arm) must never run the
@@ -2297,12 +2326,6 @@ func resourceCanonHostFuncGraph(comp *binary.Component, cfg *config, resources *
 			// dropping so the destructor (if any) can run against it -- an
 			// importer dropping an own<R> it received runs the DEFINER's
 			// dtor, registered on the shared table by global tag.
-			//
-			// resource.drop async (kind 0x07) decodes identically and is
-			// executed synchronously here: the pinned reference's
-			// canon_resource_drop has no async branch at all (it lifts the
-			// dtor with async_=False unconditionally) -- see
-			// docs/component-model-async-phase3-design.md §4.4.
 			own, ownErr := resources.IsOwn(typeIdx, h)
 			var dtor func(context.Context, uint32) error
 			var rep uint32
@@ -2623,7 +2646,20 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
 	}
 
-	be := &boundExport{mod: mod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName, reallocMod: reallocMod}
+	// The lift's memory option, when it has one, names the memory its
+	// strings and lists live in, which need not be the core func's module's:
+	// concat.wast's map forwarders lift a func of a memoryless module over
+	// another module's memory.
+	memMod := mod
+	for _, opt := range canon.Opts {
+		if opt.Kind == 0x03 && cfg != nil && cfg.coreMem != nil {
+			if memMod, err = cfg.coreMem(int(opt.Idx)); err != nil {
+				return nil, fmt.Errorf("component/instance: export %q: memory option: %w", diagName, err)
+			}
+		}
+	}
+
+	be := &boundExport{mod: mod, memMod: memMod, funcName: name, fd: fd, postReturnFuncName: postReturnName, reallocFuncName: reallocName, reallocMod: reallocMod, enc: canonEncoding(canon)}
 	switch {
 	case isAsyncLift && callbackName != "":
 		be.asyncCallback = true

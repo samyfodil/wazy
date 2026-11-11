@@ -115,11 +115,26 @@ func TestRequireActiveTask_NoActiveTaskPanics(t *testing.T) {
 	})
 }
 
-func TestRequireActiveTask_MayLeaveFalsePanics(t *testing.T) {
+// task.return checks may_leave; context.get and backpressure.inc, which a
+// post-return function may call, do not.
+func TestMayLeaveFalse(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false, activeTask: &task{}}
-	requirePanicContains(t, "may not be left", func() {
-		requireActiveTask(in, "task.return")
+	def, err := taskReturnHostFuncGraph(in, binary.Canon{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePanicContains(t, "task.return: cannot leave component instance", func() {
+		def.fn.Call(context.Background(), nil, nil)
 	})
+	get, err := contextGetHostFuncGraph(in, binary.Canon{CoreValType: 0x7f})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get.fn.Call(context.Background(), nil, []uint64{0})
+	backpressureIncHostFuncGraph(in).fn.Call(context.Background(), nil, nil)
+	if in.backpressure != 1 {
+		t.Fatalf("backpressure = %d, want 1", in.backpressure)
+	}
 }
 
 func TestBackpressureIncDec(t *testing.T) {
@@ -312,7 +327,7 @@ func TestTaskReturnHostFuncGraph_UsesExportMemoryNotCallerModule(t *testing.T) {
 
 	var got []abi.Value
 	tk := &task{
-		be:        &boundExport{resultType: binary.PrimitiveDesc{Prim: "string"}, mod: realMod},
+		be:        &boundExport{resultType: binary.PrimitiveDesc{Prim: "string"}, mod: realMod, memMod: realMod},
 		onResolve: func(vals []abi.Value, _ bool) { got = vals },
 	}
 	in.activeTask = tk

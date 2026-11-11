@@ -69,7 +69,7 @@ func TestTaskCancelHostFunc_Success(t *testing.T) {
 func TestTaskCancelHostFunc_MayLeaveFalseTraps(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
 	def := taskCancelHostFuncGraph(in)
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		def.fn.Call(context.Background(), nil, nil)
 	})
 }
@@ -449,7 +449,7 @@ func TestSubtaskCancelHostFunc_SyncTaskCannotBlock(t *testing.T) {
 func TestSubtaskCancelHostFunc_MayLeaveFalseTraps(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false, resources: newHandleTable()}
 	def := subtaskCancelHostFuncGraph(in, binary.Canon{})
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		def.fn.Call(context.Background(), nil, []uint64{0})
 	})
 }

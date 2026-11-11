@@ -652,7 +652,8 @@ func threadNewIndirectHostFunc(
 	// in guestThread.resumeReady, §3) -- a never-resumed thread costs
 	// nothing and reaps trivially (reapParkedGoroutines' !spawned arm).
 	fn := api.GoModuleFunc(func(ctx context.Context, _ api.Module, stack []uint64) {
-		t := requireActiveTask(in, "thread.new-indirect") // current_task() + may_leave (:2690-2691)
+		requireMayLeave(in, "thread.new-indirect")
+		t := requireActiveTask(in, "thread.new-indirect")
 		fi := api.DecodeU32(stack[0])
 		c := stack[1]
 		target := wm.LookupFunction(table, typeID, fi) // call_indirect semantics == trap_if(f.t != ft)

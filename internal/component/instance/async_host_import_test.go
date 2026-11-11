@@ -78,7 +78,7 @@ func TestLiftAsyncHostArgsSpilled_RoundTrip(t *testing.T) {
 	}
 
 	st := newSubtask()
-	args, err := liftAsyncHostArgsSpilled(nil, plans, tupleDesc, resolve, ptr, mod, newHandleTable(), st)
+	args, err := liftAsyncHostArgsSpilled(nil, plans, tupleDesc, resolve, abi.UTF8, ptr, mod, newHandleTable(), st)
 	if err != nil {
 		t.Fatalf("liftAsyncHostArgsSpilled: %v", err)
 	}
@@ -584,7 +584,7 @@ func TestWaitableSetWaitHostFunc_BadKindTraps(t *testing.T) {
 func TestWaitableSetWaitHostFunc_MayLeaveFalseTraps(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false, resources: newHandleTable()}
 	waitFn := waitableSetWaitHostFunc(in, binary.Canon{}, nil)
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		waitFn.fn.Call(context.Background(), nil, []uint64{0, 0})
 	})
 }
@@ -626,7 +626,7 @@ func TestWaitableSetPollHostFunc_BadKindTraps(t *testing.T) {
 func TestWaitableSetPollHostFunc_MayLeaveFalseTraps(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false, resources: newHandleTable()}
 	pollFn := waitableSetPollHostFunc(in, binary.Canon{}, nil)
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		pollFn.fn.Call(context.Background(), nil, []uint64{0, 0})
 	})
 }

@@ -195,7 +195,7 @@ func TestStoreErrorCases(t *testing.T) {
 
 func TestLoadInvalidPrimitive(t *testing.T) {
 	mem := make([]byte, 100)
-	_, err := loadPrimitive(mem, 0, "unknown")
+	_, err := loadPrimitive(mem, 0, "unknown", UTF8)
 	if err == nil {
 		t.Error("expected error for unknown primitive type")
 	}
@@ -315,7 +315,7 @@ func TestLoadRecordFieldError(t *testing.T) {
 		},
 	}
 
-	_, err := loadRecord(mem, 0, desc, badResolve)
+	_, err := loadRecord(mem, 0, desc, badResolve, UTF8)
 	if err == nil {
 		t.Error("expected error for bad resolver in record")
 	}
@@ -334,7 +334,7 @@ func TestLoadTupleFieldError(t *testing.T) {
 		},
 	}
 
-	_, err := loadTuple(mem, 0, desc, badResolve)
+	_, err := loadTuple(mem, 0, desc, badResolve, UTF8)
 	if err == nil {
 		t.Error("expected error for bad resolver in tuple")
 	}
@@ -353,7 +353,7 @@ func TestLoadVariantFieldError(t *testing.T) {
 		},
 	}
 
-	_, err := loadVariant(mem, 0, desc, badResolve)
+	_, err := loadVariant(mem, 0, desc, badResolve, UTF8)
 	if err == nil {
 		t.Error("expected error for bad resolver in variant")
 	}
@@ -366,7 +366,7 @@ func TestLoadOptionFieldError(t *testing.T) {
 		return nil
 	}
 
-	_, err := loadOption(mem, 0, bintype.PrimitiveDesc{Prim: "invalid_prim"}, badResolve)
+	_, err := loadOption(mem, 0, bintype.PrimitiveDesc{Prim: "invalid_prim"}, badResolve, UTF8)
 	if err == nil {
 		t.Error("expected error for invalid primitive in option")
 	}
@@ -382,7 +382,7 @@ func TestLoadResultBothArmsNil(t *testing.T) {
 		Err: nil,
 	}
 
-	val, err := loadResult(mem, 0, desc, nil)
+	val, err := loadResult(mem, 0, desc, nil, UTF8)
 	if err != nil {
 		t.Errorf("unexpected error loading result with nil arms: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestListBoundsError(t *testing.T) {
 	mem[16] = 0
 	mem[17] = 0
 
-	_, err := loadList(mem, 10, desc, nil)
+	_, err := loadList(mem, 10, desc, nil, UTF8)
 	if err == nil {
 		t.Error("expected error for list bounds overflow")
 	}

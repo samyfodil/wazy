@@ -623,7 +623,7 @@ func TestHandleTable_ErrorsNameTheResource(t *testing.T) {
 		tbl := newNamedTable()
 		h := tbl.NewOwn(socketTag, 1)
 		_, err := tbl.Rep(networkTag, h)
-		requireErrContains(t, err, "belongs to tcp-socket (wasi:sockets/tcp)")
+		requireErrContains(t, err, "found a different host-defined resource (tcp-socket (wasi:sockets/tcp), not network (wasi:sockets/network))")
 		requireErrContains(t, err, "not network (wasi:sockets/network)")
 	})
 

@@ -327,7 +327,7 @@ func TestLowerFlatThroughRelocatingGrow(t *testing.T) {
 	}
 	for i, w := range []string{"flat-a", "flat-b"} {
 		ptr, n := flat[i*2].AsI32(), flat[i*2+1].AsI32()
-		got, err := loadStringFromRange(gm.live(), ptr, n)
+		got, err := loadStringFromRange(gm.live(), ptr, n, UTF8)
 		if err != nil {
 			t.Fatalf("field %d: read back through the live view: %v", i, err)
 		}
@@ -442,7 +442,7 @@ func TestAllocationOutOfBoundsStillFailsLoud(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected an out-of-bounds error, got nil")
 			}
-			if !strings.Contains(err.Error(), "allocated memory out of bounds") {
+			if !strings.Contains(err.Error(), "realloc return: beyond end of memory") {
 				t.Errorf("error = %v, want it to name the out-of-bounds allocation", err)
 			}
 		})
@@ -467,7 +467,7 @@ func TestOutOfBoundsIsReportedAgainstTheRefreshedView(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an out-of-bounds error for a pointer past the grown memory")
 	}
-	if !strings.Contains(err.Error(), "allocated memory out of bounds") {
+	if !strings.Contains(err.Error(), "realloc return: beyond end of memory") {
 		t.Fatalf("error = %v, want it to name the out-of-bounds allocation", err)
 	}
 	// The reported mem_len must be the REFRESHED length, not the caller's.

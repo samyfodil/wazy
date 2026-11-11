@@ -26,13 +26,11 @@ import (
 // other way to reach the call in progress (mirrors the reference's
 // current_task()/current_instance()).
 
-// requireActiveTask resolves the reference's current_task() plus its
-// trap_if(!task.inst.may_leave) prologue (every async builtin in §1.5 opens
-// with it), shared by all five builtins below.
+// requireActiveTask resolves the reference's current_task(). It does not check
+// may_leave: context.get/set and backpressure.inc/dec do not, so a
+// post-return function may call them, and the built-ins that do call
+// requireMayLeave first.
 func requireActiveTask(in *Instance, builtin string) *task {
-	if !in.mayLeave { // trap_if(!may_leave)
-		panic(fmt.Errorf("component/instance: %s: instance may not be left right now", builtin))
-	}
 	t := in.activeTask
 	if t == nil {
 		panic(fmt.Errorf("component/instance: %s: called outside an active async task", builtin))
@@ -150,7 +148,7 @@ func requireNotSyncImplicit(in *Instance, builtin string) taskBlocker {
 // toggles it false yet); the gate is wired for Phase 3.
 func requireMayLeave(in *Instance, builtin string) {
 	if !in.mayLeave {
-		panic(fmt.Errorf("component/instance: %s: instance may not be left right now", builtin))
+		panic(fmt.Errorf("component/instance: %s: cannot leave component instance", builtin))
 	}
 }
 
@@ -394,7 +392,8 @@ func subtaskDropHostFunc(in *Instance) hostFuncDef {
 func taskCancelHostFuncGraph(in *Instance) hostFuncDef {
 	in.syncTaskNeeded = true
 	fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
-		t := requireActiveTask(in, "task.cancel") // may_leave + current_task (~2393-2395)
+		requireMayLeave(in, "task.cancel")
+		t := requireActiveTask(in, "task.cancel")
 		// trap_if(not task.opts.async_) (~2396): true for a callback lift
 		// and the stackful async-no-callback sub-shape (both genuinely
 		// opts.async_); a sync-opts stackful task is NOT opts.async_ (it
@@ -539,6 +538,7 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, error) {
 	in.syncTaskNeeded = true
 	resolve := in.resolve
+	enc := canonEncoding(canon)
 	resultRefs := funcResultTypeRefs(binary.FuncDesc{Results: canon.TaskReturnResult})
 	if len(resultRefs) > 1 {
 		return hostFuncDef{}, fmt.Errorf("component/instance: task.return: %d named results; multiple task.return results are not supported by this milestone", len(resultRefs))
@@ -569,6 +569,7 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 	}
 
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		requireMayLeave(in, "task.return")
 		t := requireActiveTask(in, "task.return")
 		if t.syncImplicit { // trap_if(not task.opts.async_), definitions.py ~2383
 			panic(fmt.Errorf("component/instance: task.return: called on a synchronous task"))
@@ -581,19 +582,19 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 		var result []abi.Value
 		if resultType != nil {
 			// The canon-declared memory to lift the result through is the
-			// TASK's own export binding (t.be.mod), not mod -- the module
+			// TASK's own export binding's (t.be.memMod), not mod -- the module
 			// that happened to call this shared task.return core func
 			// directly. Once several canons are packed into one regrouping
 			// shim module (graph.go's "core instance N: inline export"
 			// merge), mod is that shim, which has no memory of its own; t.be
-			// is the guest module that actually declared the memory option,
-			// exactly like every other lift/lower site keys off be.mod (see
+			// names the memory the lift declared, exactly like every other
+			// lift/lower site keys off be.memMod (see
 			// e.g. guest_task.go's start, instance.go's invoke). t.be is nil
 			// only off the defensive path already guarded above; mod remains
 			// the fallback there.
 			memMod := mod
 			if t.be != nil {
-				memMod = t.be.mod
+				memMod = t.be.memMod
 			}
 			mem, memAvailable := memoryBytesOf(memMod)
 			if spills {
@@ -601,7 +602,7 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 					panic(fmt.Errorf("component/instance: task.return: result flattens beyond %d core value(s) and requires linear memory, but the core module exports no memory", abi.MaxFlatParams))
 				}
 				ptr := api.DecodeU32(stack[0])
-				val, err := abi.Load(mem, ptr, resultType, resolve)
+				val, err := abi.LoadEnc(mem, ptr, resultType, resolve, enc)
 				if err != nil {
 					panic(fmt.Errorf("component/instance: task.return: load spilled result: %w", err))
 				}
@@ -618,7 +619,7 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 				for i, k := range flatKinds {
 					coreVals[i] = abi.CoreValue{Kind: k, Bits: stack[i]}
 				}
-				val, err := abi.LiftFlat(coreVals, resultType, resolve, mem)
+				val, err := abi.LiftFlatEnc(coreVals, resultType, resolve, mem, enc)
 				putCoreValueSlice(coreValsPtr)
 				if err != nil {
 					panic(fmt.Errorf("component/instance: task.return: lift result: %w", err))

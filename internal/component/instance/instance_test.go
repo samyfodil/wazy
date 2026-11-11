@@ -423,7 +423,7 @@ func TestInstantiateComponent_ExportExternType(t *testing.T) {
 	comp.Exports[0].ExternType = 0x02 // value
 
 	_, err := instantiateComponent(ctx, r, comp, emptyCoreWasm)
-	requireErrContains(t, err, "only func exports")
+	requireErrContains(t, err, "exports only funcs and types")
 }
 
 func TestInstantiateComponent_ExportIndexOutOfRange(t *testing.T) {

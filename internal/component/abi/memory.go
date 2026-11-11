@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"unicode/utf8"
 
 	bintype "github.com/samyfodil/wazy/internal/component/binary"
 	"github.com/samyfodil/wazy/internal/u32"
@@ -53,6 +52,12 @@ type Realloc struct {
 	Ctx  context.Context
 	Call func(ctx context.Context, origPtr, origSize, align, newSize uint32) (uint32, error)
 	Mem  func() []byte
+	// Encoding is the string-encoding a string is lowered in.
+	Encoding Encoding
+	// MayLeave, when set, is the realloc's instance's may_leave flag, which
+	// is false while realloc runs, as LiftLowerContext.reallocate has it: an
+	// import, or a built-in that checks may_leave, traps.
+	MayLeave *bool
 }
 
 // Grow performs one allocation, threading Ctx into the cached Call.
@@ -63,7 +68,13 @@ func (r Realloc) Grow(origPtr, origSize, align, newSize uint32) (uint32, error) 
 	if r.Call == nil {
 		return 0, fmt.Errorf("component/abi: memory allocation requires a \"cabi_realloc\" export on the core module, which is not present")
 	}
-	return r.Call(r.Ctx, origPtr, origSize, align, newSize)
+	if r.MayLeave == nil {
+		return r.Call(r.Ctx, origPtr, origSize, align, newSize)
+	}
+	*r.MayLeave = false
+	ptr, err := r.Call(r.Ctx, origPtr, origSize, align, newSize)
+	*r.MayLeave = true
+	return ptr, err
 }
 
 // GrowMem is Grow plus the memory view that is valid AFTER the growth: it
@@ -90,23 +101,6 @@ func (r Realloc) GrowMem(mem []byte, origPtr, origSize, align, newSize uint32) (
 	return ptr, mem, nil
 }
 
-// checkAllocated verifies that [ptr, ptr+size) lies within mem, which MUST be
-// the view refreshed after the allocation (see GrowMem) -- checking against a
-// pre-grow snapshot rejects a pointer that is in fact perfectly valid, which is
-// the exact bug this helper exists to make hard to reintroduce.
-//
-// The add is wrap-checked: a guest realloc returning a high pointer, or a huge
-// size, would otherwise wrap around and sail through the length comparison. A
-// zero-size allocation landing at ptr == len(mem) stays legal -- an empty
-// string or empty list allocates nothing and some guests hand back the end
-// pointer for it.
-func checkAllocated(mem []byte, ptr, size uint32) error {
-	if ptr+size < ptr || uint32(len(mem)) < ptr+size {
-		return fmt.Errorf("allocated memory out of bounds: ptr=%d size=%d mem_len=%d", ptr, size, len(mem))
-	}
-	return nil
-}
-
 // ReallocFunc adapts a context-free allocator into a Realloc (the ctx is
 // ignored). For simple in-memory allocators -- notably tests -- that don't need
 // the call context. Mem is left nil: there is no module behind such an
@@ -122,13 +116,18 @@ func ReallocFunc(fn func(origPtr, origSize, align, newSize uint32) (uint32, erro
 // Load reads a value of the given type from memory at the given pointer.
 // This mirrors the canonical ABI load() function.
 func Load(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver) (Value, error) {
+	return LoadEnc(mem, ptr, t, resolve, UTF8)
+}
+
+// LoadEnc is Load for strings in enc.
+func LoadEnc(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver, enc Encoding) (Value, error) {
 	// Check alignment and bounds
 	align, err := Alignment(t, resolve)
 	if err != nil {
 		return nil, err
 	}
 	if ptr != Align(ptr, align) {
-		return nil, fmt.Errorf("load: pointer %d not aligned to %d", ptr, align)
+		return nil, errUnaligned("load: pointer", ptr, align)
 	}
 
 	size, err := Size(t, resolve)
@@ -139,26 +138,26 @@ func Load(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver) (Value, 
 		return nil, fmt.Errorf("load: buffer overflow: ptr=%d size=%d mem_len=%d", ptr, size, len(mem))
 	}
 
-	return loadValue(mem, ptr, t, resolve)
+	return loadValue(mem, ptr, t, resolve, enc)
 }
 
-func loadValue(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver) (Value, error) {
+func loadValue(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver, enc Encoding) (Value, error) {
 	switch desc := t.(type) {
 	case bintype.PrimitiveDesc:
-		return loadPrimitive(mem, ptr, desc.Prim)
+		return loadPrimitive(mem, ptr, desc.Prim, enc)
 
 	case bintype.ListDesc:
 		elemType, err := resolveType(&desc.Element, resolve)
 		if err != nil {
 			return nil, err
 		}
-		return loadList(mem, ptr, elemType, resolve)
+		return loadList(mem, ptr, elemType, resolve, enc)
 
 	case bintype.MapDesc:
 		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc): a
 		// map's Value is a []Value of two-element [key, value] pairs, the same
 		// shape loadList already produces for a list of tuples.
-		return loadList(mem, ptr, mapElemType(desc), resolve)
+		return loadList(mem, ptr, mapElemType(desc), resolve, enc)
 
 	case bintype.FixedListDesc:
 		// In place: n elements back to back where the list sits.
@@ -166,16 +165,16 @@ func loadValue(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver) (Va
 		if err != nil {
 			return nil, err
 		}
-		return loadAnyListFromRange(mem, ptr, desc.Length, elemType, resolve)
+		return loadAnyListFromRange(mem, ptr, desc.Length, elemType, resolve, enc)
 
 	case bintype.RecordDesc:
-		return loadRecord(mem, ptr, desc, resolve)
+		return loadRecord(mem, ptr, desc, resolve, enc)
 
 	case bintype.VariantDesc:
-		return loadVariant(mem, ptr, desc, resolve)
+		return loadVariant(mem, ptr, desc, resolve, enc)
 
 	case bintype.TupleDesc:
-		return loadTuple(mem, ptr, desc, resolve)
+		return loadTuple(mem, ptr, desc, resolve, enc)
 
 	case bintype.FlagsDesc:
 		return loadFlags(mem, ptr, desc)
@@ -188,10 +187,10 @@ func loadValue(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver) (Va
 		if err != nil {
 			return nil, err
 		}
-		return loadOption(mem, ptr, elemType, resolve)
+		return loadOption(mem, ptr, elemType, resolve, enc)
 
 	case bintype.ResultDesc:
-		return loadResult(mem, ptr, desc, resolve)
+		return loadResult(mem, ptr, desc, resolve, enc)
 
 	case bintype.OwnDesc, bintype.BorrowDesc, bintype.StreamDesc, bintype.FutureDesc:
 		// stream/future values are opaque i32 handles, same load as own/borrow.
@@ -202,7 +201,7 @@ func loadValue(mem []byte, ptr uint32, t bintype.TypeDesc, resolve Resolver) (Va
 	}
 }
 
-func loadPrimitive(mem []byte, ptr uint32, prim string) (Value, error) {
+func loadPrimitive(mem []byte, ptr uint32, prim string, enc Encoding) (Value, error) {
 	switch prim {
 	case "bool":
 		v, err := loadInt(mem, ptr, 1, false)
@@ -255,15 +254,15 @@ func loadPrimitive(mem []byte, ptr uint32, prim string) (Value, error) {
 		}
 		i := v.(uint32)
 		if i >= 0x110000 {
-			return nil, fmt.Errorf("load char: value %d out of range", i)
+			return nil, errInvalidChar(i)
 		}
 		if i >= 0xD800 && i <= 0xDFFF {
-			return nil, fmt.Errorf("load char: surrogate half %d not allowed", i)
+			return nil, errInvalidChar(i)
 		}
 		return rune(i), nil
 
 	case "string":
-		return loadString(mem, ptr)
+		return loadString(mem, ptr, enc)
 
 	case "error-context":
 		// Opaque i32 handle -- same load as own/borrow.
@@ -337,7 +336,7 @@ func readU32LE(mem []byte, ptr uint32) (uint32, error) {
 
 // loadString reads a string (ptr, length in UTF-8 bytes) from memory.
 // Currently supports UTF-8 only.
-func loadString(mem []byte, ptr uint32) (Value, error) {
+func loadString(mem []byte, ptr uint32, enc Encoding) (Value, error) {
 	// String is stored as: [ptr:4/8][len:4/8]
 	// For now, assuming 32-bit pointers (4 bytes each)
 	ptrSize := uint32(4)
@@ -351,35 +350,14 @@ func loadString(mem []byte, ptr uint32) (Value, error) {
 		return nil, err
 	}
 
-	s, err := loadStringFromRange(mem, strPtr, strLen)
+	s, err := loadStringFromRange(mem, strPtr, strLen, enc)
 	if err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-// loadStringFromRange reads a UTF-8 string of byteLen bytes starting at ptr.
-// This mirrors the canonical ABI's load_string_from_range() (definitions.py).
-// It is factored out of loadString so that the flat-ABI path (liftFlatString,
-// where ptr/len arrive as two separate core values instead of already being
-// packed together in memory) can reuse the exact same bytes-to-string logic
-// instead of a second implementation.
-func loadStringFromRange(mem []byte, ptr, byteLen uint32) (string, error) {
-	// UTF-8: byte length is the code unit length.
-	if uint32(len(mem)) < ptr+byteLen {
-		return "", fmt.Errorf("loadStringFromRange: string buffer overflow at ptr=%d len=%d mem_len=%d", ptr, byteLen, len(mem))
-	}
-	b := mem[ptr : ptr+byteLen]
-	// The canonical ABI's load_string_from_range traps on malformed UTF-8
-	// (invalid bytes or an incomplete trailing sequence) rather than lifting a
-	// lossy string -- definitions.py decodes with 'strict' and errors out.
-	if !utf8.Valid(b) {
-		return "", fmt.Errorf("loadStringFromRange: invalid utf-8 in string at ptr=%d len=%d", ptr, byteLen)
-	}
-	return string(b), nil
-}
-
-func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolver) (Value, error) {
+func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolver, enc Encoding) (Value, error) {
 	// List is stored as: [ptr:4/8][len:4/8]
 	// For now, assuming 32-bit pointers (4 bytes each)
 	ptrSize := uint32(4)
@@ -393,7 +371,7 @@ func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolve
 		return nil, err
 	}
 
-	return loadAnyListFromRange(mem, listPtr.(uint32), listLen.(uint32), elemType, resolve)
+	return loadAnyListFromRange(mem, listPtr.(uint32), listLen.(uint32), elemType, resolve, enc)
 }
 
 // loadAnyListFromRange is loadListFromRange behind the typed-slice rule: a
@@ -405,13 +383,13 @@ func loadList(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolve
 // Both lift directions go through here (loadList for the in-memory shape,
 // liftFlatList for the flat ABI) so the two shapes a consumer can observe for
 // one list type stay the same everywhere.
-func loadAnyListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc, resolve Resolver) (Value, error) {
+func loadAnyListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc, resolve Resolver, enc Encoding) (Value, error) {
 	if prim, ok := scalarPrim(elemType); ok {
 		if v, handled, err := liftScalarList(mem, ptr, length, prim); handled {
 			return v, err
 		}
 	}
-	return loadListFromRange(mem, ptr, length, elemType, resolve)
+	return loadListFromRange(mem, ptr, length, elemType, resolve, enc)
 }
 
 // loadListFromRange reads `length` elements of elemType starting at ptr.
@@ -420,7 +398,7 @@ func loadAnyListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeD
 // where ptr/len arrive as two separate core values instead of already being
 // packed together in memory) can reuse the exact same element-loading loop
 // instead of a second implementation.
-func loadListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc, resolve Resolver) ([]Value, error) {
+func loadListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc, resolve Resolver, enc Encoding) ([]Value, error) {
 	elemSize, err := Size(elemType, resolve)
 	if err != nil {
 		return nil, err
@@ -431,20 +409,13 @@ func loadListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc
 		return nil, err
 	}
 
-	// Check bounds
-	byteLen := length * elemSize
-	if uint32(len(mem)) < ptr+byteLen {
-		return nil, fmt.Errorf("loadListFromRange: list buffer overflow at ptr=%d len=%d mem_len=%d", ptr, byteLen, len(mem))
-	}
-
-	// Check alignment
-	if ptr != Align(ptr, elemAlign) {
-		return nil, fmt.Errorf("loadListFromRange: list pointer %d not aligned to %d", ptr, elemAlign)
+	if _, err := listSpan(mem, ptr, length, elemSize, elemAlign); err != nil {
+		return nil, err
 	}
 
 	result := make([]Value, length)
 	for i := range length {
-		v, err := loadValue(mem, ptr+i*elemSize, elemType, resolve)
+		v, err := loadValue(mem, ptr+i*elemSize, elemType, resolve, enc)
 		if err != nil {
 			return nil, fmt.Errorf("loadListFromRange[%d]: %w", i, err)
 		}
@@ -453,7 +424,7 @@ func loadListFromRange(mem []byte, ptr, length uint32, elemType bintype.TypeDesc
 	return result, nil
 }
 
-func loadRecord(mem []byte, ptr uint32, desc bintype.RecordDesc, resolve Resolver) (Value, error) {
+func loadRecord(mem []byte, ptr uint32, desc bintype.RecordDesc, resolve Resolver, enc Encoding) (Value, error) {
 	result := make([]Value, len(desc.Fields))
 	offset := ptr
 
@@ -469,7 +440,7 @@ func loadRecord(mem []byte, ptr uint32, desc bintype.RecordDesc, resolve Resolve
 		}
 		offset = Align(offset, fieldAlign)
 
-		v, err := loadValue(mem, offset, fieldType, resolve)
+		v, err := loadValue(mem, offset, fieldType, resolve, enc)
 		if err != nil {
 			return nil, fmt.Errorf("loadRecord: field %s: %w", field.Name, err)
 		}
@@ -485,7 +456,7 @@ func loadRecord(mem []byte, ptr uint32, desc bintype.RecordDesc, resolve Resolve
 	return result, nil
 }
 
-func loadVariant(mem []byte, ptr uint32, desc bintype.VariantDesc, resolve Resolver) (Value, error) {
+func loadVariant(mem []byte, ptr uint32, desc bintype.VariantDesc, resolve Resolver, enc Encoding) (Value, error) {
 	// Read discriminant
 	discType := DiscriminantType(len(desc.Cases))
 	discSize, err := sizePrimitive(discType)
@@ -500,7 +471,7 @@ func loadVariant(mem []byte, ptr uint32, desc bintype.VariantDesc, resolve Resol
 	caseIdx := discVal.(uint32)
 
 	if u32.OutOfRange(caseIdx, len(desc.Cases)) {
-		return nil, fmt.Errorf("loadVariant: case index %d out of range [0,%d)", caseIdx, len(desc.Cases))
+		return nil, errDiscriminant("variant", caseIdx, len(desc.Cases))
 	}
 
 	// Compute offset to payload
@@ -519,7 +490,7 @@ func loadVariant(mem []byte, ptr uint32, desc bintype.VariantDesc, resolve Resol
 		if err != nil {
 			return nil, err
 		}
-		payload, err = loadValue(mem, offset, caseType, resolve)
+		payload, err = loadValue(mem, offset, caseType, resolve, enc)
 		if err != nil {
 			return nil, fmt.Errorf("loadVariant case %d: %w", caseIdx, err)
 		}
@@ -528,7 +499,7 @@ func loadVariant(mem []byte, ptr uint32, desc bintype.VariantDesc, resolve Resol
 	return VariantValue{Disc: caseIdx, Payload: payload}, nil
 }
 
-func loadTuple(mem []byte, ptr uint32, desc bintype.TupleDesc, resolve Resolver) (Value, error) {
+func loadTuple(mem []byte, ptr uint32, desc bintype.TupleDesc, resolve Resolver, enc Encoding) (Value, error) {
 	result := make([]Value, len(desc.Elements))
 	offset := ptr
 
@@ -544,7 +515,7 @@ func loadTuple(mem []byte, ptr uint32, desc bintype.TupleDesc, resolve Resolver)
 		}
 		offset = Align(offset, elemAlign)
 
-		v, err := loadValue(mem, offset, elemType, resolve)
+		v, err := loadValue(mem, offset, elemType, resolve, enc)
 		if err != nil {
 			return nil, fmt.Errorf("loadTuple: element %d: %w", i, err)
 		}
@@ -595,13 +566,13 @@ func loadEnum(mem []byte, ptr uint32, desc bintype.EnumDesc) (Value, error) {
 
 	idx := caseIdx.(uint32)
 	if u32.OutOfRange(idx, len(desc.Cases)) {
-		return nil, fmt.Errorf("loadEnum: case index %d out of range [0,%d)", idx, len(desc.Cases))
+		return nil, errDiscriminant("enum", idx, len(desc.Cases))
 	}
 
 	return idx, nil
 }
 
-func loadOption(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolver) (Value, error) {
+func loadOption(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resolver, enc Encoding) (Value, error) {
 	// Option is a variant with discriminant (0=none, 1=some)
 	// Read discriminant (u8)
 	disc, err := loadInt(mem, ptr, 1, false)
@@ -625,17 +596,17 @@ func loadOption(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resol
 		return nil, nil
 	case 1:
 		// Some
-		x, err := loadValue(mem, offset, elemType, resolve)
+		x, err := loadValue(mem, offset, elemType, resolve, enc)
 		if _, nested := elemType.(bintype.OptionDesc); nested && err == nil {
 			return Some{x}, nil
 		}
 		return x, err
 	default:
-		return nil, fmt.Errorf("loadOption: invalid discriminant %d", discIdx)
+		return nil, errDiscriminant("option", discIdx, 2)
 	}
 }
 
-func loadResult(mem []byte, ptr uint32, desc bintype.ResultDesc, resolve Resolver) (Value, error) {
+func loadResult(mem []byte, ptr uint32, desc bintype.ResultDesc, resolve Resolver, enc Encoding) (Value, error) {
 	// Result is a variant with discriminant (0=ok, 1=err)
 	disc, err := loadInt(mem, ptr, 1, false)
 	if err != nil {
@@ -684,7 +655,7 @@ func loadResult(mem []byte, ptr uint32, desc bintype.ResultDesc, resolve Resolve
 			if err != nil {
 				return nil, err
 			}
-			payload, err = loadValue(mem, offset, okType, resolve)
+			payload, err = loadValue(mem, offset, okType, resolve, enc)
 			if err != nil {
 				return nil, fmt.Errorf("loadResult ok: %w", err)
 			}
@@ -698,14 +669,14 @@ func loadResult(mem []byte, ptr uint32, desc bintype.ResultDesc, resolve Resolve
 			if err != nil {
 				return nil, err
 			}
-			payload, err = loadValue(mem, offset, errType, resolve)
+			payload, err = loadValue(mem, offset, errType, resolve, enc)
 			if err != nil {
 				return nil, fmt.Errorf("loadResult err: %w", err)
 			}
 		}
 		return ResultValue{IsErr: true, Payload: payload}, nil
 	default:
-		return nil, fmt.Errorf("loadResult: invalid discriminant %d", discIdx)
+		return nil, errDiscriminant("result", discIdx, 2)
 	}
 }
 
@@ -967,43 +938,6 @@ func storeString(mem []byte, ptr uint32, s string, realloc Realloc) ([]byte, err
 	return mem, nil
 }
 
-// allocStoreString allocates room for the UTF-8 bytes of s via realloc,
-// copies them into mem, and returns (dataPtr, byteLen). This mirrors the
-// canonical ABI's store_string_into_range() (definitions.py). It is shared
-// by storeString (the Store/Load path, which additionally writes the
-// (ptr,len) pair into memory at a record/list slot) and lowerFlatString (the
-// flat ABI path, which returns (ptr,len) directly as core values) so there
-// is exactly one implementation of "allocate + copy string bytes".
-//
-// The third return is the memory view valid AFTER the allocation (see
-// Realloc.GrowMem): the bounds check and the copy below both run against it,
-// never against the caller's pre-grow snapshot, and callers rebind from it.
-func allocStoreString(mem []byte, s string, realloc Realloc) (uint32, uint32, []byte, error) {
-	// Allocate memory for string bytes (UTF-8)
-	strBytes := []byte(s)
-	// A Go string longer than 4 GiB cannot be addressed by the 32-bit
-	// canonical ABI at all; truncating its length here would copy a prefix and
-	// hand the guest a wrong length, so refuse it outright.
-	if uint64(len(strBytes)) > math.MaxUint32 {
-		return 0, 0, mem, fmt.Errorf("string of %d bytes exceeds the 32-bit canonical ABI limit", len(strBytes))
-	}
-	byteLen := uint32(len(strBytes))
-
-	newPtr, mem, err := realloc.GrowMem(mem, 0, 0, 1, byteLen)
-	if err != nil {
-		return 0, 0, mem, fmt.Errorf("realloc failed: %w", err)
-	}
-
-	if err := checkAllocated(mem, newPtr, byteLen); err != nil {
-		return 0, 0, mem, err
-	}
-
-	// Copy string bytes to memory
-	copy(mem[newPtr:newPtr+byteLen], strBytes)
-
-	return newPtr, byteLen, mem, nil
-}
-
 // storeList writes the (ptr,len) pair for a list at ptr, after allocating and
 // filling the element region. Same staleness shape as storeString, only worse:
 // a list of aggregates grows once for the element array and again per element,
@@ -1053,11 +987,8 @@ func allocStoreBytes(mem []byte, b []byte, realloc Realloc) (uint32, uint32, []b
 	byteLen := uint32(len(b))
 	// GrowMem, not Grow: the copy below must target the array the guest's
 	// allocator left live, not the one this function was handed.
-	newPtr, mem, err := realloc.GrowMem(mem, 0, 0, 1, byteLen)
+	newPtr, mem, err := realloc.allocate(mem, 0, 0, 1, byteLen, "list")
 	if err != nil {
-		return 0, 0, mem, fmt.Errorf("realloc failed: %w", err)
-	}
-	if err := checkAllocated(mem, newPtr, byteLen); err != nil {
 		return 0, 0, mem, err
 	}
 	copy(mem[newPtr:newPtr+byteLen], b)
@@ -1098,12 +1029,8 @@ func allocStoreList(mem []byte, list []Value, elemType bintype.TypeDesc, resolve
 		return 0, 0, mem, fmt.Errorf("list length %d overflows at %d bytes per element", length, elemSize)
 	}
 	byteLen := length * elemSize
-	newPtr, mem, err := realloc.GrowMem(mem, 0, 0, elemAlign, byteLen)
+	newPtr, mem, err := realloc.allocate(mem, 0, 0, elemAlign, byteLen, "list")
 	if err != nil {
-		return 0, 0, mem, fmt.Errorf("realloc failed: %w", err)
-	}
-
-	if err := checkAllocated(mem, newPtr, byteLen); err != nil {
 		return 0, 0, mem, err
 	}
 

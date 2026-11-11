@@ -2,6 +2,8 @@ package instance
 
 import (
 	"testing"
+
+	"github.com/samyfodil/wazy/internal/component/abi"
 )
 
 // addReadableStreamEnd puts a readable end of s into in's table, as lowering a
@@ -50,7 +52,7 @@ func TestStreamForward_HostWriterFollowsTheForward(t *testing.T) {
 		}
 	}
 
-	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
+	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	if out := callBuiltin(asyncRead, uint64(rB), 0, 2); uint32(out[0]) != blockedSentinel {
 		t.Fatalf("read = %#x, want BLOCKED", out[0])
 	}
@@ -79,8 +81,8 @@ func TestStreamForward_CarriesALivePartialWrite(t *testing.T) {
 	in := newAsyncInst()
 	rA, wA := newBareStreamEnds(in)
 	rB, wB := newBareStreamEnds(in)
-	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
-	asyncWrite := streamCopyHostFunc(in, sideWritable, eventStreamWrite, nil, 0, 0, true, true, nil, nil)
+	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
+	asyncWrite := streamCopyHostFunc(in, sideWritable, eventStreamWrite, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 
 	if out := callBuiltin(asyncWrite, uint64(wA), 0, 4); uint32(out[0]) != blockedSentinel {
 		t.Fatalf("write = %#x, want BLOCKED", out[0])
@@ -112,7 +114,7 @@ func TestFutureForward_HostWriterFollowsTheForward(t *testing.T) {
 	rB, wB := newBareFutureEnds(in)
 	callBuiltin(futureForwardHostFunc(in, nil), uint64(rA), uint64(wB))
 
-	asyncRead := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil)
+	asyncRead := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	if out := callBuiltin(asyncRead, uint64(rB), 0); uint32(out[0]) != blockedSentinel {
 		t.Fatalf("read = %#x, want BLOCKED", out[0])
 	}

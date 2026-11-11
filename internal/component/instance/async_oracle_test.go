@@ -544,7 +544,7 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			if kind == "stream.write" {
 				side, evCode = sideWritable, eventStreamWrite
 			}
-			def := streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, mod, nil)
+			def := streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, mod, nil, abi.UTF8)
 			stack := []uint64{uint64(i), uint64(opInt(op, "ptr")), uint64(opInt(op, "n"))}
 			def.fn.Call(ctx, mod, stack)
 			appendRet(k, []uint32{uint32(stack[0])})
@@ -557,7 +557,7 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			if kind == "future.write" {
 				side, evCode = sideWritable, eventFutureWrite
 			}
-			def := futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, mod, nil)
+			def := futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, mod, nil, abi.UTF8)
 			stack := []uint64{uint64(i), uint64(opInt(op, "ptr"))}
 			def.fn.Call(ctx, mod, stack)
 			appendRet(k, []uint32{uint32(stack[0])})
@@ -611,7 +611,7 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			appendRet(k, nil)
 
 		case "error-context.new":
-			def := errorContextNewHostFunc(in, mod)
+			def := errorContextNewHostFunc(in, mod, abi.UTF8)
 			stack := []uint64{uint64(opInt(op, "ptr")), uint64(opInt(op, "len"))}
 			def.fn.Call(ctx, mod, stack)
 			h := uint32(stack[0])

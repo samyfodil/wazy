@@ -123,7 +123,7 @@ func TestStoreStringPtrStoreOverflow(t *testing.T) {
 
 func TestLoadStringHeaderOverflow(t *testing.T) {
 	mem := make([]byte, 4)
-	if _, err := loadString(mem, 0); err == nil {
+	if _, err := loadString(mem, 0, UTF8); err == nil {
 		t.Error("expected error for loadString header overflow")
 	}
 }
@@ -133,7 +133,7 @@ func TestLoadStringDataOutOfBounds(t *testing.T) {
 	// header at 0: ptr=100 (out of range), len=5
 	mustStoreInt(t, mem, 0, uint32(100), 4)
 	mustStoreInt(t, mem, 4, uint32(5), 4)
-	if _, err := loadString(mem, 0); err == nil {
+	if _, err := loadString(mem, 0, UTF8); err == nil {
 		t.Error("expected error for loadString data out of bounds")
 	}
 }
@@ -191,7 +191,7 @@ func TestLoadListSizeError(t *testing.T) {
 	// header ptr=0,len=1 with unsupported element -> Size errors
 	mustStoreInt(t, mem, 0, uint32(0), 4)
 	mustStoreInt(t, mem, 4, uint32(1), 4)
-	if _, err := loadList(mem, 0, bintype.FuncDesc{}, nil); err == nil {
+	if _, err := loadList(mem, 0, bintype.FuncDesc{}, nil, UTF8); err == nil {
 		t.Error("expected error for loadList element Size failure")
 	}
 }
@@ -205,7 +205,7 @@ func TestLoadListElementError(t *testing.T) {
 	// string header at offset 8: data ptr=100 (out of range), len=5
 	mustStoreInt(t, mem, 8, uint32(100), 4)
 	mustStoreInt(t, mem, 12, uint32(5), 4)
-	if _, err := loadList(mem, 0, bintype.PrimitiveDesc{Prim: "string"}, nil); err == nil {
+	if _, err := loadList(mem, 0, bintype.PrimitiveDesc{Prim: "string"}, nil, UTF8); err == nil {
 		t.Error("expected error for loadList element (string) load failure")
 	}
 }
@@ -221,7 +221,7 @@ func TestStoreValueUnsupportedType(t *testing.T) {
 
 func TestLoadValueUnsupportedType(t *testing.T) {
 	mem := make([]byte, 8)
-	if _, err := loadValue(mem, 0, bintype.FuncDesc{}, nil); err == nil {
+	if _, err := loadValue(mem, 0, bintype.FuncDesc{}, nil, UTF8); err == nil {
 		t.Error("expected error for loadValue unsupported type")
 	}
 }
@@ -238,7 +238,7 @@ func TestStoreValueListBadElementRef(t *testing.T) {
 func TestLoadValueListBadElementRef(t *testing.T) {
 	mem := make([]byte, 8)
 	desc := bintype.ListDesc{Element: bintype.TypeRef{}}
-	if _, err := loadValue(mem, 0, desc, nil); err == nil {
+	if _, err := loadValue(mem, 0, desc, nil, UTF8); err == nil {
 		t.Error("expected error for loadValue list bad element ref")
 	}
 }
@@ -254,7 +254,7 @@ func TestStoreValueOptionBadElementRef(t *testing.T) {
 func TestLoadValueOptionBadElementRef(t *testing.T) {
 	mem := make([]byte, 8)
 	desc := bintype.OptionDesc{Element: bintype.TypeRef{}}
-	if _, err := loadValue(mem, 0, desc, nil); err == nil {
+	if _, err := loadValue(mem, 0, desc, nil, UTF8); err == nil {
 		t.Error("expected error for loadValue option bad element ref")
 	}
 }
@@ -276,7 +276,7 @@ func TestStoreLoadHandleRoundTrip(t *testing.T) {
 	if _, err := storeValue(mem, 0, bintype.OwnDesc{}, uint32(7), 0, nil, okRealloc); err != nil {
 		t.Fatalf("storeValue own handle: %v", err)
 	}
-	v, err := loadValue(mem, 0, bintype.OwnDesc{}, nil)
+	v, err := loadValue(mem, 0, bintype.OwnDesc{}, nil, UTF8)
 	if err != nil {
 		t.Fatalf("loadValue own handle: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestLoadRecordFieldLoadError(t *testing.T) {
 		{Name: "a", Type: bintype.TypeRef{Primitive: "u32"}},
 		{Name: "b", Type: bintype.TypeRef{Primitive: "u32"}},
 	}}
-	if _, err := loadRecord(mem, 0, desc, nil); err == nil {
+	if _, err := loadRecord(mem, 0, desc, nil, UTF8); err == nil {
 		t.Error("expected error for loadRecord field load out of bounds")
 	}
 }
@@ -351,7 +351,7 @@ func TestLoadTupleElementLoadError(t *testing.T) {
 		{Primitive: "u32"},
 		{Primitive: "u32"},
 	}}
-	if _, err := loadTuple(mem, 0, desc, nil); err == nil {
+	if _, err := loadTuple(mem, 0, desc, nil, UTF8); err == nil {
 		t.Error("expected error for loadTuple element load out of bounds")
 	}
 }
@@ -387,7 +387,7 @@ func TestLoadVariantPayloadLoadError(t *testing.T) {
 	desc := bintype.VariantDesc{Cases: []bintype.VariantCase{
 		{Name: "a", Type: &bintype.TypeRef{Primitive: "u32"}},
 	}}
-	if _, err := loadVariant(mem, 0, desc, nil); err == nil {
+	if _, err := loadVariant(mem, 0, desc, nil, UTF8); err == nil {
 		t.Error("expected error for loadVariant payload load out of bounds")
 	}
 }
@@ -436,7 +436,7 @@ func TestStoreOptionPayloadError(t *testing.T) {
 func TestLoadOptionInvalidDiscriminant(t *testing.T) {
 	mem := make([]byte, 8)
 	mem[0] = 5 // invalid option discriminant
-	if _, err := loadOption(mem, 0, bintype.PrimitiveDesc{Prim: "u32"}, nil); err == nil {
+	if _, err := loadOption(mem, 0, bintype.PrimitiveDesc{Prim: "u32"}, nil, UTF8); err == nil {
 		t.Error("expected error for loadOption invalid discriminant")
 	}
 }
@@ -444,7 +444,7 @@ func TestLoadOptionInvalidDiscriminant(t *testing.T) {
 func TestLoadOptionPayloadError(t *testing.T) {
 	mem := make([]byte, 2)
 	mem[0] = 1 // some
-	if _, err := loadOption(mem, 0, bintype.PrimitiveDesc{Prim: "u32"}, nil); err == nil {
+	if _, err := loadOption(mem, 0, bintype.PrimitiveDesc{Prim: "u32"}, nil, UTF8); err == nil {
 		t.Error("expected error for loadOption payload load out of bounds")
 	}
 }
@@ -497,7 +497,7 @@ func TestLoadResultOkAlignmentError(t *testing.T) {
 	mem := make([]byte, 8)
 	mem[0] = 0 // ok
 	desc := bintype.ResultDesc{Ok: &bintype.TypeRef{TypeIndex: u32ptr(0)}}
-	if _, err := loadResult(mem, 0, desc, funcResolve); err == nil {
+	if _, err := loadResult(mem, 0, desc, funcResolve, UTF8); err == nil {
 		t.Error("expected error for loadResult ok alignment failure")
 	}
 }
@@ -506,7 +506,7 @@ func TestLoadResultErrAlignmentError(t *testing.T) {
 	mem := make([]byte, 8)
 	mem[0] = 1 // err
 	desc := bintype.ResultDesc{Err: &bintype.TypeRef{TypeIndex: u32ptr(0)}}
-	if _, err := loadResult(mem, 0, desc, funcResolve); err == nil {
+	if _, err := loadResult(mem, 0, desc, funcResolve, UTF8); err == nil {
 		t.Error("expected error for loadResult err alignment failure")
 	}
 }
@@ -518,7 +518,7 @@ func TestLoadResultInvalidDiscriminant(t *testing.T) {
 		Ok:  &bintype.TypeRef{Primitive: "u32"},
 		Err: &bintype.TypeRef{Primitive: "u32"},
 	}
-	if _, err := loadResult(mem, 0, desc, nil); err == nil {
+	if _, err := loadResult(mem, 0, desc, nil, UTF8); err == nil {
 		t.Error("expected error for loadResult invalid discriminant")
 	}
 }
@@ -527,7 +527,7 @@ func TestLoadResultOkPayloadError(t *testing.T) {
 	mem := make([]byte, 2) // disc byte + not enough for u32 payload
 	mem[0] = 0
 	desc := bintype.ResultDesc{Ok: &bintype.TypeRef{Primitive: "u32"}}
-	if _, err := loadResult(mem, 0, desc, nil); err == nil {
+	if _, err := loadResult(mem, 0, desc, nil, UTF8); err == nil {
 		t.Error("expected error for loadResult ok payload load out of bounds")
 	}
 }
@@ -536,7 +536,7 @@ func TestLoadResultErrPayloadError(t *testing.T) {
 	mem := make([]byte, 2)
 	mem[0] = 1
 	desc := bintype.ResultDesc{Err: &bintype.TypeRef{Primitive: "u32"}}
-	if _, err := loadResult(mem, 0, desc, nil); err == nil {
+	if _, err := loadResult(mem, 0, desc, nil, UTF8); err == nil {
 		t.Error("expected error for loadResult err payload load out of bounds")
 	}
 }

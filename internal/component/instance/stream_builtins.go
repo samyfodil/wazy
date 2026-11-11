@@ -281,7 +281,7 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		return futureNewHostFunc(in, elemDesc, elemSz, align, numeric), nil
 
 	case binary.CanonKindStreamRead, binary.CanonKindStreamWrite:
-		memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		memMod, reallocFn, enc, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 		if merr != nil {
 			return hostFuncDef{}, merr
 		}
@@ -298,10 +298,10 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 			// nested-driving. See guestTask.promoted.
 			in.mayBlockSync = true
 		}
-		return streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn), nil
+		return streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn, enc), nil
 
 	case binary.CanonKindFutureRead, binary.CanonKindFutureWrite:
-		memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		memMod, reallocFn, enc, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 		if merr != nil {
 			return hostFuncDef{}, merr
 		}
@@ -313,7 +313,7 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		if !async {
 			in.mayBlockSync = true // see the stream.read/write case above
 		}
-		return futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn), nil
+		return futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn, enc), nil
 
 	case binary.CanonKindStreamCancelRead, binary.CanonKindStreamCancelWrite:
 		side, evCode := sideReadable, eventStreamRead
@@ -456,7 +456,7 @@ func futureNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 // stream.drop-readable's trap_if(copying()) fire on a completed-but-
 // undelivered copy, and what makes stream.cancel-read racing a completion
 // deliver COMPLETED instead of CANCELLED.
-func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc binary.TypeDesc, elemSz, align uint32, numeric, async bool, memMod api.Module, reallocFn api.Function) hostFuncDef {
+func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc binary.TypeDesc, elemSz, align uint32, numeric, async bool, memMod api.Module, reallocFn api.Function, enc abi.Encoding) hostFuncDef {
 	name := "stream.write"
 	if side == sideReadable {
 		name = "stream.read"
@@ -502,6 +502,7 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 		} else if m != nil {
 			realloc = reallocOf(ctx, m)
 		}
+		realloc.Encoding, realloc.MayLeave = enc, &in.mayLeave
 
 		buf, err := newGuestBuffer(in, m, realloc, in.resolve, elemDesc, elemSz, align, numeric, ptr, n)
 		if err != nil {
@@ -610,7 +611,7 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 // future.write (0x17): the same skeleton as streamCopyHostFunc minus n (core
 // sig (i32, i32) -> i32; buffer length pinned to 1), minus onCopy (no partial
 // progress), and with the raw result as payload (no progress shift).
-func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc binary.TypeDesc, elemSz, align uint32, numeric, async bool, memMod api.Module, reallocFn api.Function) hostFuncDef {
+func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc binary.TypeDesc, elemSz, align uint32, numeric, async bool, memMod api.Module, reallocFn api.Function, enc abi.Encoding) hostFuncDef {
 	name := "future.write"
 	if side == sideReadable {
 		name = "future.read"
@@ -648,6 +649,7 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 		} else if m != nil {
 			realloc = reallocOf(ctx, m)
 		}
+		realloc.Encoding, realloc.MayLeave = enc, &in.mayLeave
 
 		buf, err := newGuestBuffer(in, m, realloc, in.resolve, elemDesc, elemSz, align, numeric, ptr, 1)
 		if err != nil {

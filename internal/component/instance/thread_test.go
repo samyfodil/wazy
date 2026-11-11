@@ -46,7 +46,7 @@ func TestThreadYieldHostFunc_BindSetsPromotionGate(t *testing.T) {
 // resolution.
 func TestThreadYieldHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		callThreadYield(in, binary.Canon{})
 	})
 }
@@ -181,7 +181,7 @@ func TestThreadIndexHostFunc_BindSetsPromotionGate(t *testing.T) {
 
 func TestThreadIndexHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		callThreadIndex(in)
 	})
 }
@@ -256,7 +256,7 @@ func TestThreadSuspendHostFunc_BindSetsPromotionGate(t *testing.T) {
 
 func TestThreadSuspendHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		callThreadSuspend(in, binary.Canon{})
 	})
 }
@@ -556,7 +556,7 @@ func TestThreadNewIndirectHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	defer closeFn()
 	in := &Instance{sched: &sched{}, mayLeave: false, activeTask: &task{}}
 	def := bindThreadFuncTableNewIndirect(t, in, mod)
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		def.fn.Call(context.Background(), nil, []uint64{0, 0})
 	})
 }
@@ -1086,7 +1086,7 @@ func TestThreadYieldThenResumeHostFunc_BindSetsPromotionGate(t *testing.T) {
 func TestThreadYieldThenResumeHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
 	def := threadYieldThenResumeHostFunc(in, binary.Canon{})
-	requirePanicContains(t, "may not be left", func() { callThreadYieldThenResume(def, 1) })
+	requirePanicContains(t, "cannot leave component instance", func() { callThreadYieldThenResume(def, 1) })
 }
 
 func TestThreadYieldThenResumeHostFunc_BadIndexTraps(t *testing.T) {

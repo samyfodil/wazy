@@ -35,7 +35,7 @@ func TestWaitableSetNewHostFunc(t *testing.T) {
 
 func TestWaitableSetNew_MayLeaveFalseTraps(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false, resources: newHandleTable()}
-	requirePanicContains(t, "may not be left", func() { callBuiltin(waitableSetNewHostFunc(in), 0) })
+	requirePanicContains(t, "cannot leave component instance", func() { callBuiltin(waitableSetNewHostFunc(in), 0) })
 }
 
 func TestWaitableJoin_IntoSetOutOfSetAndTraps(t *testing.T) {

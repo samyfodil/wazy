@@ -360,8 +360,8 @@ func (gt *guestTask) firstRunBody() error {
 		}
 	}
 
-	mem, memAvailable := memoryBytesOf(be.mod)
-	realloc := cachedReallocOf(gt.ctx, be)
+	mem, memAvailable := memoryBytesOf(be.memMod)
+	realloc := cachedReallocOf(gt.ctx, gt.in, be)
 
 	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
 	*coreArgsPtr = (*coreArgsPtr)[:0]

@@ -145,8 +145,8 @@ func (st *stackfulTask) run() error {
 		}
 	}
 
-	mem, memAvailable := memoryBytesOf(be.mod)
-	realloc := cachedReallocOf(st.ctx, be)
+	mem, memAvailable := memoryBytesOf(be.memMod)
+	realloc := cachedReallocOf(st.ctx, st.in, be)
 
 	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
 	*coreArgsPtr = (*coreArgsPtr)[:0]
@@ -203,7 +203,7 @@ func (st *stackfulTask) run() error {
 	// ran, replacing the backing array (and possibly pooling the old one), so
 	// the pre-call slice can no longer be trusted for lifting. Same reasoning
 	// as invoke's re-fetch in instance.go.
-	mem, memAvailable = memoryBytesOf(be.mod)
+	mem, memAvailable = memoryBytesOf(be.memMod)
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, st.exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)
@@ -221,7 +221,7 @@ func (st *stackfulTask) run() error {
 			in.leaveRunOf(t)
 			return st.fail(fmt.Errorf("component/instance: export %q: post-return core func %q not found", st.exportName, be.postReturnFuncName))
 		}
-		if err := be.postReturnFn.CallWithStack(st.ctx, rawResults); err != nil {
+		if err := in.callPostReturn(st.ctx, be, rawResults); err != nil {
 			putUint64Slice(stackPtr)
 			in.leaveRunOf(t)
 			in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc

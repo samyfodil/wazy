@@ -959,7 +959,7 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset = off
 			canon.Opts = opts
 
-		case CanonKindResourceNew, CanonKindResourceDrop, CanonKindResourceRep, CanonKindResourceDropAsync: // typeidx
+		case CanonKindResourceNew, CanonKindResourceDrop, CanonKindResourceRep: // typeidx
 			typeIdx, n, err := leb128.LoadUint32(buf[offset:])
 			if err != nil {
 				return nil, offset, fmt.Errorf("canon[%d] type index: %w", i, err)
@@ -1087,11 +1087,6 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			offset += int(n)
 			canon.MemIdx = memIdx
 
-		// --- thread.* builtins (decode only -- see CanonKindThreadYield's
-		// doc: no execution support exists; these five are decoded so a
-		// component that merely DECLARES one, or traps before ever calling
-		// it, doesn't fail loud at decode time for no reason). ---
-
 		case CanonKindThreadIndex: // thread.index: no payload
 
 		case CanonKindThreadNewIndirect: // thread.new-indirect: ft:typeidx tbl:core:tableidx
@@ -1121,8 +1116,33 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			}
 			offset = off
 
+		case CanonKindThreadSpawnRef, CanonKindThreadSpawnIndirect, CanonKindThreadAvailableParallelism: // sh?:bool ...
+			shared, off, err := decodeBool(buf, offset)
+			if err != nil {
+				return nil, off, fmt.Errorf("canon[%d] shared?: %w", i, err)
+			}
+			offset = off
+			canon.Shared = shared
+			if kind == CanonKindThreadAvailableParallelism {
+				break
+			}
+			ft, n, err := leb128.LoadUint32(buf[offset:])
+			if err != nil {
+				return nil, offset, fmt.Errorf("canon[%d] functype index: %w", i, err)
+			}
+			offset += int(n)
+			canon.TypeIdx = ft
+			if kind == CanonKindThreadSpawnIndirect {
+				tbl, n, err := leb128.LoadUint32(buf[offset:])
+				if err != nil {
+					return nil, offset, fmt.Errorf("canon[%d] table index: %w", i, err)
+				}
+				offset += int(n)
+				canon.TableIdx = tbl
+			}
+
 		default:
-			return nil, offset, fmt.Errorf("canon[%d]: async canon kind %#x not yet supported", i, kind)
+			return nil, offset, fmt.Errorf("canon[%d]: unknown canon kind %#x", i, kind)
 		}
 
 		canons[i] = canon
@@ -1134,16 +1154,12 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 	return canons, offset, nil
 }
 
-// decodeBool reads a single bool byte (0x00 = false, 0x01 = true), used by
-// several async canon payloads (subtask.cancel's async_, waitable-set.wait/
-// poll's cancellable, stream/future cancel-read/-write's async_).
 // expectReservedZero consumes a byte the grammar fixes at 0x00.
 //
-// Both positions that use it once held a cancellable immediate, so a component
-// built before component-model#716 has 0x01 there. Rejecting it is deliberate:
-// the flag meant "this suspension may NOT be cancelled", which is no longer
-// expressible, and silently reading it as one would give that module the
-// opposite of the behaviour the current specification defines.
+// Every position that uses it held a cancellable immediate until
+// component-model#716, so a component built before then may have 0x01 there.
+// It is rejected rather than read: the flag selected a cancellation behavior
+// the specification no longer has.
 func expectReservedZero(buf []byte, offset int) (int, error) {
 	if offset >= len(buf) {
 		return offset, ErrTruncatedBinary
@@ -1155,6 +1171,9 @@ func expectReservedZero(buf []byte, offset int) (int, error) {
 	return offset + 1, nil
 }
 
+// decodeBool reads a single bool byte (0x00 = false, 0x01 = true), used by
+// several async canon payloads (subtask.cancel's async_, stream/future
+// cancel-read/-write's async_, thread.spawn-*'s shared?).
 func decodeBool(buf []byte, offset int) (bool, int, error) {
 	if offset >= len(buf) {
 		return false, offset, ErrTruncatedBinary

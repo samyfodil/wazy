@@ -110,7 +110,7 @@ func TestLiftStepMatchesLiftFlat(t *testing.T) {
 			}
 
 			refVal, refErr := LiftFlat(core, desc, battery.resolve, mem)
-			step, compErr := CompileLift(desc, battery.resolve)
+			step, compErr := CompileLift(desc, battery.resolve, UTF8)
 			if compErr != nil {
 				t.Fatalf("CompileLift: %v", compErr)
 			}

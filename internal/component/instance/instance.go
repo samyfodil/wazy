@@ -468,9 +468,11 @@ func (in *Instance) WASICalls() []string { return in.wasiCalls }
 // it and to the module that provides the linear memory / cabi_realloc used to
 // lower parameters and lift results across the call.
 type boundExport struct {
-	mod      api.Module      // exports funcName; its Memory() backs lower/lift
+	mod      api.Module      // exports funcName
+	memMod   api.Module      // holds the memory lowering and lifting use; mod unless the lift names another
 	funcName string          // core export name to call
 	fd       binary.FuncDesc // component-level func type (lift signature)
+	enc      abi.Encoding    // the lift's string-encoding
 
 	// resolve is the type resolver fd's own TypeRefs were resolved through at
 	// bind time (finalizeBoundExport) -- i.e. the DEFINING component's own
@@ -641,7 +643,7 @@ type boundExport struct {
 	// cachedReallocOf must stay a plain struct literal with no closure
 	// allocation on the hot lowering path.
 	//
-	// It is built from be.mod, NEVER from be.reallocMod. When a canon lift's
+	// It is built from be.memMod, NEVER from be.reallocMod. When a canon lift's
 	// realloc option targets a different core instance (see reallocMod's doc,
 	// cross-abi-calls.wast's $Memory/$Core split) the realloc lives on one
 	// module and the MEMORY being written on another; taking the accessor from
@@ -695,6 +697,7 @@ type boundExport struct {
 	resultFlatKinds  []string
 	resultStep       abi.LiftStep // compiled result-lift plan (see abi.CompileLift)
 	resultNest       *asyncNest   // the streams, futures and error contexts nested in the result
+	resultHasOwn     bool         // the result contains an own<T>, which liftResult checks
 	resultErr        error
 }
 
@@ -736,6 +739,7 @@ type boundExportABI struct {
 	resultFlatKinds  []string
 	resultStep       abi.LiftStep
 	resultNest       *asyncNest
+	resultHasOwn     bool
 	resultErr        error
 }
 
@@ -743,7 +747,7 @@ type boundExportABI struct {
 // to do inline. Pure (no per-instance state); resolution/flatten errors are
 // recorded in the returned struct rather than surfaced, preserving
 // finalizeBoundExport's deliberate "never fails, surfaces at call time" contract.
-func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExportABI {
+func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver, enc abi.Encoding) *boundExportABI {
 	m := &boundExportABI{}
 	m.coreParamsWant, m.coreResultsWant, m.flattenErr = abi.FlattenFunc(fd, resolve, "lift")
 
@@ -815,13 +819,14 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 		m.resultType = rt
 		m.resultNest = newAsyncNest(rt, resolve)
 		m.resultUsesMemory = usesMemory(rt, resolve)
+		m.resultHasOwn = typeContainsResource(rt, resolve, 0)
 		flatKinds, err := abi.Flatten(rt, resolve)
 		if err != nil {
 			m.resultErr = err
 			return m
 		}
 		m.resultFlatKinds = flatKinds
-		step, err := abi.CompileLift(rt, resolve)
+		step, err := abi.CompileLift(rt, resolve, enc)
 		if err != nil {
 			m.resultErr = err
 			return m
@@ -1258,16 +1263,19 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	}
 	be.reallocFn = rmod.ExportedFunction(reallocName)
 	be.reallocCall = coreReallocCall(be.reallocFn)
-	be.memFn = memAccessorOf(be.mod) // be.mod, not rmod -- see memFn's doc
+	if be.memMod == nil {
+		be.memMod = be.mod
+	}
+	be.memFn = memAccessorOf(be.memMod) // not rmod -- see memFn's doc
 	if be.coreFn != nil {
 		be.coreResultCount = len(be.coreFn.Definition().ResultTypes())
 	}
 
 	var m *boundExportABI
 	if abiCache != nil && comp != nil {
-		m = abiCache.abiFor(comp, funcIdx, func() *boundExportABI { return computeBoundExportABI(be.fd, resolve) })
+		m = abiCache.abiFor(comp, funcIdx, func() *boundExportABI { return computeBoundExportABI(be.fd, resolve, be.enc) })
 	} else {
-		m = computeBoundExportABI(be.fd, resolve)
+		m = computeBoundExportABI(be.fd, resolve, be.enc)
 	}
 
 	be.coreParamsWant, be.coreResultsWant, be.flattenErr = m.coreParamsWant, m.coreResultsWant, m.flattenErr
@@ -1286,7 +1294,7 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	be.paramsSpill, be.paramTuple = m.paramsSpill, m.paramTuple
 
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
-	be.resultStep, be.resultNest = m.resultStep, m.resultNest
+	be.resultStep, be.resultNest, be.resultHasOwn = m.resultStep, m.resultNest, m.resultHasOwn
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
@@ -1422,6 +1430,11 @@ func needsImportPath(comp *binary.Component) bool {
 	if len(comp.Instances) > 0 {
 		return true
 	}
+	for _, exp := range comp.Exports {
+		if exp.ExternType != ctSortFunc && exp.ExternType != ctSortType {
+			return true
+		}
+	}
 	for _, cn := range comp.Canons {
 		if cn.Kind != 0x00 { // anything other than canon lift needs the general wiring path
 			return true
@@ -1468,7 +1481,11 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		return nil, err
 	}
 
-	core, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig())
+	// Anonymous, as the graph path's are: a component's core modules never
+	// enter the runtime's namespace, so two components embedding modules of
+	// one name coexist. And with no start functions but the module's own
+	// start section, which is all the component model runs.
+	core, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: instantiate embedded core module: %w", coreLinkError(comp, 0, err))
 	}
@@ -1510,6 +1527,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 			mod:      core,
 			funcName: coreFuncIdx[canon.CoreFuncIdx],
 			fd:       td.(binary.FuncDesc), // validated by validateCanons
+			enc:      canonEncoding(canon),
 		}
 		finalizeBoundExport(be, resolve, nil, nil, 0) // trivial path: no CompileCache
 		exports[name] = be
@@ -1732,8 +1750,11 @@ func validateCanons(comp *binary.Component, coreFuncIdx []string) error {
 func buildExportIndex(comp *binary.Component) (map[string]int, error) {
 	canonForExport := make(map[string]int, len(comp.Exports))
 	for _, exp := range comp.Exports {
-		if exp.ExternType != 0x01 { // func
-			return nil, fmt.Errorf("component/instance: export %q has extern kind %s (%#x); only func exports are supported by this milestone", exp.Name, api.ExternTypeName(exp.ExternType), exp.ExternType)
+		if exp.ExternType == ctSortType { // a type export binds nothing
+			continue
+		}
+		if exp.ExternType != ctSortFunc {
+			return nil, fmt.Errorf("component/instance: export %q is a %s; a component with no imports exports only funcs and types here", exp.Name, ctSortDesc(exp.ExternType))
 		}
 		if u32.OutOfRange(exp.ExternIndex, len(comp.Canons)) {
 			return nil, fmt.Errorf("component/instance: export %q references func index %d, out of range of the %d-entry component func index space", exp.Name, exp.ExternIndex, len(comp.Canons))
@@ -1968,8 +1989,8 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 			in.activeTask, in.syncBase, in.activeThread = prevActive, prevBase, prevThread
 		}()
 	}
-	mem, memAvailable := memoryBytesOf(be.mod)
-	realloc := cachedReallocOf(ctx, be)
+	mem, memAvailable := memoryBytesOf(be.memMod)
+	realloc := cachedReallocOf(ctx, in, be)
 
 	// coreArgsPtr's buffer, like stack below, is pure scratch local to this
 	// call (lowerParams only ever appends into it; nothing downstream of
@@ -2054,7 +2075,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	// call, which replaces the backing array -- and the old one may already
 	// have gone back to the buffer pool, so lifting through the pre-call
 	// slice can read a buffer that now belongs to a different module.
-	mem, memAvailable = memoryBytesOf(be.mod)
+	mem, memAvailable = memoryBytesOf(be.memMod)
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)
@@ -2072,7 +2093,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 		}
 		// post-return takes the same flat results as params; CallWithStack lets
 		// it reuse rawResults' own buffer (the guest reads params, writes none).
-		if err := be.postReturnFn.CallWithStack(ctx, rawResults); err != nil {
+		if err := in.callPostReturn(ctx, be, rawResults); err != nil {
 			putUint64Slice(stackPtr)
 			in.sched.lockdown = true // guest code actually ran and trapped -- see this func's doc
 			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
@@ -2203,12 +2224,17 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		if len(rawResults) != 1 {
 			return nil, fmt.Errorf("component/instance: export %q: core func returned %d value(s) for a spilled (pointer) result, expected 1", exportName, len(rawResults))
 		}
-		val, err := abi.Load(mem, uint32(rawResults[0]), rt, in.resolve)
+		val, err := abi.LoadEnc(mem, uint32(rawResults[0]), rt, in.resolve, be.enc)
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q result: load spilled result: %w", exportName, err)
 		}
 		if val, err = in.takeAsyncResult(rt, val, be.resultNest, exportName); err != nil {
 			return nil, err
+		}
+		if be.resultHasOwn {
+			if err := in.checkOwnResult(val, rt, be.resolve, 0); err != nil {
+				return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+			}
 		}
 		return []abi.Value{val}, nil
 	}
@@ -2242,7 +2268,101 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 	if val, err = in.takeAsyncResult(rt, val, be.resultNest, exportName); err != nil {
 		return nil, err
 	}
+	if be.resultHasOwn {
+		if err := in.checkOwnResult(val, rt, be.resolve, 0); err != nil {
+			return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+		}
+	}
 	return []abi.Value{val}, nil
+}
+
+// callPostReturn runs be's post-return function on the lift's flat results,
+// with leaving the instance forbidden while it runs, as canon_lift does: an
+// import, or any built-in that checks may_leave, traps.
+func (in *Instance) callPostReturn(ctx context.Context, be *boundExport, results []uint64) error {
+	in.mayLeave = false
+	err := be.postReturnFn.CallWithStack(ctx, results)
+	in.mayLeave = true
+	return err
+}
+
+// checkOwnResult is lift_own's checks on every own<T> in an export's result:
+// the handle names a live own of resource T that nothing borrows. The host
+// keeps the handle in this table, to drop through DropResource, so unlike
+// lift_own nothing is removed. Only a guest-defined T is checked: a host
+// resource's handle carries the tag the host minted it under, which no
+// component index names.
+func (in *Instance) checkOwnResult(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int) error {
+	if depth > maxResourceWalkDepth {
+		return nil
+	}
+	sub := func(v abi.Value, ref *binary.TypeRef) error {
+		et, err := resolveTypeRef(ref, resolve)
+		if err != nil {
+			return err
+		}
+		return in.checkOwnResult(v, et, resolve, depth+1)
+	}
+	switch d := t.(type) {
+	case binary.OwnDesc:
+		h, ok := v.(uint32)
+		if !ok || in.comp == nil || in.isGuestResource == nil || !in.isGuestResource(d.ResourceType) {
+			return nil
+		}
+		return in.resources.checkOwn(h, in.canonTag(in.comp.ResourceDefIndex(d.ResourceType)), func(tag uint32) uint32 {
+			return in.canonTag(in.comp.ResourceDefIndex(tag))
+		})
+	case binary.ListDesc:
+		list, _ := v.([]abi.Value)
+		for _, e := range list {
+			if err := sub(e, &d.Element); err != nil {
+				return err
+			}
+		}
+	case binary.RecordDesc:
+		fields, _ := v.([]abi.Value)
+		for i := range d.Fields {
+			if i < len(fields) {
+				if err := sub(fields[i], &d.Fields[i].Type); err != nil {
+					return err
+				}
+			}
+		}
+	case binary.TupleDesc:
+		elems, _ := v.([]abi.Value)
+		for i := range d.Elements {
+			if i < len(elems) {
+				if err := sub(elems[i], &d.Elements[i]); err != nil {
+					return err
+				}
+			}
+		}
+	case binary.OptionDesc:
+		if s, ok := v.(abi.Some); ok {
+			v = s.Value
+		}
+		if v != nil {
+			return sub(v, &d.Element)
+		}
+	case binary.ResultDesc:
+		rv, ok := v.(abi.ResultValue)
+		if !ok || rv.Payload == nil {
+			return nil
+		}
+		ref := d.Ok
+		if rv.IsErr {
+			ref = d.Err
+		}
+		if ref != nil {
+			return sub(rv.Payload, ref)
+		}
+	case binary.VariantDesc:
+		vv, ok := v.(abi.VariantValue)
+		if ok && !u32.OutOfRange(vv.Disc, len(d.Cases)) && d.Cases[vv.Disc].Type != nil && vv.Payload != nil {
+			return sub(vv.Payload, d.Cases[vv.Disc].Type)
+		}
+	}
+	return nil
 }
 
 // takeAsyncResult lifts the streams, futures and error contexts in an
@@ -2436,8 +2556,8 @@ func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
 // so this per-invoke construction is a stack struct literal -- no closure
 // allocation on the hot lowering path. A nil be.reallocCall (module exports no
 // cabi_realloc) makes Realloc.grow fail loud, matching reallocOf.
-func cachedReallocOf(ctx context.Context, be *boundExport) abi.Realloc {
-	return abi.Realloc{Ctx: ctx, Call: be.reallocCall, Mem: be.memFn}
+func cachedReallocOf(ctx context.Context, in *Instance, be *boundExport) abi.Realloc {
+	return abi.Realloc{Ctx: ctx, Call: be.reallocCall, Mem: be.memFn, Encoding: be.enc, MayLeave: &in.mayLeave}
 }
 
 // coreReallocCall wraps an already-resolved cabi_realloc api.Function as the

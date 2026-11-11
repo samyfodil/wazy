@@ -32,6 +32,35 @@ type task struct {
 	be    *boundExport // the async export's binding; task.return validates its result against be's declared result type
 	state taskState
 
+	// cancelled records whether this task resolved via a delivered
+	// cancellation (task.cancel) rather than a normal task.return -- Phase
+	// 3's forced onResolve signature change (§6 #2): resolving-as-cancelled
+	// must be distinguishable from "returned with an empty result".
+	cancelled bool
+
+	// syncImplicit marks the implicit Task of a PLAIN SYNC canon lift
+	// (invokeEntered): the reference's Task for a not-opts.async_ lift
+	// (definitions.py:2155-2164). It has no gt/st (blocker() == nil), never
+	// enters the scheduler, and is torn down when invokeEntered returns. Its
+	// ONE semantic difference from a callback task between segments: it may
+	// NEVER block -- blockingTask traps on it (the spec's sync-task-block
+	// trap, "cannot block a synchronous task before returning") instead of
+	// taking the nested-drive arm.
+	syncImplicit bool
+
+	// implicitThreadIdx is this task's lazily-allocated slot in
+	// in.threads (design §4.3): 0 means "never registered" (thread.index
+	// was never called on this task); non-zero is the index
+	// threadIndexHostFunc returned and will keep returning. See thread.go's
+	// threadIndexHostFunc doc for why registration is lazy rather than
+	// eager (deviation §11.4).
+	implicitThreadIdx uint32
+
+	// noExclusive marks a task whose lift is async with no callback: the
+	// reference's needs_exclusive() is false for it, so it neither waits for
+	// its instance's exclusive lock nor takes it (definitions.py ~421-423).
+	noExclusive bool
+
 	// Exactly one of gt/st is non-nil for a task this package creates: gt
 	// for a callback lift (guest_task.go), st for a stackful lift
 	// (stackful_task.go, docs/component-model-async-stackful-design.md §2).
@@ -46,12 +75,6 @@ type task struct {
 	// decremented by handleTable.Drop's borrow arm. task.return/task.cancel
 	// trap_if(num_borrows > 0) below enforce the exit-time invariant.
 	numBorrows int
-
-	// cancelled records whether this task resolved via a delivered
-	// cancellation (task.cancel) rather than a normal task.return -- Phase
-	// 3's forced onResolve signature change (§6 #2): resolving-as-cancelled
-	// must be distinguishable from "returned with an empty result".
-	cancelled bool
 
 	// ctxStorage mirrors the one load-bearing field of the reference's
 	// Thread.storage: wit-bindgen's generated async executor stashes its
@@ -87,24 +110,6 @@ type task struct {
 	// array) reachable for exactly as long as anything still holds it.
 	resultBuf [1]abi.Value
 
-	// syncImplicit marks the implicit Task of a PLAIN SYNC canon lift
-	// (invokeEntered): the reference's Task for a not-opts.async_ lift
-	// (definitions.py:2155-2164). It has no gt/st (blocker() == nil), never
-	// enters the scheduler, and is torn down when invokeEntered returns. Its
-	// ONE semantic difference from a callback task between segments: it may
-	// NEVER block -- blockingTask traps on it (the spec's sync-task-block
-	// trap, "cannot block a synchronous task before returning") instead of
-	// taking the nested-drive arm.
-	syncImplicit bool
-
-	// implicitThreadIdx is this task's lazily-allocated slot in
-	// in.threads (design §4.3): 0 means "never registered" (thread.index
-	// was never called on this task); non-zero is the index
-	// threadIndexHostFunc returned and will keep returning. See thread.go's
-	// threadIndexHostFunc doc for why registration is lazy rather than
-	// eager (deviation §11.4).
-	implicitThreadIdx uint32
-
 	// liveThreads counts this task's currently-registered SPAWNED
 	// guestThreads (design §3/§12 Stage D: the reference's Task.threads list
 	// length, definitions.py:467, :505-525) -- incremented by
@@ -120,11 +125,6 @@ type task struct {
 	// it by table index, and runSyncCore hangs the thread's baton off it. Nil
 	// for an async task, whose implicit thread IS its guestTask/stackfulTask.
 	syncThread *syncImplicitThread
-
-	// noExclusive marks a task whose lift is async with no callback: the
-	// reference's needs_exclusive() is false for it, so it neither waits for
-	// its instance's exclusive lock nor takes it (definitions.py ~421-423).
-	noExclusive bool
 }
 
 // needsExclusive is Task.needs_exclusive, which the reference only asks of an

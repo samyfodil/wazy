@@ -140,7 +140,6 @@ const (
 	CanonKindResourceNew              = binary.CanonKindResourceNew
 	CanonKindResourceDrop             = binary.CanonKindResourceDrop
 	CanonKindResourceRep              = binary.CanonKindResourceRep
-	CanonKindResourceDropAsync        = binary.CanonKindResourceDropAsync
 	CanonKindTaskCancel               = binary.CanonKindTaskCancel
 	CanonKindSubtaskCancel            = binary.CanonKindSubtaskCancel
 	CanonKindTaskReturn               = binary.CanonKindTaskReturn
@@ -178,4 +177,12 @@ const (
 	CanonKindThreadNewIndirect        = binary.CanonKindThreadNewIndirect
 	CanonKindThreadSuspend            = binary.CanonKindThreadSuspend
 	CanonKindThreadYieldThenResume    = binary.CanonKindThreadYieldThenResume
+	CanonKindThreadResumeLater        = binary.CanonKindThreadResumeLater
+	CanonKindThreadSuspendThenResume  = binary.CanonKindThreadSuspendThenResume
+	CanonKindThreadSuspendThenPromote = binary.CanonKindThreadSuspendThenPromote
+	CanonKindThreadYieldThenPromote   = binary.CanonKindThreadYieldThenPromote
+
+	CanonKindThreadSpawnRef             = binary.CanonKindThreadSpawnRef
+	CanonKindThreadSpawnIndirect        = binary.CanonKindThreadSpawnIndirect
+	CanonKindThreadAvailableParallelism = binary.CanonKindThreadAvailableParallelism
 )

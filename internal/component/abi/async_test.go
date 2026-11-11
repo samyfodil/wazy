@@ -72,9 +72,9 @@ func TestStoreLoadStreamFutureErrorContextRoundTrip(t *testing.T) {
 		if _, err := storeValue(mem, 0, d, uint32(42), 0, nil, okRealloc); err != nil {
 			t.Fatalf("storeValue(%T): %v", d, err)
 		}
-		v, err := loadValue(mem, 0, d, nil)
+		v, err := loadValue(mem, 0, d, nil, UTF8)
 		if err != nil {
-			t.Fatalf("loadValue(%T): %v", d, err)
+			t.Fatalf("loadValue(%T, UTF8): %v", d, err)
 		}
 		if v.(uint32) != 42 {
 			t.Errorf("round trip (%T) = %v, want 42", d, v)
@@ -144,12 +144,12 @@ func TestCompileLowerLiftStreamFutureHandle(t *testing.T) {
 			t.Fatalf("Lower(%T) = %v, want one CoreValue(i32=9)", d, cvs)
 		}
 
-		fstep, err := CompileLift(d, noResolver)
+		fstep, err := CompileLift(d, noResolver, UTF8)
 		if err != nil {
-			t.Fatalf("CompileLift(%T): %v", d, err)
+			t.Fatalf("CompileLift(%T, UTF8): %v", d, err)
 		}
 		if fstep.kind != liftHandle {
-			t.Fatalf("CompileLift(%T) kind = %d, want liftHandle", d, fstep.kind)
+			t.Fatalf("CompileLift(%T, UTF8) kind = %d, want liftHandle", d, fstep.kind)
 		}
 		v, err := fstep.Lift(cvs, mem)
 		if err != nil {
@@ -182,7 +182,7 @@ func TestCompileLowerLiftErrorContextPrimitive(t *testing.T) {
 		t.Fatalf("Lower: %v", err)
 	}
 
-	fstep, err := CompileLift(d, noResolver)
+	fstep, err := CompileLift(d, noResolver, UTF8)
 	if err != nil {
 		t.Fatalf("CompileLift: %v", err)
 	}

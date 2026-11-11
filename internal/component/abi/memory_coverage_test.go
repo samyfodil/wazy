@@ -214,7 +214,7 @@ func TestRecordWithMultipleFields(t *testing.T) {
 	}
 
 	// Load it back
-	loaded, err := loadRecord(mem, 0, desc, resolve)
+	loaded, err := loadRecord(mem, 0, desc, resolve, UTF8)
 	if err != nil {
 		t.Errorf("loadRecord failed: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestTupleWithMultipleElements(t *testing.T) {
 	}
 
 	// Load it back
-	loaded, err := loadTuple(mem, 0, desc, resolve)
+	loaded, err := loadTuple(mem, 0, desc, resolve, UTF8)
 	if err != nil {
 		t.Errorf("loadTuple failed: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestVariantWithPayload(t *testing.T) {
 	}
 
 	// Load it back
-	loaded, err := loadVariant(mem, 0, desc, resolve)
+	loaded, err := loadVariant(mem, 0, desc, resolve, UTF8)
 	if err != nil {
 		t.Errorf("loadVariant failed: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestEmptyString(t *testing.T) {
 	}
 
 	// Load it back
-	loaded, err := loadString(mem, 0)
+	loaded, err := loadString(mem, 0, UTF8)
 	if err != nil {
 		t.Errorf("loadString empty failed: %v", err)
 	}

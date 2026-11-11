@@ -315,39 +315,14 @@ type CanonOpt struct {
 }
 
 // CanonKind names the byte values Canon.Kind takes -- the first byte of each
-// entry in the canonical-function section (id 0x08). 0x00-0x04 were already
-// implemented; 0x05 and up are the Phase 0 async additions. Verified against
-// wasm-tools 1.253 (`wasm-tools dump`) on internal/component/binary/testdata/
-// async/*.wasm -- see decodeCanonSection and canonKindName.
-//
-// 0x07 (resource.drop async) was added in Phase 3 -- see
-// docs/component-model-async-phase3-design.md §4.4; its payload (a single
-// typeidx) is byte-identical to 0x03's, verified against fresh wasm-tools
-// output the same way as every other kind in this table.
-//
-// CanonKindThreadYield/Index/NewIndirect/Suspend/YieldThenResume are the five
-// thread.* builtins actually exercised by the vendored async .wast suites
-// (cancellable, sync-barges-in, trap-if-sync-and-waitable-set, trap-if-
-// block-and-sync); their opcodes and payload grammars are taken from the
-// component-model spec's design/mvp/Binary.md canon-definitions EBNF (the
-// 🧵/🔀 threads-proposal entries), cross-checked against `wasm-tools dump`
-// on those four fixtures. The REMAINING thread.* opcodes (0x28 resume-later,
-// 0x2a/0x2c/0x2d suspend/yield-then-promote, 0x40-0x42 spawn-ref/spawn-
-// indirect/available-parallelism) are deliberately NOT added here: no
-// vendored suite decodes one, so their byte layouts are unverified against
-// a real fixture -- add them (and their decode case) only once a suite that
-// actually needs them shows up. Decoding these five is NOT the same as
-// implementing thread.* execution (no runtime support exists for any of
-// them -- see stream_builtins.go/async_builtins.go's absence of a
-// thread.yield/thread.new-indirect host func); every suite that reaches one
-// at CALL time (not just decode) still traps or hangs on its own, real gap.
+// entry in the canonical-function section (id 0x08), as design/mvp/Binary.md
+// lists them.
 const (
-	CanonKindLift              byte = 0x00
-	CanonKindLower             byte = 0x01
-	CanonKindResourceNew       byte = 0x02
-	CanonKindResourceDrop      byte = 0x03
-	CanonKindResourceRep       byte = 0x04
-	CanonKindResourceDropAsync byte = 0x07
+	CanonKindLift         byte = 0x00
+	CanonKindLower        byte = 0x01
+	CanonKindResourceNew  byte = 0x02
+	CanonKindResourceDrop byte = 0x03
+	CanonKindResourceRep  byte = 0x04
 
 	CanonKindTaskCancel               byte = 0x05
 	CanonKindSubtaskCancel            byte = 0x06
@@ -390,6 +365,10 @@ const (
 	CanonKindThreadYieldThenPromote   byte = 0x2d
 	CanonKindStreamForward            byte = 0x2e
 	CanonKindFutureForward            byte = 0x2f
+
+	CanonKindThreadSpawnRef             byte = 0x40
+	CanonKindThreadSpawnIndirect        byte = 0x41
+	CanonKindThreadAvailableParallelism byte = 0x42
 )
 
 // Canon represents a canonical lift/lower binding (section 8).
@@ -409,8 +388,12 @@ type Canon struct {
 	// -write, and future.cancel-read/-write.
 	Async bool
 
-	// TableIdx is thread.new-indirect's tbl:<core:tableidx> payload
-	// (decode-only). TypeIdx doubles as its ft:<typeidx> payload.
+	// Shared is thread.spawn-ref/spawn-indirect/available-parallelism's
+	// shared? payload.
+	Shared bool
+
+	// TableIdx is thread.new-indirect's and thread.spawn-indirect's
+	// tbl:<core:tableidx> payload. TypeIdx doubles as their ft:<typeidx>.
 	TableIdx uint32
 
 	// MemIdx is waitable-set.wait/poll's memory index. (error-context.new/
@@ -707,8 +690,6 @@ func CanonKindName(k byte) string {
 		return "resource.drop"
 	case CanonKindResourceRep:
 		return "resource.rep"
-	case CanonKindResourceDropAsync:
-		return "resource.drop (async)"
 	case CanonKindTaskCancel:
 		return "task.cancel"
 	case CanonKindSubtaskCancel:
@@ -753,6 +734,12 @@ func CanonKindName(k byte) string {
 		return "stream.forward"
 	case CanonKindFutureForward:
 		return "future.forward"
+	case CanonKindThreadSpawnRef:
+		return "thread.spawn-ref"
+	case CanonKindThreadSpawnIndirect:
+		return "thread.spawn-indirect"
+	case CanonKindThreadAvailableParallelism:
+		return "thread.available-parallelism"
 	case CanonKindErrorContextNew:
 		return "error-context.new"
 	case CanonKindErrorContextDebugMessage:

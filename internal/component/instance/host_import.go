@@ -30,6 +30,11 @@ type Option func(*config)
 type config struct {
 	imports map[importKey]*hostImport
 
+	// coreMem resolves this component's core memory index space to the module
+	// that holds each memory, once its core instances exist: a canon lift's
+	// memory option names one there. Set by instantiateGraph.
+	coreMem func(int) (api.Module, error)
+
 	// resourceHooks are invoked with the Instance's *handleTable as soon as
 	// it exists (graph.go's instantiateGraph, right after
 	// newHandleTable()), letting an Option's host func closures capture a
@@ -195,6 +200,9 @@ type hostImport struct {
 	// always leaves it nil.
 	customFD      *binary.FuncDesc
 	customResolve abi.Resolver
+
+	// enc is the string-encoding of the canon lower this copy was built for.
+	enc abi.Encoding
 
 	// asyncTarget, when set, routes an async-lowered call through this
 	// import to a GUEST EXPORT of a sibling composition instance instead of
@@ -763,6 +771,9 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+		if in != nil && !in.mayLeave { // canon_lower's trap_if(not may_leave)
+			panic(fmt.Errorf("component/instance: host import %q %q: cannot leave component instance", iface, funcName))
+		}
 		memMod := mod
 		if memOverride != nil {
 			memMod = memOverride
@@ -788,9 +799,9 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		// through one Instance can overlap.
 		var err error
 		if paramsSpill {
-			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources, *argsp, lentArr[:])
+			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, hi.enc, api.DecodeU32(stack[0]), memMod, resources, *argsp, lentArr[:])
 		} else {
-			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, *argsp, lentArr[:])
+			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, hi.enc, stack, memMod, resources, *argsp, lentArr[:])
 		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
@@ -901,6 +912,10 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			// Resolved through the instance's memo rather than left to
 			// lowerHostResultsPlanned's per-call reallocOf fallback.
 			realloc = in.reallocFor(ctx, memMod)
+		}
+		realloc.Encoding = hi.enc
+		if in != nil {
+			realloc.MayLeave = &in.mayLeave
 		}
 		if err := lowerHostResultsPlanned(ctx, resultPlan, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
@@ -1021,7 +1036,7 @@ func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack 
 	if err != nil {
 		return nil, nil, err
 	}
-	return liftHostArgsPlanned(in, plans, resolve, stack, mod, resources, nil, nil)
+	return liftHostArgsPlanned(in, plans, resolve, abi.UTF8, stack, mod, resources, nil, nil)
 }
 
 // liftHostArgsPlanned is liftHostArgs with the per-param resolve/flatten/
@@ -1032,7 +1047,7 @@ func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack 
 // resolve is still needed for LiftFlat's composite tree-walk. dst, when it is
 // already the right length, receives the lifted values (the hot wrapper hands
 // in a pooled buffer); anything else allocates.
-func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
+func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, enc abi.Encoding, stack []uint64, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	args := dst
 	if len(args) != len(plans) {
@@ -1052,7 +1067,7 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 		// through a pooled iterator -- no per-param []CoreValue -- and hands
 		// pp.flat down the lift so a variant/result param doesn't re-Flatten
 		// itself per call.
-		v, err := abi.LiftFlatKinds(pp.flat, stack[pos:pos+len(pp.flat)], pp.pt, resolve, mem)
+		v, err := abi.LiftFlatKindsEnc(pp.flat, stack[pos:pos+len(pp.flat)], pp.pt, resolve, mem, enc)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: lift: %w", i, err)
 		}
@@ -1093,12 +1108,12 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 // liftHostArgsPlanned's, just sourced from the loaded tuple's elements
 // instead of per-plan LiftFlat calls -- see async_host_import.go's
 // liftAsyncHostArgsSpilled for the async-lower twin of this function.
-func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
+func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, enc abi.Encoding, ptr uint32, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	if !memAvailable {
 		return nil, nil, fmt.Errorf("parameter list spills to memory (flattens beyond the flat limit), but the calling module has no memory")
 	}
-	tupleVal, err := abi.Load(mem, ptr, tupleDesc, resolve)
+	tupleVal, err := abi.LoadEnc(mem, ptr, tupleDesc, resolve, enc)
 	if err != nil {
 		return nil, nil, fmt.Errorf("spilled parameter list: %w", err)
 	}
@@ -1410,7 +1425,9 @@ func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, results [
 		return fmt.Errorf("result: %w", err)
 	}
 	if realloc.Call == nil {
+		enc, mayLeave := realloc.Encoding, realloc.MayLeave
 		realloc = reallocOf(ctx, mod)
+		realloc.Encoding, realloc.MayLeave = enc, mayLeave
 	}
 
 	if outPtrIdx >= 0 {

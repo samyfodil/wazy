@@ -44,7 +44,7 @@ func BenchmarkScalarListLift(b *testing.B) {
 		b.Run(fmt.Sprintf("%s/general", prim), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				v, err := loadListFromRange(mem, 16, n, elemType, nil)
+				v, err := loadListFromRange(mem, 16, n, elemType, nil, UTF8)
 				if err != nil {
 					b.Fatal(err)
 				}
