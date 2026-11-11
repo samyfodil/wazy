@@ -634,7 +634,19 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			// clears wazy's default "run _start on instantiate": an embedded
 			// core module's own _start is invoked later by another module once
 			// the graph is wired (see shim.go), not eagerly here.
+			// A core start function runs in a synchronous task of its own
+			// (Concurrency.md, "Interaction with the start function"): it
+			// may not block, but has a thread and context storage, as a
+			// sync export call does (invokeEntered). wasi-sdk's WASI 0.3
+			// libc keeps its stack pointer in context slot 0, and
+			// wit-component's task-hook shim reads it from a start function.
+			prevActive, prevBase := in.activeTask, in.syncBase
+			if in.syncTaskNeeded {
+				t := &task{inst: in, state: taskStarted, syncImplicit: true}
+				in.activeTask, in.syncBase = t, t
+			}
 			mod, err := instantiateCoreModule(argCtx, r, cfg, coreBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
+			in.activeTask, in.syncBase = prevActive, prevBase
 			if err != nil {
 				return fmt.Errorf("component/instance: instantiate core module %d (key %q): %w", ci.ModuleIdx, key, coreLinkError(comp, k, err))
 			}
