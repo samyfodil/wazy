@@ -77,7 +77,7 @@ func errDiscriminant(kind string, disc uint32, n int) error {
 // is formed in 64 bits, so a high pointer or a huge size cannot wrap past the
 // check, and a zero-size allocation at ptr == len(mem) stays legal.
 func checkRealloc(mem []byte, ptr, align, size uint32, what string) error {
-	if align != 0 && ptr%align != 0 {
+	if align != 0 && ptr&(align-1) != 0 {
 		return fmt.Errorf("wasm trap: unaligned pointer: realloc return: result not aligned (ptr=%d alignment=%d)", ptr, align)
 	}
 	if uint64(ptr)+uint64(size) > uint64(len(mem)) {
@@ -120,7 +120,7 @@ func loadStringFromRange(mem []byte, ptr, tagged uint32, enc Encoding) (string, 
 	if byteLen > MaxStringByteLength {
 		return "", errStringBounds(ptr, byteLen, len(mem))
 	}
-	if ptr%align != 0 {
+	if ptr&(align-1) != 0 {
 		return "", errUnaligned("string pointer", ptr, align)
 	}
 	if uint64(ptr)+byteLen > uint64(len(mem)) {

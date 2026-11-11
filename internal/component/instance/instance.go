@@ -2003,7 +2003,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	if in.syncBase != nil && in.activeTask == in.syncBase {
 		scope = in.syncBase
 	}
-	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName, *coreArgsPtr, &scope)
+	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, &realloc, exportName, *coreArgsPtr, &scope)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
 		return nil, err
@@ -2115,7 +2115,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 //
 // scope is the call's borrow scope: the task's, or created when a host
 // resource is first lent (see lendHostBorrow).
-func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue, scope **task) ([]abi.CoreValue, error) {
+func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc *abi.Realloc, exportName string, dst []abi.CoreValue, scope **task) ([]abi.CoreValue, error) {
 	coreArgs := dst
 	var err error
 
@@ -2141,7 +2141,7 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 				}
 			}
 		}
-		ptr, err := abi.SpillValue(tupleVal, be.paramTuple, mem, in.resolve, realloc)
+		ptr, err := abi.SpillValue(tupleVal, be.paramTuple, mem, in.resolve, *realloc)
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q: spill parameter list: %w", exportName, err)
 		}

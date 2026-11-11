@@ -40,7 +40,7 @@ func listSpan(mem []byte, ptr, length, elemSize, elemAlign uint32) ([]byte, erro
 	if byteLen > MaxListByteLength {
 		return nil, errListBounds(ptr, byteLen, len(mem))
 	}
-	if elemAlign > 1 && ptr%elemAlign != 0 {
+	if elemAlign > 1 && ptr&(elemAlign-1) != 0 {
 		return nil, errUnaligned("list pointer", ptr, elemAlign)
 	}
 	if uint64(ptr)+byteLen > uint64(len(mem)) {

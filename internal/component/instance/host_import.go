@@ -1452,7 +1452,7 @@ func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, results [
 	// (anything wider took the outPtrIdx path above), so a small fixed
 	// buffer covers it -- no per-call result slice.
 	var flatBuf [abi.MaxFlatResults]abi.CoreValue
-	flat, err := plan.step.Lower(flatBuf[:0], resultVal, realloc, mem)
+	flat, err := plan.step.Lower(flatBuf[:0], resultVal, &realloc, mem)
 	if err != nil {
 		return fmt.Errorf("result: lower: %w", err)
 	}

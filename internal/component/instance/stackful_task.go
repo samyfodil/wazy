@@ -152,7 +152,7 @@ func (st *stackfulTask) run() error {
 	*coreArgsPtr = (*coreArgsPtr)[:0]
 	t.state = taskStarted
 	scope := t
-	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, st.exportName, *coreArgsPtr, &scope)
+	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, &realloc, st.exportName, *coreArgsPtr, &scope)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
 		in.leaveRunOf(t)

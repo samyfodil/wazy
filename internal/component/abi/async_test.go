@@ -136,7 +136,7 @@ func TestCompileLowerLiftStreamFutureHandle(t *testing.T) {
 		if lstep.kind != lowerKindHandle {
 			t.Fatalf("CompileLower(%T) kind = %d, want lowerKindHandle", d, lstep.kind)
 		}
-		cvs, err := lstep.Lower(nil, uint32(9), Realloc{}, mem)
+		cvs, err := lstep.Lower(nil, uint32(9), &Realloc{}, mem)
 		if err != nil {
 			t.Fatalf("Lower(%T): %v", d, err)
 		}
@@ -177,7 +177,7 @@ func TestCompileLowerLiftErrorContextPrimitive(t *testing.T) {
 	if lstep.kind != lowerKindPrimitive || lstep.prim != "error-context" {
 		t.Fatalf("CompileLower kind/prim = %d/%q, want lowerKindPrimitive/error-context", lstep.kind, lstep.prim)
 	}
-	cvs, err := lstep.Lower(nil, uint32(11), Realloc{}, mem)
+	cvs, err := lstep.Lower(nil, uint32(11), &Realloc{}, mem)
 	if err != nil {
 		t.Fatalf("Lower: %v", err)
 	}

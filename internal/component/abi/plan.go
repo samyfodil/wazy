@@ -76,7 +76,10 @@ func CompileLower(t binary.TypeDesc, resolve Resolver) (LowerStep, error) {
 // CompileLower was built from -- byte-for-byte equivalent (differential-oracle
 // verified via TestLowerStepMatchesLowerFlatInto), just without the per-call
 // type-switch / Flatten / intermediate slices on the leaf paths.
-func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte) ([]CoreValue, error) {
+//
+// realloc is a pointer so that the scalar paths, which never allocate, do not
+// copy it.
+func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc *Realloc, mem []byte) ([]CoreValue, error) {
 	switch s.kind {
 	case lowerKindPrimitive:
 		cv, err := lowerPrimitiveCore(v, s.prim)
@@ -98,7 +101,7 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 		// is dropped here because nothing in this frame -- or in Lower's
 		// caller, instance.lowerParams -- writes through `mem` afterwards.
 		// See lowerFlatImpl's doc for the invariant that makes that safe.
-		ptr, byteLen, _, err := allocStoreString(mem, str, realloc)
+		ptr, byteLen, _, err := allocStoreString(mem, str, *realloc)
 		if err != nil {
 			return nil, fmt.Errorf("lowerFlatString: %w", err)
 		}
@@ -113,13 +116,13 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 
 	default: // lowerKindComposite
 		if s.spills {
-			ptr, err := s.store.Spill(v, mem, realloc)
+			ptr, err := s.store.Spill(v, mem, *realloc)
 			if err != nil {
 				return nil, err
 			}
 			return append(dst, NewCoreValueI32(ptr)), nil
 		}
-		flat, err := lowerFlatImpl(v, s.t, s.flat, s.resolve, realloc, mem)
+		flat, err := lowerFlatImpl(v, s.t, s.flat, s.resolve, *realloc, mem)
 		if err != nil {
 			return nil, err
 		}

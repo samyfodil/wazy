@@ -48,7 +48,7 @@ func TestLowerStepMatchesLowerFlatInto(t *testing.T) {
 			}
 			planMem := make([]byte, 65536)
 			planAlloc := newBumpAllocator(entry.MemBase)
-			planCore, planErr := step.Lower(nil, v, ReallocFunc(planAlloc.realloc), planMem)
+			planCore, planErr := step.Lower(nil, v, ptrTo(ReallocFunc(planAlloc.realloc)), planMem)
 
 			// Errors must agree (both nil here -- these are all happy-path values).
 			if (refErr == nil) != (planErr == nil) {
@@ -138,7 +138,7 @@ func TestLowerStepErrorParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: CompileLower: %v", name, err)
 		}
-		_, err = step.Lower(nil, badVal, ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1024, nil }), make([]byte, 4096))
+		_, err = step.Lower(nil, badVal, ptrTo(ReallocFunc(func(_, _, _, _ uint32) (uint32, error) { return 1024, nil })), make([]byte, 4096))
 		if err == nil {
 			t.Fatalf("%s: expected an error for a wrong-typed value", name)
 		}
@@ -156,7 +156,7 @@ func TestLowerStepErrorParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileLower bogus prim: %v", err)
 	}
-	if _, err := badStep.Lower(nil, uint32(0), Realloc{}, nil); err == nil {
+	if _, err := badStep.Lower(nil, uint32(0), &Realloc{}, nil); err == nil {
 		t.Fatal("expected an error lowering an unknown primitive")
 	}
 }
@@ -193,7 +193,7 @@ func TestLowerStepSpill(t *testing.T) {
 		t.Fatalf("expected a spilling composite step, got kind=%d spills=%v", step.kind, step.spills)
 	}
 	planMem := make([]byte, 65536)
-	planCore, err := step.Lower(nil, val, ReallocFunc(newBumpAllocator(1024).realloc), planMem)
+	planCore, err := step.Lower(nil, val, ptrTo(ReallocFunc(newBumpAllocator(1024).realloc)), planMem)
 	if err != nil {
 		t.Fatalf("Lower spill: %v", err)
 	}
@@ -213,7 +213,9 @@ func TestLowerStepSpill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileLower own: %v", err)
 	}
-	if _, err := hstep.Lower(nil, "notahandle", Realloc{}, nil); err == nil || !bytes.Contains([]byte(err.Error()), []byte("handle expected uint32")) {
+	if _, err := hstep.Lower(nil, "notahandle", &Realloc{}, nil); err == nil || !bytes.Contains([]byte(err.Error()), []byte("handle expected uint32")) {
 		t.Fatalf("handle error parity: got %v", err)
 	}
 }
+
+func ptrTo(r Realloc) *Realloc { return &r }
