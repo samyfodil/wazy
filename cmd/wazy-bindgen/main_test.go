@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,12 @@ const (
 	fileWIT = `package c:d; interface kv { get: func(k: string) -> option<string>; } interface other { f: func(); } world app { import kv; import other; }`
 )
 
+// testdata/app.wasm is fileWIT's world app as a component: wasm-tools
+// component embed --dummy, then component new.
+//
+//go:embed testdata/app.wasm
+var appWasm []byte
+
 func TestCLI(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, src string) string {
@@ -28,6 +35,7 @@ func TestCLI(t *testing.T) {
 	witDir := filepath.Dir(write("wit/a.wit", dirWIT))
 	witFile := write("store.wit", fileWIT)
 	bad := write("bad.wit", "not wit")
+	wasm := write("app.wasm", string(appWasm))
 	out := filepath.Join(dir, "bindings.go")
 	var stdout, stderr bytes.Buffer
 
@@ -44,8 +52,17 @@ func TestCLI(t *testing.T) {
 	require.Contains(t, stdout.String(), "type Kv interface")
 	require.False(t, strings.Contains(stdout.String(), "type Other interface"), "c:d/other is skipped")
 
+	// A compiled component, its world "root" unless -world says otherwise.
+	stdout.Reset()
+	code = cli([]string{"-wasm", wasm, "-package", "app"}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	require.Contains(t, stdout.String(), "type Root struct{ inst *component.Instance }")
+	require.Contains(t, stdout.String(), "type Kv interface")
+
 	// The OS words these failures its own way.
 	_, missing := os.Stat("missing.wit")
+	missingWasm := filepath.Join(dir, "missing.wasm")
+	_, missingWasmErr := os.ReadFile(missingWasm)
 	notDir := os.WriteFile(filepath.Join(out, "x"), nil, 0o644)
 	require.Error(t, missing)
 	require.Error(t, notDir)
@@ -60,6 +77,11 @@ func TestCLI(t *testing.T) {
 		{[]string{"-wit", "x.wit", "-world", "w"}, 1, "-world and -package are required"},
 		{[]string{"-wit", "missing.wit", "-world", "w", "-package", "p"}, 1, missing.Error()},
 		{[]string{"-wit", bad, "-world", "w", "-package", "p"}, 1, "wit:"},
+		{[]string{"-wasm", wasm, "-wit", witFile, "-package", "p"}, 1, "-wit and -wasm are exclusive"},
+		{[]string{"-wasm", wasm}, 1, "-package is required"},
+		{[]string{"-wasm", wasm, "-world", "nope", "-package", "p"}, 1, `no world "nope"`},
+		{[]string{"-wasm", missingWasm, "-package", "p"}, 1, missingWasmErr.Error()},
+		{[]string{"-wasm", bad, "-package", "p"}, 1, "wit: decode component: "},
 		{[]string{"-wit", witFile, "-world", "nope", "-package", "p"}, 1, `no world "nope"`},
 		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-o", filepath.Join(out, "x")}, 1, notDir.Error()},
 	} {

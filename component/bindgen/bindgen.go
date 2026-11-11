@@ -11,7 +11,9 @@
 //     world passes.
 //
 // The generated code depends only on package component and package witgo.
-// cmd/wazy-bindgen runs Generate from the command line, for go generate.
+// cmd/wazy-bindgen runs Generate from the command line, for go generate,
+// on a WIT package or on a compiled component, whose WIT wit.FromComponent
+// reads.
 //
 // A world's WASI imports are not bound by default: wazy's imports/wasip2
 // implements them, and its options go to Instantiate next to the bindings.
@@ -195,6 +197,16 @@ func (g *gen) claim(name string) string {
 	return n
 }
 
+// unique adds name to set, suffixed with underscores until it is not
+// already there, and returns it.
+func unique(set map[string]bool, name string) string {
+	for set[name] {
+		name += "_"
+	}
+	set[name] = true
+	return name
+}
+
 func (g *gen) skipped(name string) bool {
 	for _, p := range g.opts.Skip {
 		if strings.HasPrefix(name, p) {
@@ -258,18 +270,22 @@ func (g *gen) collect() error {
 	g.imports = bound
 	g.imports = mergeWorldFuncs(g.imports, g.worldGo+"Funcs")
 	g.exports = mergeWorldFuncs(g.exports, "")
+	// An interface's Go type takes a package-level name, suffixed on a clash
+	// with a type; its field in Imports and its accessor on the world only
+	// clash with their own kind, so they keep the plain name where they can.
+	fields := map[string]bool{}
 	for _, in := range g.imports {
+		name := in.goName
 		if in.name != "" {
-			in.goName = g.claim(pascal(shortName(in.name)))
-		} else {
-			in.goName = g.claim(in.goName)
+			name = pascal(shortName(in.name))
 		}
-		in.field = in.goName
+		in.goName = g.claim(name)
+		in.field = unique(fields, name)
 	}
 	for _, in := range g.exports {
 		if in.name != "" {
-			in.goName = g.claim(pascal(shortName(in.name)))
-			in.field = in.goName
+			in.field = pascal(shortName(in.name))
+			in.goName = g.claim(in.field)
 		}
 	}
 	return nil
@@ -1326,11 +1342,7 @@ func (g *gen) emitImport(w *writer, in *iface) {
 	w.p("type %s interface {", in.goName)
 	names := map[string]bool{}
 	for _, b := range in.funcs {
-		b.goName = b.methodName()
-		for n := b.goName; names[b.goName]; {
-			b.goName = n + "_"
-		}
-		names[b.goName] = true
+		b.goName = unique(names, b.methodName())
 		if b.dropFor != nil {
 			w.p("// %s releases a %s the guest dropped.", b.goName, b.dropFor.goName)
 			w.p("%s(ctx context.Context, self %s) error", b.goName, b.dropFor.goName)
@@ -1475,11 +1487,7 @@ func (g *gen) emitExports(w *writer) {
 		recv := "x *" + wg
 		names := taken
 		if in.name != "" {
-			acc := in.field
-			for taken[acc] {
-				acc += "_"
-			}
-			taken[acc] = true
+			acc := unique(taken, in.field)
 			w.p("")
 			w.p("// %s is the export %s.", in.goName, in.name)
 			w.p("type %s struct{ inst *component.Instance }", in.goName)
@@ -1587,11 +1595,7 @@ func (g *gen) emitStreamCtors(w *writer, taken map[string]bool) {
 		if t.kind == kFuture {
 			k = "Future"
 		}
-		name := "New" + k + t.elem.label()
-		for n := name; taken[name]; {
-			name = n + "_"
-		}
-		taken[name] = true
+		name := unique(taken, "New"+k+t.elem.label())
 		et := t.elem.armType()
 		elem, resolve := "nil", "nil"
 		if t.elem != nil {
@@ -1642,11 +1646,7 @@ func (t *typ) label() string {
 // skip'th parameter on, the first being a resource method's self, which the
 // receiver is.
 func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map[string]bool, skip int) {
-	b.goName = b.methodName()
-	for n := b.goName; names[b.goName]; {
-		b.goName = n + "_"
-	}
-	names[b.goName] = true
+	b.goName = unique(names, b.methodName())
 	params, pn := b.goParams(skip)
 	if params != "" {
 		params = ", " + params
@@ -1704,11 +1704,7 @@ func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map
 // returns once the call first waits, for an import the host completes later
 // from another goroutine.
 func (g *gen) emitExportAsync(w *writer, recv, ifaceName string, b *fn, names map[string]bool, args []string, table, h string) {
-	name := b.goName + "Async"
-	for n := name; names[name]; {
-		name = n + "_"
-	}
-	names[name] = true
+	name := unique(names, b.goName+"Async")
 	params, _ := b.goParams(b.skip())
 	if params != "" {
 		params = ", " + params

@@ -93,6 +93,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/internal/component/instance"
 	ast "github.com/samyfodil/wazy/internal/component/wit"
 )
 
@@ -315,6 +316,18 @@ func Parse(filename, src string, opts ...Option) (*Package, error) {
 		return nil, err
 	}
 	return resolve(append(nested, main), main.name, newConfig(opts))
+}
+
+// FromComponent reads the WIT of a compiled component: what it imports and
+// exports, as the world "root" of a package "root:component", with each
+// interface in a package of its own, as `wasm-tools component wit` prints it.
+// It is the WIT a host needs to bind a component it did not build.
+func FromComponent(componentBytes []byte, opts ...Option) (*Package, error) {
+	src, err := instance.ComponentWIT(componentBytes)
+	if err != nil {
+		return nil, err
+	}
+	return Parse("component.wit", src, opts...)
 }
 
 // ParseFile reads the single WIT file at path, as Parse does.

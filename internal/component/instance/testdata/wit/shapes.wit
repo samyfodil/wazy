@@ -1,0 +1,30 @@
+package t:shapes@1.0.0;
+
+interface types {
+  record %type { %list: u32, name: string }
+  type id = u32;
+  type bytes = list<u8>;
+  enum level { low, high }
+  flags bits { a, b }
+  variant node { leaf(u32), %none }
+  resource handle {
+    constructor(n: u32) -> result<handle, string>;
+    make: static async func() -> handle;
+    poke: func(by: id);
+  }
+  type alias = handle;
+}
+
+interface api {
+  use types.{%type, level, handle, bits, node, bytes, alias};
+  more: func(b: bits, n: node, x: bytes, h: alias, m: map<string, u32>) -> list<node>;
+  everything: func(a: result, b: result<u32>, c: result<_, string>, d: result<u8, level>, e: tuple<u8, string>, f: list<u16, 2>, g: stream, h: future, i: stream<u8>, j: option<%type>, k: borrow<handle>) -> handle;
+}
+
+world shapes {
+  import types;
+  import inline: interface { ping: func() -> u32; }
+  export api;
+  use types.{level};
+  export get: func(l: level) -> level;
+}

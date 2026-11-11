@@ -1,0 +1,12 @@
+package root:component;
+
+world root {
+  import wazy:async-probe/host@0.1.0;
+
+  export fetch: async func(x: u32) -> u32;
+}
+package wazy:async-probe@0.1.0 {
+  interface host {
+    slow: async func(x: u32) -> u32;
+  }
+}
