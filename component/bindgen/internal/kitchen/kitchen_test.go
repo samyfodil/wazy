@@ -36,6 +36,17 @@ func (h *host) Mint(_ context.Context, v uint32) (Token, error) {
 	return h.nextTok, nil
 }
 
+// Deepen adds one to a some(some(n)), and returns none and some(none) as
+// they came.
+func (h *host) Deepen(_ context.Context, x **uint32) (**uint32, error) {
+	if x == nil || *x == nil {
+		return x, nil
+	}
+	n := **x + 1
+	p := &n
+	return &p, nil
+}
+
 func (h *host) MintPair(ctx context.Context, a, b uint32) (witgo.Tuple2[Token, Token], error) {
 	x, _ := h.Mint(ctx, a)
 	y, _ := h.Mint(ctx, b)
@@ -333,6 +344,31 @@ func TestExportedResource(t *testing.T) {
 	}
 	_, err = a.Read(ctx)
 	require.Error(t, err, "a dropped handle is gone")
+}
+
+// option<option<u32>> keeps none and some(none) apart, into the guest, out to
+// the host's import, and back.
+func TestNestedOption(t *testing.T) {
+	k, _ := instantiate(t)
+	ctx := context.Background()
+	five := uint32(5)
+	pfive := &five
+	var none *uint32
+
+	got, err := k.API().Nest(ctx, nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	got, err = k.API().Nest(ctx, &none)
+	require.NoError(t, err)
+	require.NotNil(t, got, "some(none) came back as none")
+	require.Nil(t, *got)
+
+	got, err = k.API().Nest(ctx, &pfive)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, *got)
+	require.Equal(t, uint32(6), **got)
 }
 
 // Variant accessors report the case they were asked about only.

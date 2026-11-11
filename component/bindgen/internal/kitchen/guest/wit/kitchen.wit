@@ -52,6 +52,7 @@ interface host {
   mint-pair: func(a: u32, b: u32) -> tuple<token, token>;
   peek-all: func(ts: list<borrow<token>>) -> u32;
   try-mint: func(v: u32) -> result<token, string>;
+  deepen: func(x: option<option<u32>>) -> option<option<u32>>;
 }
 
 interface api {
@@ -72,6 +73,7 @@ interface api {
   give-token: func(v: u32) -> token;
   peek-token: func(t: borrow<token>) -> u32;
   pair-tokens: func(a: u32, b: u32) -> u32;
+  nest: func(x: option<option<u32>>) -> option<option<u32>>;
 
   roundtrip: func(e: everything) -> everything;
   area: func(s: shape) -> f64;

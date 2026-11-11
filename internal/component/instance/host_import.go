@@ -1768,6 +1768,10 @@ func walkHandles(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int
 		if v == nil {
 			return nil, nil
 		}
+		if s, ok := v.(abi.Some); ok {
+			x, err := sub(s.Value, &d.Element)
+			return abi.Some{Value: x}, err
+		}
 		return sub(v, &d.Element)
 	case binary.ResultDesc:
 		rv, ok := v.(abi.ResultValue)

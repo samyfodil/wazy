@@ -33,6 +33,14 @@ type VariantValue struct {
 	Payload Value  `json:"payload"` // case payload, or nil if case has no type
 }
 
+// Some is option<T>'s some(v) where a bare v cannot say it: an option whose
+// payload is itself an option, where nil is none at either level, so that
+// some(none) is Some{nil}. Lifting produces it exactly there; lowering takes
+// it for any option, as it takes a bare v.
+type Some struct {
+	Value Value
+}
+
 // ResultValue represents a result type (either ok or error).
 // IsErr determines whether this is an error (true) or ok (false).
 // Payload is the value (or nil if that arm has no type).

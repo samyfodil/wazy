@@ -386,9 +386,7 @@ func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string
 		t.elem, err = sub(d.Element)
 	case component.OptionDesc:
 		t.kind = kOption
-		if t.elem, err = sub(d.Element); err == nil && t.elem.kind == kOption {
-			err = fmt.Errorf("option<option<T>> is not supported: none and some(none) lift to the same value")
-		}
+		t.elem, err = sub(d.Element)
 	case component.ResultDesc:
 		t.kind = kResult
 		if d.Ok != nil {
@@ -860,6 +858,9 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("return out, nil")
 	case kOption:
 		w.p("if v == nil { return nil, nil }")
+		if t.elem.kind == kOption {
+			w.p("if s, ok := v.(component.Some); ok { v = s.Value }")
+		}
 		w.p("x, err := %s", t.elem.lift("h", "v"))
 		w.p("if err != nil { return nil, err }")
 		w.p("return &x, nil")
@@ -937,7 +938,11 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("return out")
 	case kOption:
 		w.p("if x == nil { return nil }")
-		w.p("return %s", t.elem.lower("h", "*x"))
+		if t.elem.kind == kOption {
+			w.p("return component.Some{Value: %s}", t.elem.lower("h", "*x"))
+		} else {
+			w.p("return %s", t.elem.lower("h", "*x"))
+		}
 	case kResult:
 		okv, errv := "nil", "nil"
 		if t.ok != nil {

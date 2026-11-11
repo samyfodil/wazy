@@ -625,7 +625,11 @@ func loadOption(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resol
 		return nil, nil
 	case 1:
 		// Some
-		return loadValue(mem, offset, elemType, resolve)
+		x, err := loadValue(mem, offset, elemType, resolve)
+		if _, nested := elemType.(bintype.OptionDesc); nested && err == nil {
+			return Some{x}, nil
+		}
+		return x, err
 	default:
 		return nil, fmt.Errorf("loadOption: invalid discriminant %d", discIdx)
 	}
@@ -1300,13 +1304,10 @@ func storeOption(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, ali
 	var discIdx uint32
 	var payload Value
 
-	if v == nil {
-		// None
-		discIdx = 0
-	} else {
-		// Some
-		discIdx = 1
-		payload = v
+	if s, ok := v.(Some); ok {
+		discIdx, payload = 1, s.Value
+	} else if v != nil {
+		discIdx, payload = 1, v
 	}
 
 	// Store discriminant (u8)

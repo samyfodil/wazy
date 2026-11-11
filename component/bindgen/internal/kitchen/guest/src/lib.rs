@@ -130,6 +130,11 @@ impl Api for Component {
         host::peek(&x) + host::peek(&y)
     }
 
+    // Through the host's deepen, which adds one to a some(some(n)).
+    fn nest(x: Option<Option<u32>>) -> Option<Option<u32>> {
+        host::deepen(x)
+    }
+
     fn nothing() {}
 }
 

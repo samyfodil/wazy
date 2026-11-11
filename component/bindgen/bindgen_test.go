@@ -93,10 +93,6 @@ func typecheck(t *testing.T, src []byte) {
 func TestGenerateRefuses(t *testing.T) {
 	for _, c := range []struct{ name, src, want string }{
 		{
-			"nested option", `package a:b; world w { export f: func() -> option<option<u32>>; }`,
-			"f: result: option<option<T>> is not supported",
-		},
-		{
 			"async", `package a:b; world w { export f: async func(); }`,
 			"f: async functions are not supported yet",
 		},

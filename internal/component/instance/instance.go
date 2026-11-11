@@ -1182,6 +1182,10 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if err != nil {
 			return nil, err
 		}
+		if s, ok := v.(abi.Some); ok {
+			x, err := in.resolveArgHandlesDepth(s.Value, et, depth+1, scope)
+			return abi.Some{Value: x}, err
+		}
 		return in.resolveArgHandlesDepth(v, et, depth+1, scope)
 
 	case binary.VariantDesc:
