@@ -37,6 +37,50 @@ world app {
 That is [`examples/custom-wit`](../../examples/custom-wit/), walked through end to end: it covers
 resources, a `borrow`, a `variant` and a `result<list<string>, variant>`.
 
+## Generating the bindings
+
+`wazy-bindgen` reads the world and writes the Go for it: a type for each record, variant, enum,
+flags and resource, a Go interface for each import, and a typed wrapper for the exports.
+
+```go
+//go:generate go run github.com/samyfodil/wazy/cmd/wazy-bindgen -wit store.wit -world app -package store -o bindings.go
+```
+
+The host then implements the import in Go types, and calls the exports the same way:
+
+```go
+type kv struct{ buckets map[store.Bucket]map[string][]byte }
+
+func (s *kv) NewBucket(ctx context.Context, name string) (store.Bucket, error)        { ... }
+func (s *kv) BucketPut(ctx context.Context, b store.Bucket, key string, v []byte) error { ... }
+func (s *kv) BucketGet(ctx context.Context, b store.Bucket, key string) (*[]byte, error) { ... }
+func (s *kv) DropBucket(ctx context.Context, b store.Bucket) error                      { ... }
+
+func (s *kv) ListKeys(ctx context.Context, b store.Bucket) (witgo.Result[[]string, store.Error], error) {
+	m, ok := s.buckets[b]
+	if !ok {
+		return witgo.Err[[]string](store.ErrorNoSuchBucket()), nil
+	}
+	// ...
+	return witgo.Ok[[]string, store.Error](keys), nil
+}
+
+app, err := store.Instantiate(ctx, r, wasm, store.Imports{Kv: &kv{}})
+out, err := app.Run(ctx) // a string
+```
+
+An `option<T>` is a `*T`, a `result<T, E>` a `witgo.Result[T, E]`, a tuple a `witgo.Tuple2`
+and so on, a `list<u8>` a `[]byte`. A resource the host implements is a `uint32` type of its own,
+the rep the host hands back from its constructor and gets back as `self`; its `Drop` method runs when
+the guest drops the last handle. A variant is a struct whose `Case` says which case it holds, with a
+constructor and an accessor for each.
+
+WASI imports are left out (`-skip wasi:` by default), since `imports/wasip2` implements them: pass
+`wasip2.WithWASI(...)` to `Instantiate` after the imports. Exported resources and async functions
+are not generated yet; `wazy-bindgen` says so and names the function rather than guessing.
+
+The rest of this page is what those bindings do, by hand, with the `component` API underneath.
+
 ## Implementing the host half
 
 `list-keys` returns `result<list<string>, error>` — both arms are composites, so neither can be

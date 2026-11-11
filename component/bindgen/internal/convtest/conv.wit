@@ -1,0 +1,44 @@
+package wazy:conv@0.1.0;
+
+interface types {
+  record item { id: u32, tags: list<string> }
+  variant node { leaf(u8), pair(tuple<s16, string>), none }
+  flags bits { a, b, c, d }
+  enum level { low, high }
+  record holder {
+    m: map<string, item>,
+    f: list<item, 2>,
+    o: option<list<node>>,
+    okonly: result<u64>,
+    bare: result,
+    errorly: result<_, level>,
+    t: tuple<bool, char, f32>,
+    b: bits,
+    l: level,
+    nested: list<list<u16>>,
+    fixedprim: list<s8, 2>,
+    ints: list<s32>,
+    chars: list<char>,
+    bools: list<bool>,
+  }
+}
+
+interface host {
+  use types.{item, node, bits, level, holder};
+  take: func(h: holder) -> holder;
+  keywords: func(range: u32, ctx: string, err: s8, chan: u16, impl: bool, res: u64) -> u32;
+  shuffle: func(t: tuple<u8, s16, u16>) -> map<u32, list<u8>>;
+}
+
+interface other {
+  record item { x: u8 }
+  use-item: func(i: item) -> item;
+}
+
+world conv {
+  use types.{holder};
+  import host;
+  import other;
+  import plain: func(x: u32) -> u32;
+  export echo: func(h: holder) -> u32;
+}

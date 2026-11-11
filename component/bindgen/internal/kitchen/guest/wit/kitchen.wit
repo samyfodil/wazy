@@ -1,0 +1,73 @@
+package wazy:bindgen-test@0.1.0;
+
+interface types {
+  /// A host resource with no functions of its own: host mints and reads it.
+  resource token;
+  record point { x: s32, y: s32, label: string }
+  enum color { red, green, blue }
+  flags perms { read, write, exec }
+  variant shape { circle(f64), rect(point), empty }
+  record everything {
+    b: bool,
+    tiny: s8,
+    utiny: u8,
+    short: s16,
+    ushort: u16,
+    int: s32,
+    uint: u32,
+    long: s64,
+    ulong: u64,
+    single: f32,
+    double: f64,
+    c: char,
+    s: string,
+    bytes: list<u8>,
+    words: list<string>,
+    points: list<point>,
+    maybe: option<point>,
+    nothing: option<u32>,
+    pair: tuple<u32, string>,
+    fixed: list<u16, 3>,
+    col: color,
+    per: perms,
+    shapes: list<shape>,
+  }
+}
+
+interface host {
+  use types.{point, color, perms, shape, everything, token};
+
+  resource counter {
+    constructor(start: u32);
+    bump: func(by: u32) -> u32;
+    zero: static func() -> counter;
+  }
+
+  echo: func(e: everything) -> everything;
+  classify: func(s: shape) -> result<color, string>;
+  checked: func(n: u32) -> result<_, string>;
+  pick: func(c: color, p: perms) -> option<string>;
+  mint: func(v: u32) -> token;
+  peek: func(t: borrow<token>) -> u32;
+}
+
+interface api {
+  use types.{point, color, perms, shape, everything};
+
+  roundtrip: func(e: everything) -> everything;
+  area: func(s: shape) -> f64;
+  check: func(n: u32) -> result<u32, string>;
+  first: func(xs: list<point>) -> option<point>;
+  swap: func(t: tuple<string, u32>) -> tuple<u32, string>;
+  use-counter: func(start: u32, by: u32) -> u32;
+  classify-all: func(xs: list<shape>) -> list<result<color, string>>;
+  pick-name: func(c: color, p: perms) -> option<string>;
+  use-tokens: func(a: u32, b: u32) -> u32;
+  nothing: func();
+}
+
+world kitchen {
+  import host;
+  export api;
+  export ping: func(s: string) -> string;
+}
