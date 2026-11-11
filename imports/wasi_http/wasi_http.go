@@ -58,6 +58,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // Module names the guest imports by. These strings are the ABI: they come
@@ -350,7 +351,7 @@ func (h *host) newOutgoingRequest(_ context.Context, mod api.Module,
 ) uint32 {
 	req := &request{scheme: "https", headers: headerHandle}
 
-	if int(method) >= len(methods) {
+	if u32.OutOfRange(method, len(methods)) {
 		// Upstream calls log.Fatalf here, which would take the host process
 		// down with it. Trapping stops the guest that lied instead.
 		panic(fmt.Errorf("wasi_http: unknown method enum %d", method))

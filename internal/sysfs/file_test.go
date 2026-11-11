@@ -777,6 +777,27 @@ func TestFileSeek_Unsupported(t *testing.T) {
 	require.EqualErrno(t, sys.ENOSYS, errno)
 }
 
+// TestFilePwrite_append checks pwrite on a file opened to append, which
+// os.File.WriteAt refuses. POSIX writes at the offset, Linux at the end; the
+// file offset stays where it was either way.
+func TestFilePwrite_append(t *testing.T) {
+	p := path.Join(t.TempDir(), wazyFile)
+	f := requireOpenFile(t, p, sys.O_RDWR|sys.O_CREAT|sys.O_APPEND, 0o600)
+	defer f.Close()
+
+	requireWrite(t, f, []byte("ab"))
+	n, errno := f.Pwrite([]byte("xyz"), 0)
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, 3, n)
+
+	offset, errno := f.Seek(0, io.SeekCurrent)
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, int64(2), offset)
+	b, err := os.ReadFile(p)
+	require.NoError(t, err)
+	require.True(t, string(b) == "xyz" || string(b) == "abxyz", string(b))
+}
+
 func TestFileWriteAndPwrite(t *testing.T) {
 	// sys.FS doesn't support writes, and there is no other built-in
 	// implementation except os.File.

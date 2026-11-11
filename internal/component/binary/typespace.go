@@ -1,6 +1,10 @@
 package binary
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/samyfodil/wazy/internal/u32"
+)
 
 // This file implements the component's full TYPE index space, as distinct
 // from Types (which only holds type-section deftypes -- see the Types field
@@ -210,18 +214,36 @@ func (c *Component) resolveTypeSlow(idx uint32) (TypeDesc, error) {
 // afterwards. Reports whether all of them resolved: one that did not leaves
 // the Component unfrozen, so the lazy, locked path still handles it.
 //
-// Only Sort 0x03 / TargetKind 0x00 aliases -- the export form, the one branch
-// of resolveAlias that interns. An "outer" alias (0x02) is deliberately left
-// alone: Component.Outer is not wired up until after this Component's own
-// decode returns, so resolving one here would fail for a reason that will not
-// be true later.
+// Only Sort 0x03 / TargetKind 0x00 aliases -- the export form. An "outer"
+// alias (0x02) is left to precomputeOuterAliases: Component.Outer is not wired
+// up until after this Component's own decode returns, so resolving one here
+// would fail for a reason that will not be true later.
 func (c *Component) precomputeImportedAliases() bool {
 	complete := true
 	for idx, entry := range c.TypeSpace {
-		if entry.Kind != TypeSpaceAlias || int(entry.Alias) >= len(c.Aliases) {
+		if entry.Kind != TypeSpaceAlias || u32.OutOfRange(entry.Alias, len(c.Aliases)) {
 			continue
 		}
 		if al := c.Aliases[entry.Alias]; al.Sort != 0x03 || al.TargetKind != 0x00 {
+			continue
+		}
+		if _, err := c.resolveTypeDepth(uint32(idx), 0); err != nil {
+			complete = false
+		}
+	}
+	return complete
+}
+
+// precomputeOuterAliases resolves every type-sort alias of an enclosing
+// component's type, which interns, as precomputeImportedAliases does for
+// export aliases. Reports whether all of them resolved.
+func (c *Component) precomputeOuterAliases() bool {
+	complete := true
+	for idx, entry := range c.TypeSpace {
+		if entry.Kind != TypeSpaceAlias || u32.OutOfRange(entry.Alias, len(c.Aliases)) {
+			continue
+		}
+		if al := c.Aliases[entry.Alias]; al.Sort != 0x03 || al.TargetKind != 0x02 || al.OuterCount == 0 {
 			continue
 		}
 		if _, err := c.resolveTypeDepth(uint32(idx), 0); err != nil {
@@ -247,22 +269,22 @@ func (c *Component) ResourceDefIndex(idx uint32) uint32 {
 }
 
 func (c *Component) resourceDefIndexDepth(idx uint32, depth int) uint32 {
-	if depth > maxTypeAliasDepth || int(idx) >= len(c.TypeSpace) {
+	if depth > maxTypeAliasDepth || u32.OutOfRange(idx, len(c.TypeSpace)) {
 		return idx
 	}
 	switch entry := c.TypeSpace[idx]; entry.Kind {
 	case TypeSpaceExport:
-		if int(entry.Export) < len(c.Exports) {
+		if !u32.OutOfRange(entry.Export, len(c.Exports)) {
 			return c.resourceDefIndexDepth(c.Exports[entry.Export].ExternIndex, depth+1)
 		}
 	case TypeSpaceImport:
-		if int(entry.Import) < len(c.Imports) {
+		if !u32.OutOfRange(entry.Import, len(c.Imports)) {
 			if im := c.Imports[entry.Import]; im.TypeEqBound {
 				return c.resourceDefIndexDepth(im.TypeEqIndex, depth+1)
 			}
 		}
 	case TypeSpaceAlias:
-		if int(entry.Alias) < len(c.Aliases) {
+		if !u32.OutOfRange(entry.Alias, len(c.Aliases)) {
 			// A self "outer" type alias (OuterCount 0) names another index in
 			// this same TypeSpace -- follow it, as resolveTypeDepth does.
 			if al := c.Aliases[entry.Alias]; al.Sort == 0x03 && al.TargetKind == 0x02 && al.OuterCount == 0 {
@@ -280,7 +302,7 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 
 	if idx >= extraTypeBase {
 		i := idx - extraTypeBase
-		if int(i) >= len(c.extraTypes) {
+		if u32.OutOfRange(i, len(c.extraTypes)) {
 			return nil, fmt.Errorf("type index %d: out of range of the %d-entry extra type table", idx, len(c.extraTypes))
 		}
 		if c.extraTypes[i] == nil {
@@ -299,27 +321,27 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 		// definitions at all, or (far more commonly in this codebase's
 		// tests) a hand-built Component that never went through Decode.
 		// Preserve pre-TypeSpace behavior: index Types directly.
-		if int(idx) >= len(c.Types) {
+		if u32.OutOfRange(idx, len(c.Types)) {
 			return nil, fmt.Errorf("type index %d out of range of %d types", idx, len(c.Types))
 		}
 		return c.Types[idx].Descriptor, nil
 	}
 
-	if int(idx) >= len(c.TypeSpace) {
+	if u32.OutOfRange(idx, len(c.TypeSpace)) {
 		return nil, fmt.Errorf("type index %d out of range of the %d-entry component type index space", idx, len(c.TypeSpace))
 	}
 
 	entry := c.TypeSpace[idx]
 	switch entry.Kind {
 	case TypeSpaceDef:
-		if int(entry.Def) >= len(c.Types) {
+		if u32.OutOfRange(entry.Def, len(c.Types)) {
 			return nil, fmt.Errorf("type index %d: internal error: deftype index %d out of range of %d types", idx, entry.Def, len(c.Types))
 		}
 		return c.Types[entry.Def].Descriptor, nil
 
 	case TypeSpaceImport:
 		name := "?"
-		if int(entry.Import) < len(c.Imports) {
+		if !u32.OutOfRange(entry.Import, len(c.Imports)) {
 			im := c.Imports[entry.Import]
 			name = im.Name
 			// A type import with an `eq N` bound is declared equal to the
@@ -333,7 +355,7 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 		return nil, fmt.Errorf("type index %d names an imported type (import %q); its structural definition is not decoded by this milestone", idx, name)
 
 	case TypeSpaceAlias:
-		if int(entry.Alias) >= len(c.Aliases) {
+		if u32.OutOfRange(entry.Alias, len(c.Aliases)) {
 			return nil, fmt.Errorf("type index %d: internal error: alias index %d out of range of %d aliases", idx, entry.Alias, len(c.Aliases))
 		}
 		return c.resolveAlias(c.Aliases[entry.Alias], idx, depth)
@@ -342,7 +364,7 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 		// An "export introduces an alias" entry: it aliases the type named by
 		// the export's sortidx, which is itself an index into this same
 		// TypeSpace. Resolve through to it.
-		if int(entry.Export) >= len(c.Exports) {
+		if u32.OutOfRange(entry.Export, len(c.Exports)) {
 			return nil, fmt.Errorf("type index %d: internal error: export index %d out of range of %d exports", idx, entry.Export, len(c.Exports))
 		}
 		return c.resolveTypeDepth(c.Exports[entry.Export].ExternIndex, depth+1)
@@ -359,8 +381,8 @@ func (c *Component) resolveTypeDepth(idx uint32, depth int) (TypeDesc, error) {
 // importedInstanceType is the instance type of the imported instance at
 // component instance index instIdx, its index resolved with resolve.
 func (c *Component) importedInstanceType(instIdx uint32, resolve func(uint32) (TypeDesc, error)) (InstanceDesc, bool) {
-	if int(instIdx) < len(c.ComponentInstanceSpace) {
-		if e := c.ComponentInstanceSpace[instIdx]; e.Kind == ComponentInstanceFromImport && int(e.Import) < len(c.Imports) {
+	if !u32.OutOfRange(instIdx, len(c.ComponentInstanceSpace)) {
+		if e := c.ComponentInstanceSpace[instIdx]; e.Kind == ComponentInstanceFromImport && !u32.OutOfRange(e.Import, len(c.Imports)) {
 			if im := c.Imports[e.Import]; im.ExternType == 0x05 {
 				if td, err := resolve(im.ExternIndex); err == nil {
 					inst, ok := td.(InstanceDesc)
@@ -397,7 +419,7 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 		// routed through ComponentInstanceSpace like the import branch
 		// below) so a hand-built Component with no ComponentInstanceSpace
 		// still resolves this the way it always has.
-		if int(al.InstanceIdx) < len(c.Instances) {
+		if !u32.OutOfRange(al.InstanceIdx, len(c.Instances)) {
 			inst := c.Instances[al.InstanceIdx]
 			if inst.Kind == 0x01 {
 				for _, ie := range inst.Exports {
@@ -434,7 +456,20 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 				// attempt that fails must not grow the table it exists to
 				// keep bounded.
 				mark := len(c.extraTypes)
-				global, gerr := c.globalizeLocalRef(instDesc.Types, exp, map[uint32]uint32{})
+				// A slot the instance type aliases out of a type index space around it
+				// (`alias outer 1 N`, how wit-component encodes `use iface.{T}`) is that
+				// space's type N: this component's own for count 1.
+				memo := make(map[uint32]uint32, len(instDesc.Outer))
+				var gerr error
+				for local, o := range instDesc.Outer {
+					if memo[local], gerr = c.enclosingTypeIndex(o.Count-1, o.Index, depth); gerr != nil {
+						break
+					}
+				}
+				var global TypeRef
+				if gerr == nil {
+					global, gerr = c.globalizeLocalRef(localTypes(instDesc.Types), exp, memo)
+				}
 				if gerr != nil {
 					c.extraTypes = c.extraTypes[:mark]
 					return nil, fmt.Errorf("type index %d: alias exports %q from instance %d: %w", idx, al.Name, al.InstanceIdx, gerr)
@@ -468,21 +503,30 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 		// re-export a type its parent defines (fused.22.wast's `$c1` aliases
 		// all six of the root's flags types), so failing here made those
 		// components uninstantiable.
-		outer := c
-		for i := uint32(0); i < al.OuterCount; i++ {
-			if outer.Outer == nil {
-				return nil, fmt.Errorf("type index %d: outer alias (count=%d) targets %d enclosing component(s), but only %d are known (this component was decoded standalone, or is hand-built)", idx, al.OuterCount, al.OuterCount, i)
-			}
-			outer = outer.Outer
+		if al.OuterCount == 0 {
+			return c.resolveTypeDepth(al.OuterIndex, depth+1)
 		}
-		if outer != c {
-			// A different Component means a different mu; take it rather than
-			// interning into it unguarded. Outer chains run strictly outward,
-			// so nesting these cannot cycle.
-			outer.mu.Lock()
-			defer outer.mu.Unlock()
+		if td, ok := c.aliasCache[idx]; ok {
+			return td, nil
 		}
-		return outer.resolveTypeDepth(al.OuterIndex, depth+1)
+		outer, err := c.enclosing(al.OuterCount)
+		if err != nil {
+			return nil, fmt.Errorf("type index %d: %w", idx, err)
+		}
+		// A different Component means a different mu; take it rather than
+		// interning into it unguarded. Outer chains run strictly outward,
+		// so nesting these cannot cycle.
+		outer.mu.Lock()
+		defer outer.mu.Unlock()
+		td, err := c.importType(outer, al.OuterIndex, depth)
+		if err != nil {
+			return nil, fmt.Errorf("type index %d: outer alias (count=%d) of type %d: %w", idx, al.OuterCount, al.OuterIndex, err)
+		}
+		if c.aliasCache == nil {
+			c.aliasCache = make(map[uint32]TypeDesc, 4)
+		}
+		c.aliasCache[idx] = td
+		return td, nil
 
 	default:
 		// TargetKind 0x01 (core export) cannot legally carry a type-sort
@@ -493,8 +537,84 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 	}
 }
 
+// enclosing returns the component count levels out from c.
+func (c *Component) enclosing(count uint32) (*Component, error) {
+	outer := c
+	for i := uint32(0); i < count; i++ {
+		if outer.Outer == nil {
+			return nil, fmt.Errorf("outer alias (count=%d) targets %d enclosing component(s), but only %d are known (this component was decoded standalone, or is hand-built)", count, count, i)
+		}
+		outer = outer.Outer
+	}
+	return outer, nil
+}
+
+// enclosingTypeIndex is this component's index for type idx of the component
+// count levels out: idx itself for count 0, an escape-range index otherwise.
+func (c *Component) enclosingTypeIndex(count, idx uint32, depth int) (uint32, error) {
+	if count == 0 {
+		return idx, nil
+	}
+	outer, err := c.enclosing(count)
+	if err != nil {
+		return 0, err
+	}
+	outer.mu.Lock()
+	defer outer.mu.Unlock()
+	ref, err := c.globalizeLocalRef(enclosingTypes(outer, depth), TypeRef{TypeIndex: &idx}, map[uint32]uint32{})
+	if err != nil {
+		return 0, err
+	}
+	return *ref.TypeIndex, nil
+}
+
+// importType resolves type idx of outer, an enclosing component, with
+// every index nested in it rewritten into this component's: an index of
+// outer's names whatever type this component has at that index.
+func (c *Component) importType(outer *Component, idx uint32, depth int) (TypeDesc, error) {
+	src := enclosingTypes(outer, depth)
+	td, err := src(idx)
+	if err != nil {
+		return nil, err
+	}
+	switch td.(type) {
+	case ResourceDesc, InstanceDesc, ComponentDesc:
+		// A resource is identified by its index, not resolved through it; an
+		// instance or component type's Outer entries count from where it is
+		// declared, so it is read in outer's space wherever it is used.
+		return td, nil
+	}
+	mark := len(c.extraTypes)
+	td, err = c.globalizeLocalTypeDesc(src, td, map[uint32]uint32{})
+	if err != nil {
+		c.extraTypes = c.extraTypes[:mark]
+		return nil, err
+	}
+	return td, nil
+}
+
+// typeSource looks a type up in the type index space a TypeRef being
+// globalized indexes.
+type typeSource func(idx uint32) (TypeDesc, error)
+
+// localTypes is the type index space an imported instance type declares.
+func localTypes(types []TypeDesc) typeSource {
+	return func(i uint32) (TypeDesc, error) {
+		if u32.OutOfRange(i, len(types)) || types[i] == nil {
+			return nil, fmt.Errorf("local type index %d is out of range, or was not resolved structurally by this decoder (an abstract resource export, or a type-sort alias)", i)
+		}
+		return types[i], nil
+	}
+}
+
+// enclosingTypes is the type index space of outer, an enclosing component.
+// Its caller holds outer.mu.
+func enclosingTypes(outer *Component, depth int) typeSource {
+	return func(i uint32) (TypeDesc, error) { return outer.resolveTypeDepth(i, depth+1) }
+}
+
 // globalizeLocalRef rewrites one TypeRef found inside an imported instance's
-// local type graph (localTypes -- an InstanceDesc's own Types, per its doc)
+// local type graph (src -- an InstanceDesc's own Types, per its doc)
 // so it resolves through c's ordinary Resolver: unchanged if it's a
 // primitive, or remapped to a fresh Component.extraTypes index (recursively
 // globalizing, and interning, the local type it names) if it names a local
@@ -503,7 +623,7 @@ func (c *Component) resolveAlias(al AliasDef, idx uint32, depth int) (TypeDesc, 
 // genuine cycle (e.g. a locally-declared resource referencing its own
 // handle) by returning the placeholder reserved for an in-progress index
 // instead of recursing forever.
-func (c *Component) globalizeLocalRef(localTypes []TypeDesc, ref TypeRef, memo map[uint32]uint32) (TypeRef, error) {
+func (c *Component) globalizeLocalRef(src typeSource, ref TypeRef, memo map[uint32]uint32) (TypeRef, error) {
 	if ref.Primitive != "" || ref.TypeIndex == nil {
 		return ref, nil
 	}
@@ -511,14 +631,15 @@ func (c *Component) globalizeLocalRef(localTypes []TypeDesc, ref TypeRef, memo m
 	if g, ok := memo[localIdx]; ok {
 		return TypeRef{TypeIndex: &g}, nil
 	}
-	if int(localIdx) >= len(localTypes) || localTypes[localIdx] == nil {
-		return TypeRef{}, fmt.Errorf("local type index %d is out of range, or was not resolved structurally by this decoder (an abstract resource export, or a type-sort alias)", localIdx)
+	local, err := src(localIdx)
+	if err != nil {
+		return TypeRef{}, err
 	}
 	// Reserve (and memoize) the escape slot before recursing, so a
 	// self-referential local type terminates instead of looping forever.
 	global := c.internExtraType(nil)
 	memo[localIdx] = global
-	rewritten, err := c.globalizeLocalTypeDesc(localTypes, localTypes[localIdx], memo)
+	rewritten, err := c.globalizeLocalTypeDesc(src, local, memo)
 	if err != nil {
 		return TypeRef{}, err
 	}
@@ -531,31 +652,31 @@ func (c *Component) globalizeLocalRef(localTypes []TypeDesc, ref TypeRef, memo m
 // globalizeLocalRef, returning an equivalent TypeDesc whose own TypeRefs are
 // all either primitives or Component.extraTypes indices -- safe to embed in a
 // TypeDesc handed to an ordinary caller of this Component's Resolver.
-func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, memo map[uint32]uint32) (TypeDesc, error) {
+func (c *Component) globalizeLocalTypeDesc(src typeSource, d TypeDesc, memo map[uint32]uint32) (TypeDesc, error) {
 	switch t := d.(type) {
 	case PrimitiveDesc, FlagsDesc, EnumDesc:
 		return d, nil
 
 	case ListDesc:
-		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		elem, err := c.globalizeLocalRef(src, t.Element, memo)
 		if err != nil {
 			return nil, err
 		}
 		return ListDesc{Element: elem}, nil
 
 	case FixedListDesc:
-		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		elem, err := c.globalizeLocalRef(src, t.Element, memo)
 		if err != nil {
 			return nil, err
 		}
 		return FixedListDesc{Element: elem, Length: t.Length}, nil
 
 	case MapDesc:
-		key, err := c.globalizeLocalRef(localTypes, t.Key, memo)
+		key, err := c.globalizeLocalRef(src, t.Key, memo)
 		if err != nil {
 			return nil, err
 		}
-		val, err := c.globalizeLocalRef(localTypes, t.Value, memo)
+		val, err := c.globalizeLocalRef(src, t.Value, memo)
 		if err != nil {
 			return nil, err
 		}
@@ -564,7 +685,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case RecordDesc:
 		fields := make([]RecordField, len(t.Fields))
 		for i, f := range t.Fields {
-			ft, err := c.globalizeLocalRef(localTypes, f.Type, memo)
+			ft, err := c.globalizeLocalRef(src, f.Type, memo)
 			if err != nil {
 				return nil, err
 			}
@@ -575,7 +696,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case TupleDesc:
 		elems := make([]TypeRef, len(t.Elements))
 		for i, e := range t.Elements {
-			er, err := c.globalizeLocalRef(localTypes, e, memo)
+			er, err := c.globalizeLocalRef(src, e, memo)
 			if err != nil {
 				return nil, err
 			}
@@ -588,7 +709,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 		for i, cs := range t.Cases {
 			nc := VariantCase{Name: cs.Name}
 			if cs.Type != nil {
-				ct, err := c.globalizeLocalRef(localTypes, *cs.Type, memo)
+				ct, err := c.globalizeLocalRef(src, *cs.Type, memo)
 				if err != nil {
 					return nil, err
 				}
@@ -599,7 +720,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 		return VariantDesc{Cases: cases}, nil
 
 	case OptionDesc:
-		elem, err := c.globalizeLocalRef(localTypes, t.Element, memo)
+		elem, err := c.globalizeLocalRef(src, t.Element, memo)
 		if err != nil {
 			return nil, err
 		}
@@ -608,14 +729,14 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case ResultDesc:
 		nr := ResultDesc{}
 		if t.Ok != nil {
-			ok, err := c.globalizeLocalRef(localTypes, *t.Ok, memo)
+			ok, err := c.globalizeLocalRef(src, *t.Ok, memo)
 			if err != nil {
 				return nil, err
 			}
 			nr.Ok = &ok
 		}
 		if t.Err != nil {
-			er, err := c.globalizeLocalRef(localTypes, *t.Err, memo)
+			er, err := c.globalizeLocalRef(src, *t.Err, memo)
 			if err != nil {
 				return nil, err
 			}
@@ -626,7 +747,7 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case StreamDesc:
 		ns := StreamDesc{}
 		if t.Element != nil {
-			el, err := c.globalizeLocalRef(localTypes, *t.Element, memo)
+			el, err := c.globalizeLocalRef(src, *t.Element, memo)
 			if err != nil {
 				return nil, err
 			}
@@ -637,11 +758,39 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 	case FutureDesc:
 		nf := FutureDesc{}
 		if t.Element != nil {
-			el, err := c.globalizeLocalRef(localTypes, *t.Element, memo)
+			el, err := c.globalizeLocalRef(src, *t.Element, memo)
 			if err != nil {
 				return nil, err
 			}
 			nf.Element = &el
+		}
+		return nf, nil
+
+	case FuncDesc:
+		nf := FuncDesc{Params: make([]FuncParam, len(t.Params)), Async: t.Async}
+		for i, p := range t.Params {
+			pt, err := c.globalizeLocalRef(src, p.Type, memo)
+			if err != nil {
+				return nil, err
+			}
+			nf.Params[i] = FuncParam{Name: p.Name, Type: pt}
+		}
+		if t.Results.Unnamed != nil {
+			r, err := c.globalizeLocalRef(src, *t.Results.Unnamed, memo)
+			if err != nil {
+				return nil, err
+			}
+			nf.Results.Unnamed = &r
+		}
+		if t.Results.Named != nil {
+			nf.Results.Named = make([]FuncResult, len(t.Results.Named))
+			for i, r := range t.Results.Named {
+				rt, err := c.globalizeLocalRef(src, r.Type, memo)
+				if err != nil {
+					return nil, err
+				}
+				nf.Results.Named[i] = FuncResult{Name: r.Name, Type: rt}
+			}
 		}
 		return nf, nil
 
@@ -652,7 +801,9 @@ func (c *Component) globalizeLocalTypeDesc(localTypes []TypeDesc, d TypeDesc, me
 		// canonTag feeds it to the resource canonicalizer, resourceOrigin
 		// keys on it, and importedTypeIndex scans TypeSpace for it (see
 		// instance/composition.go). An extraTypes index is as wrong there as
-		// the instance-local one it came from.
+		// the instance-local one it came from. (An outer alias cannot reach
+		// one: the component model forbids aliasing a type that refers to a
+		// resource of another component.)
 		//
 		// So fail, rather than hand back a descriptor carrying an index from
 		// the wrong space. That matches the abstract-resource case, which

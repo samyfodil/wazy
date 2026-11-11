@@ -607,7 +607,9 @@ func TestE2E(t *testing.T) {
 				{params: []uint64{0x3, 0xbeef, 0xffffffff}, expErr: "unaligned atomic"},
 				{params: []uint64{0x4, 0xbeef, 0xffffffff}, expResults: []uint64{1}}, // exp not equal, returns 1
 
-				{params: []uint64{0xffffffff, 0xbeef, 0xffffffff}, expErr: "out of bounds memory access"},
+				{params: []uint64{0xfffffffc, 0xbeef, 0xffffffff}, expErr: "out of bounds memory access"},
+				// Misaligned as well as out of bounds: misaligned, as the interpreter has it.
+				{params: []uint64{0xffffffff, 0xbeef, 0xffffffff}, expErr: "unaligned atomic"},
 			},
 		},
 		{
@@ -625,7 +627,8 @@ func TestE2E(t *testing.T) {
 				{params: []uint64{0x7, 0xbeef, 0xffffffff}, expErr: "unaligned atomic"},
 				{params: []uint64{0x8, 0xbeef, 0xffffffff}, expResults: []uint64{1}}, // exp not equal, returns 1
 
-				{params: []uint64{0xffffffff, 0xbeef, 0xffffffff}, expErr: "out of bounds memory access"},
+				{params: []uint64{0xfffffff8, 0xbeef, 0xffffffff}, expErr: "out of bounds memory access"},
+				{params: []uint64{0xffffffff, 0xbeef, 0xffffffff}, expErr: "unaligned atomic"},
 			},
 		},
 		{
@@ -2087,6 +2090,11 @@ func TestRefFuncMemoized(t *testing.T) {
 	require.Equal(t, refs[0], refs[1])    // Two executions of ref.func 0.
 	require.Equal(t, refs[0], refs[1000]) // ...and the element segment's own ref.func 0.
 
+	// Past the calls that take their stack from a sync.Pool, which drops what it is given at random under -race.
+	for range native.StackReleasesBeforeKeepForTest {
+		stack[0] = 2
+		require.NoError(t, f.CallWithStack(ctx, stack))
+	}
 	require.Zero(t, testing.AllocsPerRun(5, func() {
 		stack[0] = 2
 		if err := f.CallWithStack(ctx, stack); err != nil {
@@ -2138,7 +2146,7 @@ func BenchmarkRefFuncLoop(b *testing.B) {
 // stack: the pool round trip a once-called handle does (which is what keeps
 // mod.ExportedFunction(name).Call(ctx) from allocating ~10KB per lookup) and the retained buffer a
 // reused handle keeps instead. They have to produce identical results, and a call that grows the
-// stack has to give the grown buffer back rather than hold it forever. See callEngine.stackRetained.
+// stack has to give the grown buffer back rather than hold it forever. See callEngine.stackReleases.
 func TestCallEngine_stackRetainedAcrossCalls(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigCompiler())
@@ -2181,16 +2189,19 @@ func TestCallEngine_stackRetainedAcrossCalls(t *testing.T) {
 	t.Run("reused handle keeps its buffer", func(t *testing.T) {
 		id := inst.ExportedFunction("id")
 
-		// The first call releases: a handle called once and dropped -- what ExportedFunction().Call()
-		// produces every time -- must leave its buffer in the pool for the next lookup.
-		res, err := id.Call(ctx, 42)
-		require.NoError(t, err)
-		require.Equal(t, uint64(42), res[0])
-		require.Equal(t, 0, native.RetainedStackLenForTest(id))
+		// The early calls release: a handle called a few times and dropped -- what ExportedFunction().Call()
+		// produces every time, and a handle looked up per request -- must leave its buffer in the pool for
+		// the next lookup.
+		for i := 0; i < native.StackReleasesBeforeKeepForTest; i++ {
+			res, err := id.Call(ctx, 42)
+			require.NoError(t, err)
+			require.Equal(t, uint64(42), res[0])
+			require.Equal(t, 0, native.RetainedStackLenForTest(id), "call %d kept a buffer it should have released", i)
+		}
 
-		// From the second call on it holds the buffer, and still computes the same thing.
+		// From then on it holds the buffer, and still computes the same thing.
 		for i := 0; i < 3; i++ {
-			res, err = id.Call(ctx, 42)
+			res, err := id.Call(ctx, 42)
 			require.NoError(t, err)
 			require.Equal(t, uint64(42), res[0])
 			require.True(t, native.RetainedStackLenForTest(id) > 0, "call %d released a buffer it should have kept", i)
@@ -2202,10 +2213,15 @@ func TestCallEngine_stackRetainedAcrossCalls(t *testing.T) {
 		const deep, shallow = 20000, 10
 		const deepSum, shallowSum = deep * (deep + 1) / 2, shallow * (shallow + 1) / 2
 
-		// Call once so the handle is past its first (always-releasing) call.
-		res, err := rec.Call(ctx, shallow)
-		require.NoError(t, err)
-		require.Equal(t, uint64(shallowSum), res[0])
+		// Call it enough that the handle is past its releasing calls, and holds its buffer.
+		var res []uint64
+		var err error
+		for i := 0; i <= native.StackReleasesBeforeKeepForTest; i++ {
+			res, err = rec.Call(ctx, shallow)
+			require.NoError(t, err)
+			require.Equal(t, uint64(shallowSum), res[0])
+		}
+		require.True(t, native.RetainedStackLenForTest(rec) > 0)
 
 		// This one recurses far enough to replace the buffer via growStack. The replacement is
 		// bigger than a fresh call needs, so it goes back to the pool instead of being held.

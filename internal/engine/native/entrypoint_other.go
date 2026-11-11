@@ -2,9 +2,7 @@
 
 package native
 
-import (
-	"runtime"
-)
+import "runtime"
 
 func entrypointAsm(preambleExecutable, functionExecutable *byte, executionContextPtr uintptr, moduleContextPtr *byte, paramResultStackPtr *uint64, goAllocatedStackSlicePtr uintptr) {
 	panic(runtime.GOARCH)

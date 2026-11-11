@@ -4,6 +4,7 @@ package frontend
 import (
 	"bytes"
 	"math"
+	"runtime"
 	"sync"
 
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
@@ -19,25 +20,29 @@ type Compiler struct {
 	m      *wasm.Module
 	offset *nativeapi.ModuleContextOffsetData
 	// ssaBuilder is a ssa.Builder used by this frontend.
-	ssaBuilder             ssa.Builder
-	signatures             map[*wasm.FunctionType]*ssa.Signature
-	listenerSignatures     map[*wasm.FunctionType][2]*ssa.Signature
-	memoryGrowSig          ssa.Signature
-	memoryWait32Sig        ssa.Signature
-	memoryWait64Sig        ssa.Signature
-	memoryNotifySig        ssa.Signature
-	checkModuleExitCodeSig ssa.Signature
-	tableGrowSig           ssa.Signature
-	refFuncSig             ssa.Signature
-	gcSig                  ssa.Signature
-	memmoveSig             ssa.Signature
-	memclrSig              ssa.Signature
-	ensureTermination      bool
-	// gcEnabled makes every loop header poll the collector's pause flag; see emitGCSafepoint.
-	gcEnabled bool
-	// maxGCRoots is the most values any one safepoint in this function writes, which is how big the root
-	// buffer has to be. See materializeGCRoots.
-	maxGCRoots int
+	ssaBuilder         ssa.Builder
+	signatures         map[*wasm.FunctionType]*ssa.Signature
+	listenerSignatures map[*wasm.FunctionType][2]*ssa.Signature
+	memoryGrowSig      ssa.Signature
+	memoryWait32Sig    ssa.Signature
+	memoryWait64Sig    ssa.Signature
+	memoryNotifySig    ssa.Signature
+	tableGrowSig       ssa.Signature
+	refFuncSig         ssa.Signature
+	gcSig              ssa.Signature
+	memmoveSig         ssa.Signature
+	memclrSig          ssa.Signature
+	// loopYield makes loop headers, and the entries of the functions that need it,
+	// check whether the runtime has asked the goroutine to stop. See
+	// emitPreemptCheck.
+	loopYield bool
+	// entryCheck is the function's entry check, if it has one, and opening is
+	// set while only blocks and nops have been lowered. See finishPreemptCheck.
+	// tunedWork is the work of the loops that count on the entry check instead of
+	// checking on entry themselves. See checkOnEntry.
+	entryCheck *ssa.Instruction
+	opening    bool
+	tunedWork  uint64
 
 	// Followings are reset by per function, except the module-invariant memory,
 	// table and global tables that declareModuleInvariants fills in once.
@@ -51,6 +56,9 @@ type Compiler struct {
 	wasmFunctionLocalTypes              []wasm.ValueType
 	wasmFunctionBody                    []byte
 	wasmFunctionBodyOffsetInCodeSection uint64
+	// branchHints are the function's wasm.Code.BranchHints, and branchHintAt how far branchHint has read them.
+	branchHints  []wasm.BranchHint
+	branchHintAt int
 	// memoryBaseVariables, memoryLenVariables, memoryShared, memoryMaxPages, and
 	// memoryMinSizeInBytes are index-correlated with the module's memory index
 	// space (imports first, then module-defined -- see wasm.Module.MemorySection).
@@ -99,6 +107,32 @@ type Compiler struct {
 	knownSafeBounds    [] /* ssa.ValueID to */ knownSafeBound
 	knownSafeBoundsSet []ssa.ValueID
 
+	// wideMulTerms is scratch for fuseWideMulAdd.
+	wideMulTerms []ssa.Value
+
+	// leafKinds caches isInlinableLeaf per local function, and inlineLocals is inlineLeaf's scratch.
+	leafKinds    []byte
+	inlineLocals []ssa.Variable
+	// inlineLeaves turns isInlinableLeaf on; see SetInlineLeaves.
+	inlineLeaves bool
+	// vecMap turns vector map loops on; see SetVecMap.
+	vecMap bool
+	// inlinedCallee is one more than the local index of the function inlineLeaf or inlineSelf is
+	// lowering, and zero outside one. See memoryOutOfBoundsCode.
+	inlinedCallee uint32
+	// inlineBase is, while inlineSelf lowers the function's body in place of a call to itself, how many
+	// control frames there are with the body's own; a return in it branches to that frame.
+	inlineBase int
+	// selfInlinable caches isInlinableSelf's verdict on the body of the function being compiled.
+	selfInlinable byte
+	// inlineResults is the block type of the frame inlineSelf lowers the body in.
+	inlineResults wasm.FunctionType
+	// vecSum is the vector sum being lowered, and where to look for the next.
+	vecSum vecSum
+	// lastStore is the last full-width store, while nothing that may write memory has run since in its
+	// block: a load of the same address and width takes its value instead of reading it back.
+	lastStore storedValue
+
 	knownSafeBoundsAtTheEndOfBlocks   [] /* ssa.BlockID to */ knownSafeBoundsAtTheEndOfBlock
 	varLengthKnownSafeBoundWithIDPool nativeapi.VarLengthPool[knownSafeBoundWithID]
 
@@ -125,6 +159,10 @@ type Compiler struct {
 
 	pointers []int
 	bounds   [][]knownSafeBoundWithID
+	preds    []ssa.BasicBlockID
+	// predSeen and predSeenEpoch deduplicate preds; see initializeCurrentBlockKnownBounds.
+	predSeen      []uint32
+	predSeenEpoch uint32
 }
 
 type (
@@ -145,14 +183,20 @@ type (
 
 var knownSafeBoundsAtTheEndOfBlockNil = nativeapi.NewNilVarLength[knownSafeBoundWithID]()
 
+// LoopYield turns emitPreemptCheck on. It is a variable only so the hang test
+// can show that, without the check, its loops do hang the process.
+var LoopYield = true
+
 // NewFrontendCompiler returns a frontend Compiler.
-func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativeapi.ModuleContextOffsetData, ensureTermination bool, listenerOn bool, sourceInfo bool) *Compiler {
+func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativeapi.ModuleContextOffsetData, listenerOn bool, sourceInfo bool) *Compiler {
 	c := &Compiler{
 		m:                                 m,
 		ssaBuilder:                        ssaBuilder,
 		br:                                bytes.NewReader(nil),
 		offset:                            offset,
-		ensureTermination:                 ensureTermination,
+		loopYield:                         LoopYield,
+		inlineLeaves:                      true,
+		vecMap:                            runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64",
 		needSourceOffsetInfo:              sourceInfo,
 		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
@@ -162,12 +206,13 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	return c
 }
 
-// SetGCEnabled makes loop headers emit the collector's safepoint poll. It must be called before lowering.
-func (c *Compiler) SetGCEnabled(on bool) { c.gcEnabled = on }
+// SetInlineLeaves turns off lowering small callees in place of their calls (see isInlinableLeaf), for
+// tests that pin how a call is lowered. It must be called before lowering.
+func (c *Compiler) SetInlineLeaves(on bool) { c.inlineLeaves = on }
 
-// MaxGCRoots is the most values any safepoint lowered so far writes into the root buffer. It accumulates
-// across every function the compiler lowers, so the engine can size one buffer per call for the whole module.
-func (c *Compiler) MaxGCRoots() int { return c.maxGCRoots }
+// SetVecMap turns off vectorizing loops (see lowerVecMap), for tests that pin how a loop is lowered. It must
+// be called before lowering.
+func (c *Compiler) SetVecMap(on bool) { c.vecMap = on }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {
@@ -308,15 +353,8 @@ func (c *Compiler) declareSignatures(listenerOn bool) {
 	}
 	c.ssaBuilder.DeclareSignature(&c.memoryGrowSig)
 
-	c.checkModuleExitCodeSig = ssa.Signature{
-		ID: c.memoryGrowSig.ID + 1,
-		// Only takes execution context.
-		Params: []ssa.Type{ssa.TypeI64},
-	}
-	c.ssaBuilder.DeclareSignature(&c.checkModuleExitCodeSig)
-
 	c.tableGrowSig = ssa.Signature{
-		ID: c.checkModuleExitCodeSig.ID + 1,
+		ID: c.memoryGrowSig.ID + 1,
 		// As with memoryGrowSig, the entry count and result are i64 whatever the
 		// table's index type.
 		Params: []ssa.Type{ssa.TypeI64 /* exec context */, ssa.TypeI32 /* table index */, ssa.TypeI64 /* num */, ssa.TypeI64 /* ref */},
@@ -429,7 +467,12 @@ func (c *Compiler) Init(idx, typIndex wasm.Index, typ *wasm.FunctionType, localT
 	c.wasmFunctionLocalTypes = localTypes
 	c.wasmFunctionBody = body
 	c.wasmFunctionBodyOffsetInCodeSection = bodyOffsetInCodeSection
+	c.branchHints, c.branchHintAt = nil, 0
+	if int(idx) < len(c.m.CodeSection) {
+		c.branchHints = c.m.CodeSection[idx].BranchHints
+	}
 	c.needListener = needListener
+	c.selfInlinable = leafUnknown
 	c.pendingEhEntries = c.pendingEhEntries[:0]
 	c.clearSafeBounds()
 	c.varLengthKnownSafeBoundWithIDPool.Reset()
@@ -755,10 +798,33 @@ func (c *Compiler) finalizeKnownSafeBoundsAtTheEndOfBlock(bID ssa.BasicBlockID) 
 
 func (c *Compiler) initializeCurrentBlockKnownBounds() {
 	currentBlk := c.ssaBuilder.CurrentBlock()
-	switch preds := currentBlk.Preds(); preds {
+	c.preds = c.preds[:0]
+	c.predSeenEpoch++
+	if c.predSeenEpoch == 0 {
+		clear(c.predSeen)
+		c.predSeenEpoch = 1
+	}
+	for i := range currentBlk.Preds() {
+		// A preemption check's slow path only yields to Go, which changes neither the
+		// memory nor its size: it knows what the block it came from knows.
+		pred := currentBlk.Pred(i)
+		if root := pred.Root(); root != nil && root.Opcode() == ssa.OpcodeYield && pred.Preds() == 1 {
+			pred = pred.Pred(0)
+		}
+		// A br_table can give a block thousands of predecessors, so duplicates are found by
+		// stamping block IDs rather than by searching c.preds.
+		if id := int(pred.ID()); id >= len(c.predSeen) {
+			c.predSeen = append(c.predSeen, make([]uint32, id+1-len(c.predSeen))...)
+		}
+		if c.predSeen[pred.ID()] != c.predSeenEpoch {
+			c.predSeen[pred.ID()] = c.predSeenEpoch
+			c.preds = append(c.preds, pred.ID())
+		}
+	}
+	switch preds := len(c.preds); preds {
 	case 0:
 	case 1:
-		pred := currentBlk.Pred(0).ID()
+		pred := c.preds[0]
 		for _, kb := range c.getKnownSafeBoundsAtTheEndOfBlocks(pred).View() {
 			// Unless the block is sealed, we cannot assume the absolute address is valid:
 			// later we might add another predecessor that has no visibility of that value.
@@ -771,8 +837,8 @@ func (c *Compiler) initializeCurrentBlockKnownBounds() {
 	default:
 		c.pointers = c.pointers[:0]
 		c.bounds = c.bounds[:0]
-		for i := 0; i < preds; i++ {
-			c.bounds = append(c.bounds, c.getKnownSafeBoundsAtTheEndOfBlocks(currentBlk.Pred(i).ID()).View())
+		for _, pred := range c.preds {
+			c.bounds = append(c.bounds, c.getKnownSafeBoundsAtTheEndOfBlocks(pred).View())
 			c.pointers = append(c.pointers, 0)
 		}
 

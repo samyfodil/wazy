@@ -187,23 +187,23 @@ func Test_rangeOutOfBounds(t *testing.T) {
 
 func TestTableInstance_Grow64(t *testing.T) {
 	t.Run("a zero delta reports the current length", func(t *testing.T) {
-		tbl := &TableInstance{References: make([]Reference, 3), IsTable64: true}
+		tbl := &TableInstance{References: make([]Reference, 3), IsTable64: true, limit: MaxTableLimitElements}
 		require.Equal(t, uint64(3), tbl.Grow64(0, 0))
 	})
 	t.Run("growing succeeds and reports the previous length", func(t *testing.T) {
 		max := uint64(10)
-		tbl := &TableInstance{References: make([]Reference, 3), Max: &max, IsTable64: true}
+		tbl := &TableInstance{References: make([]Reference, 3), Max: &max, IsTable64: true, limit: MaxTableLimitElements}
 		require.Equal(t, uint64(3), tbl.Grow64(2, 0xf))
 		require.Equal(t, 5, len(tbl.References))
 		require.Equal(t, Reference(0xf), tbl.References[4])
 	})
 	t.Run("a delta past the maximum fails with -1", func(t *testing.T) {
 		max := uint64(4)
-		tbl := &TableInstance{References: make([]Reference, 3), Max: &max, IsTable64: true}
+		tbl := &TableInstance{References: make([]Reference, 3), Max: &max, IsTable64: true, limit: MaxTableLimitElements}
 		require.Equal(t, ^uint64(0), tbl.Grow64(2, 0))
 	})
 	t.Run("a delta past a table's 32-bit length ceiling fails with -1", func(t *testing.T) {
-		tbl := &TableInstance{References: make([]Reference, 1), IsTable64: true}
+		tbl := &TableInstance{References: make([]Reference, 1), IsTable64: true, limit: MaxTableLimitElements}
 		require.Equal(t, ^uint64(0), tbl.Grow64(math.MaxUint32+1, 0))
 		require.Equal(t, ^uint64(0), tbl.Grow64(math.MaxUint64, 0))
 	})
@@ -212,7 +212,7 @@ func TestTableInstance_Grow64(t *testing.T) {
 		// 2^63 reads as negative if compared as a signed integer -- which would
 		// make every growth fail.
 		for _, max := range []uint64{1 << 63, math.MaxUint64} {
-			tbl := &TableInstance{References: make([]Reference, 1), Max: &max, IsTable64: true}
+			tbl := &TableInstance{References: make([]Reference, 1), Max: &max, IsTable64: true, limit: MaxTableLimitElements}
 			require.Equal(t, uint64(1), tbl.Grow64(2, 0xf))
 			require.Equal(t, 3, len(tbl.References))
 		}
@@ -231,11 +231,39 @@ func Test_checkSegmentBounds(t *testing.T) {
 }
 
 func TestModule_buildTables_MinimumLimit(t *testing.T) {
-	m := ModuleInstance{Tables: make([]*TableInstance, 1)}
-	err := m.buildTables(&Module{
-		TableSection: []Table{{Min: uint64(MaximumFunctionIndex) + 1, Type: RefTypeFuncref, IsTable64: true}},
-	}, true)
-	require.EqualError(t, err, "table[0] minimum of 134217729 entries exceeds the limit of 134217728")
+	t.Run("one table over the limit", func(t *testing.T) {
+		m := ModuleInstance{Tables: make([]*TableInstance, 1)}
+		err := m.buildTables(&Module{
+			TableSection: []Table{{Min: TableLimitElements + 1, Type: RefTypeFuncref, IsTable64: true}},
+		}, true, TableLimitElements)
+		require.EqualError(t, err, "table[0] minimum of 10000001 entries exceeds the limit of 10000000")
+	})
+	t.Run("a 64-bit minimum past what a table can index", func(t *testing.T) {
+		m := ModuleInstance{Tables: make([]*TableInstance, 1)}
+		err := m.buildTables(&Module{
+			TableSection: []Table{{Min: math.MaxUint64, Type: RefTypeFuncref, IsTable64: true}},
+		}, true, MaxTableLimitElements)
+		require.Error(t, err)
+	})
+	t.Run("tables summing past the limit", func(t *testing.T) {
+		// Each table is within the limit on its own; together they are not, and
+		// nothing is allocated before that is found.
+		m := ModuleInstance{Tables: make([]*TableInstance, 3)}
+		err := m.buildTables(&Module{
+			TableSection: []Table{{Min: 4, Type: RefTypeFuncref}, {Min: 4, Type: RefTypeFuncref}, {Min: 4, Type: RefTypeExternref}},
+		}, true, 10)
+		require.EqualError(t, err, "total table minimum across 3 tables (12 entries) exceeds 10")
+		require.Equal(t, []*TableInstance{nil, nil, nil}, m.Tables)
+	})
+	t.Run("tables summing to the limit", func(t *testing.T) {
+		m := ModuleInstance{Tables: make([]*TableInstance, 2)}
+		err := m.buildTables(&Module{
+			TableSection: []Table{{Min: 4, Type: RefTypeFuncref}, {Min: 6, Type: RefTypeFuncref}},
+		}, true, 10)
+		require.NoError(t, err)
+		require.Equal(t, 6, len(m.Tables[1].References))
+		require.Equal(t, uint64(10), m.Tables[1].limit)
+	})
 }
 
 func TestStore_memoryLimitPages_ClampedToWhatASliceCanAddress(t *testing.T) {

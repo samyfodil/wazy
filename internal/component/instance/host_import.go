@@ -8,6 +8,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // HostFunc is a Go implementation of a component import. It receives the
@@ -214,6 +215,11 @@ type hostImport struct {
 	// export rather than the embedder's Go func, so the handles it is passed
 	// are the sibling's business, not the host table's (hostHandleTransfer).
 	delegate bool
+
+	// transfer is set only on buildHostWrapper's own copy of a hostImport
+	// whose call moves handles below the top level (hostHandleTransfer); fn
+	// is then already wrapped in it, and startDelegatedFromBlocker takes it.
+	transfer *hostHandleTransfer
 
 	// Re-entrancy is NOT refused here. A composition delegate that crosses a
 	// direct static parent<->child instantiation boundary -- the outer's own
@@ -451,11 +457,11 @@ func effectiveResourceTypeIdx(comp *binary.Component, cfg *config, typeIdx uint3
 // alias of some other shape, or a Component with no TypeSpace (e.g. a
 // hand-built test Component that never went through Decode).
 func resolveImportedResourceName(comp *binary.Component, typeIdx uint32) (iface, name string, ok bool) {
-	if int(typeIdx) >= len(comp.TypeSpace) {
+	if u32.OutOfRange(typeIdx, len(comp.TypeSpace)) {
 		return "", "", false
 	}
 	entry := comp.TypeSpace[typeIdx]
-	if entry.Kind != binary.TypeSpaceAlias || int(entry.Alias) >= len(comp.Aliases) {
+	if entry.Kind != binary.TypeSpaceAlias || u32.OutOfRange(entry.Alias, len(comp.Aliases)) {
 		return "", "", false
 	}
 	al := comp.Aliases[entry.Alias]
@@ -743,6 +749,18 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	if tgt := hi.asyncTarget; hi.delegate && tgt != nil && tgt.nested != nil {
 		transfer = tgt.importerTransfer(resources)
 	}
+	// A transfer brackets the func it moves handles for: the wrapper below
+	// calls a copy of hi whose fn is wrapped in it, so a call with none --
+	// every flat host call -- runs no transfer code at all.
+	if transfer != nil {
+		x, inner := transfer, hi.fn
+		wrapped := *hi
+		wrapped.fn = func(ctx context.Context, args []abi.Value) ([]abi.Value, error) {
+			return x.call(ctx, args, inner)
+		}
+		wrapped.transfer = x
+		hi = &wrapped
+	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		memMod := mod
@@ -785,13 +803,6 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			}
 			putValueSlice(argsp)
 		}()
-		if transfer != nil {
-			borrows, err := transfer.moveArgs(args)
-			defer transfer.releaseBorrows(borrows)
-			if err != nil {
-				panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
-			}
-		}
 		// A sync canon lower whose callee is an async lift (callback or
 		// stackful) is a potential block (docs/component-model-async-
 		// stackful-design.md §4.3): a composition delegate
@@ -857,7 +868,7 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		}
 		var results []abi.Value
 		if blockingCaller != nil {
-			results, err = startDelegatedFromBlocker(ctx, blockingCaller, hi.asyncTarget, args)
+			results, err = startDelegatedFromBlocker(ctx, blockingCaller, hi.asyncTarget, args, hi.transfer)
 		} else {
 			results, err = hi.fn(ctx, args)
 		}
@@ -866,11 +877,6 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
-		}
-		if transfer != nil {
-			if err := transfer.moveResults(results); err != nil {
-				panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
-			}
 		}
 		var realloc abi.Realloc
 		if overrideReallocCall != nil {
@@ -927,7 +933,7 @@ func synthFuncDesc(params, results []binary.TypeDesc) (binary.FuncDesc, abi.Reso
 		fd.Results.Named = append(fd.Results.Named, binary.FuncResult{Name: fmt.Sprintf("r%d", i), Type: mkRef(rres)})
 	}
 	resolve := func(idx uint32) binary.TypeDesc {
-		if int(idx) >= len(table) {
+		if u32.OutOfRange(idx, len(table)) {
 			return nil
 		}
 		return table[idx]
@@ -978,7 +984,8 @@ type hostParamPlan struct {
 	flat     []string // precomputed abi.Flatten(pt)
 	usesMem  bool
 	isBorrow bool
-	borrowRT uint32 // valid when isBorrow
+	borrowRT uint32     // valid when isBorrow
+	nest     *asyncNest // the streams, futures and error contexts nested in pt
 }
 
 // buildHostParamPlans precomputes the per-param lift plan for fd. Errors
@@ -991,14 +998,11 @@ func buildHostParamPlans(fd binary.FuncDesc, resolve abi.Resolver) ([]hostParamP
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
-		if typeContainsAsyncValueNested(pt, resolve, 0) {
-			return nil, fmt.Errorf("param %d: stream/future/error-context nested inside a composite type is not supported by this milestone", i)
-		}
 		flat, err := abi.Flatten(pt, resolve)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
-		pp := hostParamPlan{pt: pt, flat: flat, usesMem: usesMemory(pt, resolve)}
+		pp := hostParamPlan{pt: pt, flat: flat, usesMem: usesMemory(pt, resolve), nest: newAsyncNest(pt, resolve)}
 		if bd, ok := pt.(binary.BorrowDesc); ok {
 			pp.isBorrow, pp.borrowRT = true, bd.ResourceType
 		}
@@ -1064,7 +1068,10 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
+		if err == nil && pp.nest != nil {
+			v, err = pp.nest.lift(in, resources, v)
+		}
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -1114,7 +1121,10 @@ func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.T
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
+		if err == nil && pp.nest != nil {
+			v, err = pp.nest.lift(in, resources, v)
+		}
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -1142,7 +1152,9 @@ type lentHandle struct {
 // instance's scheduler it belongs to (requireSchedulable, stream_host.go).
 // nil is safe: requireSchedulable treats a nil Instance as unchecked, which
 // only pure resource-handle unit tests (no stream/future args) ever hit.
-func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) uint32, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
+// resolve is the resolver pt came from -- the host's, for an import declared
+// with its own type table -- and resolves a stream/future's element type.
+func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) uint32, resolve abi.Resolver, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
 	tag := func(rt uint32) uint32 {
 		if canon != nil {
 			return canon(rt)
@@ -1187,15 +1199,11 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 		var elemDesc binary.TypeDesc
 		if d.Element != nil {
 			var eerr error
-			var resolveFn abi.Resolver
-			if in != nil {
-				resolveFn = in.resolve
-			}
-			if elemDesc, eerr = resolveTypeRef(d.Element, resolveFn); eerr != nil {
+			if elemDesc, eerr = resolveTypeRef(d.Element, resolve); eerr != nil {
 				return nil, fmt.Errorf("stream arg: element type: %w", eerr)
 			}
 		}
-		shared, err := takeReadableStreamEnd(in, resources, elemDesc, h)
+		shared, err := takeReadableStreamEnd(in, resources, elemDesc, resolve, h)
 		if err != nil {
 			return nil, fmt.Errorf("stream arg: %w", err)
 		}
@@ -1209,15 +1217,11 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 		var elemDesc binary.TypeDesc
 		if d.Element != nil {
 			var eerr error
-			var resolveFn abi.Resolver
-			if in != nil {
-				resolveFn = in.resolve
-			}
-			if elemDesc, eerr = resolveTypeRef(d.Element, resolveFn); eerr != nil {
+			if elemDesc, eerr = resolveTypeRef(d.Element, resolve); eerr != nil {
 				return nil, fmt.Errorf("future arg: element type: %w", eerr)
 			}
 		}
-		shared, err := takeReadableFutureEnd(in, resources, elemDesc, h)
+		shared, err := takeReadableFutureEnd(in, resources, elemDesc, resolve, h)
 		if err != nil {
 			return nil, fmt.Errorf("future arg: %w", err)
 		}
@@ -1233,7 +1237,7 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 		}
 		// Lift is a GET, not a remove: the sender keeps its own handle.
 		raw, ok2 := resources.getEntry(h)
-		ec, isEC := raw.(*errorContext)
+		ec, isEC := raw.(*ErrorContext)
 		if !ok2 || !isEC {
 			return nil, fmt.Errorf("error-context arg: handle %d is not an error-context", h)
 		}
@@ -1304,12 +1308,12 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 			return v, nil
 		}
 		switch ev := v.(type) {
-		case *errorContext:
+		case *ErrorContext:
 			return resources.addEntry(ev), nil
 		case string:
-			return resources.addEntry(&errorContext{debugMessage: ev}), nil
+			return resources.addEntry(&ErrorContext{debugMessage: ev}), nil
 		default:
-			return nil, fmt.Errorf("error-context result: expected a *errorContext or string, got %T", v)
+			return nil, fmt.Errorf("error-context result: expected a *ErrorContext or string, got %T", v)
 		}
 
 	default:
@@ -1346,6 +1350,7 @@ type hostResultPlan struct {
 	rt      binary.TypeDesc // valid when count == 1
 	usesMem bool            // valid when count == 1
 	step    abi.LowerStep   // valid when count == 1
+	nest    *asyncNest      // the streams, futures and error contexts nested in rt
 	// store lowers the result the other way -- into guest memory at an
 	// out-pointer (a result too wide to return flat, and every async result),
 	// with the type's alignment and size resolved here instead of on every
@@ -1366,9 +1371,7 @@ func buildHostResultPlan(fd binary.FuncDesc, resolve abi.Resolver) (hostResultPl
 	if err != nil {
 		return plan, fmt.Errorf("result: %w", err)
 	}
-	if typeContainsAsyncValueNested(rt, resolve, 0) {
-		return plan, fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
-	}
+	plan.nest = newAsyncNest(rt, resolve)
 	step, err := abi.CompileLower(rt, resolve)
 	if err != nil {
 		return plan, fmt.Errorf("result: %w", err)
@@ -1400,6 +1403,9 @@ func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, results [
 		return fmt.Errorf("result requires linear memory (string/list), but the calling module has none")
 	}
 	resultVal, err := allocHandleResult(resources, plan.rt, results[0])
+	if err == nil && plan.nest != nil {
+		resultVal, err = plan.nest.lower(resources, resultVal)
+	}
 	if err != nil {
 		return fmt.Errorf("result: %w", err)
 	}
@@ -1610,6 +1616,21 @@ func (x *hostHandleTransfer) moveArgs(args []abi.Value) ([]uint32, error) {
 	return borrows, nil
 }
 
+// call runs fn on args with their nested handles moved in, and its results'
+// moved back out. The borrows moved in last exactly as long as fn's call.
+func (x *hostHandleTransfer) call(ctx context.Context, args []abi.Value, fn HostFunc) ([]abi.Value, error) {
+	borrows, err := x.moveArgs(args)
+	defer x.releaseBorrows(borrows)
+	if err != nil {
+		return nil, err
+	}
+	results, err := fn(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return results, x.moveResults(results)
+}
+
 // moveResults moves the nested handles of a host func's results from the host's
 // table into the guest's.
 func (x *hostHandleTransfer) moveResults(results []abi.Value) error {
@@ -1695,15 +1716,41 @@ func (x *hostHandleTransfer) move(v abi.Value, t binary.TypeDesc, from, to *hand
 // holding one is copied rather than rewritten: a result is the host's value,
 // which it may keep.
 func walkHandles(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int, visit func(binary.TypeDesc, abi.Value) (abi.Value, error)) (abi.Value, error) {
+	return walkNested(v, t, resolve, depth, handleLeaves, visit)
+}
+
+// leaves is what walkNested visits: which types are leaves, and whether a
+// type holds one at a depth.
+type leaves struct {
+	is   func(binary.TypeDesc) bool
+	held func(binary.TypeDesc, abi.Resolver, int) bool
+}
+
+var handleLeaves = leaves{
+	is: func(t binary.TypeDesc) bool {
+		_, ok := resourceTypeIdxOf(t)
+		return ok
+	},
+	held: nestedHandleIn,
+}
+
+// walkNested is walkHandles for the leaves l names.
+func walkNested(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int, l leaves, visit func(binary.TypeDesc, abi.Value) (abi.Value, error)) (abi.Value, error) {
+	if l.is(t) {
+		if depth == 0 {
+			return v, nil
+		}
+		return visit(t, v)
+	}
 	sub := func(v abi.Value, ref *binary.TypeRef) (abi.Value, error) {
 		st, err := resolveTypeRef(ref, resolve)
 		if err != nil {
 			return nil, err
 		}
-		if !nestedHandleIn(st, resolve, depth+1) {
+		if !l.held(st, resolve, depth+1) {
 			return v, nil
 		}
-		return walkHandles(v, st, resolve, depth+1, visit)
+		return walkNested(v, st, resolve, depth+1, l, visit)
 	}
 	each := func(vs []abi.Value, ref func(int) *binary.TypeRef) (abi.Value, error) {
 		out := make([]abi.Value, len(vs))
@@ -1717,11 +1764,6 @@ func walkHandles(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int
 		return out, nil
 	}
 	switch d := t.(type) {
-	case binary.OwnDesc, binary.BorrowDesc:
-		if depth == 0 {
-			return v, nil
-		}
-		return visit(t, v)
 	case binary.RecordDesc, binary.TupleDesc, binary.ListDesc, binary.FixedListDesc, binary.MapDesc:
 		vs, ok := v.([]abi.Value)
 		if !ok {
@@ -1740,7 +1782,7 @@ func walkHandles(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int
 			pair := binary.TupleDesc{Elements: []binary.TypeRef{t.(binary.MapDesc).Key, t.(binary.MapDesc).Value}}
 			out := make([]abi.Value, len(vs))
 			for i, e := range vs {
-				nv, err := walkHandles(e, pair, resolve, depth+1, visit)
+				nv, err := walkNested(e, pair, resolve, depth+1, l, visit)
 				if err != nil {
 					return nil, err
 				}
@@ -1753,7 +1795,7 @@ func walkHandles(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int
 		if !ok {
 			return nil, fmt.Errorf("variant: expected VariantValue, got %T", v)
 		}
-		if int(vv.Disc) >= len(d.Cases) || d.Cases[vv.Disc].Type == nil {
+		if u32.OutOfRange(vv.Disc, len(d.Cases)) || d.Cases[vv.Disc].Type == nil {
 			return v, nil
 		}
 		p, err := sub(vv.Payload, d.Cases[vv.Disc].Type)
@@ -1764,6 +1806,10 @@ func walkHandles(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int
 	case binary.OptionDesc:
 		if v == nil {
 			return nil, nil
+		}
+		if s, ok := v.(abi.Some); ok {
+			x, err := sub(s.Value, &d.Element)
+			return abi.Some{Value: x}, err
 		}
 		return sub(v, &d.Element)
 	case binary.ResultDesc:

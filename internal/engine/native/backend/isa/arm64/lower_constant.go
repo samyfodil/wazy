@@ -142,7 +142,32 @@ func (m *machine) insertInlineFpuConst(rd regalloc.VReg, lo, hi uint64, width by
 	m.insert(i)
 }
 
+// fpImm8 returns the immediate of the fmov that sets a float of the given width to v, if one does:
+// v is ±(16+f)/16 × 2^e with f and e+3 from 0 to 15 and 0 to 7, VFPExpandImm's floats.
+func fpImm8(v uint64, bits byte) (uint32, bool) {
+	var sign, exp, frac uint64
+	var expBits, fracBits uint
+	if bits == 64 {
+		sign, exp, frac, expBits, fracBits = v>>63, v>>52&0x7ff, v&(1<<52-1), 11, 52
+	} else {
+		sign, exp, frac, expBits, fracBits = v>>31&1, v>>23&0xff, v&(1<<23-1), 8, 23
+	}
+	if frac&(1<<(fracBits-4)-1) != 0 {
+		return 0, false
+	}
+	b := exp >> (expBits - 2) & 1
+	mid := exp >> 2 & (1<<(expBits-3) - 1) // all b
+	if exp>>(expBits-1) == b || mid != b*(1<<(expBits-3)-1) {
+		return 0, false
+	}
+	return uint32(sign<<7 | b<<6 | (exp&3)<<4 | frac>>(fracBits-4)), true
+}
+
 func (m *machine) lowerFpuConst32(rd regalloc.VReg, v uint64) {
+	if _, ok := fpImm8(v, 32); ok {
+		m.insertInlineFpuConst(rd, v, 0, 32)
+		return
+	}
 	if v == 0 {
 		m.insertInlineFpuConst(rd, 0, 0, 32)
 		return
@@ -158,11 +183,15 @@ func (m *machine) lowerFpuConst32(rd regalloc.VReg, v uint64) {
 	tmp := m.compiler.AllocateVReg(ssa.TypeI32)
 	m.lowerConstantI32(tmp, int32(uint32(v)))
 	mov := m.allocateInstr()
-	mov.asMovToVec(rd, operandNR(tmp), vecArrangementS, vecIndex(0))
+	mov.asFpuMovFromInt(rd, operandNR(tmp), false)
 	m.insert(mov)
 }
 
 func (m *machine) lowerFpuConst64(rd regalloc.VReg, v uint64) {
+	if _, ok := fpImm8(v, 64); ok {
+		m.insertInlineFpuConst(rd, v, 0, 64)
+		return
+	}
 	if v == 0 {
 		m.insertInlineFpuConst(rd, 0, 0, 64)
 		return
@@ -171,7 +200,7 @@ func (m *machine) lowerFpuConst64(rd regalloc.VReg, v uint64) {
 		tmp := m.compiler.AllocateVReg(ssa.TypeI64)
 		m.lowerConstantI64(tmp, int64(v))
 		mov := m.allocateInstr()
-		mov.asMovToVec(rd, operandNR(tmp), vecArrangementD, vecIndex(0))
+		mov.asFpuMovFromInt(rd, operandNR(tmp), true)
 		m.insert(mov)
 		return
 	}
@@ -200,7 +229,8 @@ func (m *machine) lowerFpuConst128(rd regalloc.VReg, lo, hi uint64) {
 }
 
 // insVecLaneConst materializes laneVal in a GPR (xzr when zero) and moves it into rd's 64-bit lane
-// via `ins Vd.D[index], Xn`.
+// via `ins Vd.D[index], Xn`, or for lane 0 via `fmov Dd, Xn`, which zeroes lane 1 rather than wait on
+// whatever wrote rd last: lane 1 is inserted after it.
 func (m *machine) insVecLaneConst(rd regalloc.VReg, laneVal uint64, index vecIndex) {
 	gp := xzrVReg
 	if laneVal != 0 {
@@ -208,7 +238,11 @@ func (m *machine) insVecLaneConst(rd regalloc.VReg, laneVal uint64, index vecInd
 		m.lowerConstantI64(gp, int64(laneVal))
 	}
 	mov := m.allocateInstr()
-	mov.asMovToVec(rd, operandNR(gp), vecArrangementD, index)
+	if index == 0 {
+		mov.asFpuMovFromInt(rd, operandNR(gp), true)
+	} else {
+		mov.asMovToVec(rd, operandNR(gp), vecArrangementD, index)
+	}
 	m.insert(mov)
 }
 
@@ -281,8 +315,12 @@ func (m *machine) lowerConstViaBitMaskImmediate(c uint64, dst regalloc.VReg, b64
 //
 // See https://developer.arm.com/documentation/dui0802/b/A64-General-Instructions/MOV--bitmask-immediate-
 func isBitMaskImmediate(x uint64, _64 bool) bool {
+	if !_64 {
+		// A 32-bit operation's pattern is its low half, repeated: element sizes are found in that.
+		x = replicate32(x)
+	}
 	// All zeros and ones are not "bitmask immediate" by definition.
-	if x == 0 || (_64 && x == 0xffff_ffff_ffff_ffff) || (!_64 && x == 0xffff_ffff) {
+	if x == 0 || x == 0xffff_ffff_ffff_ffff {
 		return false
 	}
 
@@ -306,6 +344,12 @@ func isBitMaskImmediate(x uint64, _64 bool) bool {
 		return true
 	}
 	return sequenceOfSetbits(x) || sequenceOfSetbits(^x)
+}
+
+// replicate32 returns the low 32 bits of x in both halves.
+func replicate32(x uint64) uint64 {
+	x = uint64(uint32(x))
+	return x | x<<32
 }
 
 // sequenceOfSetbits returns true if the number's binary representation is the sequence set bit (1).

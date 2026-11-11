@@ -3,8 +3,6 @@
 package sysfs
 
 import (
-	"os"
-
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -12,10 +10,6 @@ const (
 	nonBlockingFileReadSupported  = false
 	nonBlockingFileWriteSupported = false
 )
-
-func rmdir(path string) sys.Errno {
-	return sys.UnwrapOSError(os.Remove(path))
-}
 
 // readFd returns ENOSYS on unsupported platforms.
 func readFd(fd uintptr, buf []byte) (int, sys.Errno) {
@@ -25,4 +19,9 @@ func readFd(fd uintptr, buf []byte) (int, sys.Errno) {
 // writeFd returns ENOSYS on unsupported platforms.
 func writeFd(fd uintptr, buf []byte) (int, sys.Errno) {
 	return -1, sys.ENOSYS
+}
+
+// pwriteFd returns ENOSYS on unsupported platforms.
+func pwriteFd(uintptr, []byte, int64) (int, sys.Errno) {
+	return 0, sys.ENOSYS
 }

@@ -1,11 +1,11 @@
 package native
 
 import (
-	"encoding/binary"
 	"reflect"
 	"testing"
 	"unsafe"
 
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
@@ -78,41 +78,24 @@ func TestCallEngine_growStack(t *testing.T) {
 		require.True(t, newSP <= c.stackTop)
 		require.Equal(t, newFp-newSP, uintptr(4))
 	})
-
-	// The new buffer gets the root region the call started with, even after the engine's has grown: one
-	// placed for the larger size could land on frames the call already has.
-	t.Run("keeps the root region", func(t *testing.T) {
-		eng := &engine{}
-		eng.noteGCRoots(3) // 3 words and the header, rounded up: 32 bytes.
-		c := &callEngine{parent: &moduleEngine{gcRootsReserve: &eng.gcRootsReserve}, eng: eng}
-		c.stack = make([]byte, c.requiredInitialStackSize(c.gcRootsReserve()))
-		c.stackTop = alignedStackTop(c.stack)
-		c.execCtx.stackBottomPtr = c.stackCheckLimitPtr(0, c.gcRootsReserve())
-		c.execCtx.stackGrowRequiredSize = 64
-		top := int(c.stackTop - uintptr(unsafe.Pointer(&c.stack[0])))
-		c.execCtx.stackPointerBeforeGoCall = (*uint64)(unsafe.Pointer(&c.stack[top-32]))
-		c.execCtx.framePointerBeforeGoCall = uintptr(unsafe.Pointer(&c.stack[top-16]))
-		require.Equal(t, 32, c.rootsReserveInUse())
-
-		eng.noteGCRoots(100)
-		_, _, err := c.growStack()
-		require.NoError(t, err)
-		require.Equal(t, 32, c.rootsReserveInUse())
-		require.Equal(t, &c.stack[32+backend.StackBoundsCheckMarginBytes], c.execCtx.stackBottomPtr)
-		// The header says how many words the region holds, and that none are spilled yet.
-		require.Equal(t, uint64(3)<<32, binary.LittleEndian.Uint64(c.stack[24:]))
-	})
 }
 
 func TestCallEngine_requiredInitialStackSize(t *testing.T) {
 	c := &callEngine{}
-	require.Equal(t, 10240, c.requiredInitialStackSize(0))
+	require.Equal(t, 10240, c.requiredInitialStackSize())
 	c.sizeOfParamResultSlice = 10
-	require.Equal(t, 10240, c.requiredInitialStackSize(0))
+	require.Equal(t, 10240, c.requiredInitialStackSize())
 	c.sizeOfParamResultSlice = 1000
-	require.Equal(t, 1000*16+32+16, c.requiredInitialStackSize(0))
-	// The root region comes out of the buffer, and leaves the guest at least as much again.
-	require.Equal(t, 1000*16+32+16+64, c.requiredInitialStackSize(64))
-	c.sizeOfParamResultSlice = 0
-	require.Equal(t, 2*(8000+512), c.requiredInitialStackSize(8000))
+	require.Equal(t, 1000*16+32+16, c.requiredInitialStackSize())
 }
+
+// RetainedStackLenForTest reports the length of the wasm stack f is holding on to between calls, or
+// 0 when it holds none because its last call handed the buffer back to the pool. Exported for the
+// end-to-end tests in native_test, which is where a real, callable api.Function can be built; see
+// callEngine.stackReleases for what the two cases mean.
+func RetainedStackLenForTest(f api.Function) int {
+	return len(f.(*callEngine).stack)
+}
+
+// StackReleasesBeforeKeepForTest is stackReleasesBeforeKeep, for the end-to-end tests in native_test.
+const StackReleasesBeforeKeepForTest = stackReleasesBeforeKeep

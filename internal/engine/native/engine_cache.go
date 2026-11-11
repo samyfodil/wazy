@@ -25,11 +25,7 @@ var crc = crc32.MakeTable(crc32.Castagnoli)
 // fileCacheKey returns a key for the file cache.
 // In order to avoid collisions with the existing compiler, we do not use m.ID directly,
 // but instead we rehash it with magic.
-//
-// gcSafepoints says whether the code polls the collector at its loop headers and spills roots there; see
-// frontend.Compiler.SetGCEnabled. That changes the code but not the module, so it is keyed here: a runtime
-// that collects must never run code compiled for one that does not, whose loops would never park.
-func fileCacheKey(m *wasm.Module, gcSafepoints bool) (ret filecache.Key) {
+func fileCacheKey(m *wasm.Module) (ret filecache.Key) {
 	s := sha256.New()
 	s.Write(m.ID[:])
 	s.Write(magic)
@@ -43,16 +39,13 @@ func fileCacheKey(m *wasm.Module, gcSafepoints bool) (ret filecache.Key) {
 	// apart from one compiled without them -- otherwise a cache directory
 	// shared by a Skylake host and an Ice Lake host would silently hand each
 	// the other's layout. (module.ID itself, see wasm.Module.AssignModuleID,
-	// covers only the per-module compile flags such as ensureTermination; the
+	// covers only the per-module compile flags such as listener presence; the
 	// host's identity belongs here, where it does not have to be threaded
 	// through every AssignModuleID caller.)
 	cpu := platform.CpuFeatures.Raw()
 	// Reuse the `ret` buffer to write the first 8 bytes of the CPU features so that we can avoid the allocation.
 	binary.LittleEndian.PutUint64(ret[:8], cpu)
 	s.Write(ret[:8])
-	if gcSafepoints {
-		s.Write([]byte{1})
-	}
 	// Finally, write the hash to the ret buffer.
 	s.Sum(ret[:0])
 	return
@@ -66,7 +59,7 @@ func (e *engine) addCompiledModule(module *wasm.Module, cm *compiledModule) (c *
 	return
 }
 
-func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (cm *compiledModule, ok bool, err error) {
+func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.FunctionListener) (cm *compiledModule, ok bool, err error) {
 	cm, ok = e.getCompiledModuleFromMemory(module, true)
 	if ok {
 		return
@@ -76,7 +69,6 @@ func (e *engine) getCompiledModule(module *wasm.Module, listeners []api.Function
 		cm.parent = e
 		cm.module = module
 		cm.sharedFunctions = e.sharedFunctions
-		cm.ensureTermination = ensureTermination
 		cm.offsets = nativeapi.NewModuleContextOffsetData(module, len(listeners) > 0)
 		if len(listeners) > 0 {
 			cm.listeners = listeners
@@ -145,7 +137,7 @@ func (e *engine) addCompiledModuleToCache(module *wasm.Module, cm *compiledModul
 	if e.fileCache == nil || module.IsHostModule || filecache.ReadOnly(e.fileCache) {
 		return
 	}
-	err = e.fileCache.Add(fileCacheKey(module, e.gcSafepoints()), serializeCompiledModule(e.wazyVersion, cm))
+	err = e.fileCache.Add(fileCacheKey(module), serializeCompiledModule(e.wazyVersion, cm))
 	return
 }
 
@@ -156,7 +148,7 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 
 	// Check if the entries exist in the external cache.
 	var cached io.ReadCloser
-	cached, hit, err = e.fileCache.Get(fileCacheKey(module, e.gcSafepoints()))
+	cached, hit, err = e.fileCache.Get(fileCacheKey(module))
 	if !hit || err != nil {
 		return
 	}
@@ -176,15 +168,19 @@ func (e *engine) getCompiledModuleFromCache(module *wasm.Module) (cm *compiledMo
 		if filecache.ReadOnly(e.fileCache) {
 			return nil, false, filecache.ErrStale
 		}
-		return nil, false, e.fileCache.Delete(fileCacheKey(module, e.gcSafepoints()))
+		return nil, false, e.fileCache.Delete(fileCacheKey(module))
 	}
 	return
 }
 
 // magic starts every cache entry, and is part of its key, so changing it
 // when the layout changes makes older entries miss rather than misparse.
-// "NATIV2" aligns the native code to platform.CodeFileAlignment.
-var magic = []byte{'N', 'A', 'T', 'I', 'V', '2'}
+// "NATIV2" aligns the native code to platform.CodeFileAlignment. "NATIV3" is
+// code that checks Go's preemption word in the register that used to hold a
+// fuel counter: entries from before it must not load, and builds that all call
+// themselves "dev" would otherwise share them. "NATIV4" yields through a
+// trampoline that preserves every register, which code from before calls wrongly.
+var magic = []byte{'N', 'A', 'T', 'I', 'V', '4'}
 
 // executablePadding returns the number of zero bytes between the end of the
 // code length field, which ends at offset in the entry, and the native code.
@@ -342,13 +338,6 @@ func serializeCompiledModule(wazyVersion string, cm *compiledModule) io.Reader {
 		tail.Write(u32.LeBytes(crc32.Checksum(cm.entryPreambles, crc)))
 	}
 
-	// GC root spill size: maxGCRoots is baked into the safepoints of the code above as a compile-time
-	// constant, and the call engine sizes the spill region at the bottom of the stack from it. A cache hit
-	// that lost it reserved no region, so every safepoint spilled below the stack buffer and the collector
-	// never read the spilled roots. Layout: gcRootsFormatVersion (1 byte), maxGCRoots (4 bytes).
-	tail.WriteByte(gcRootsFormatVersion)
-	tail.Write(u32.LeBytes(uint32(cm.maxGCRoots)))
-
 	// *bytes.Buffer already implements io.Reader; MultiReader drains each once,
 	// which is exactly the single-pass consumption fileCache.Add performs. Only
 	// the executable needs a wrapping reader (it's a raw []byte). This avoids
@@ -436,10 +425,6 @@ const tryTableInfoFormatVersion = 1
 // was removed: without the bump an older entry's interval version byte would be
 // read as this one's and its scalar misparsed as preamble data.
 const entryPreambleFormatVersion = 2
-
-// gcRootsFormatVersion guards the trailing GC-roots section (cm.maxGCRoots). An entry written before it existed
-// hits EOF there and is treated as stale.
-const gcRootsFormatVersion = 1
 
 func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *compiledModule, staleCache bool, err error) {
 	defer reader.Close()
@@ -740,13 +725,6 @@ func deserializeCompiledModule(wazyVersion string, reader io.ReadCloser) (cm *co
 		}
 	}
 
-	if _, err = io.ReadFull(bufReader, eightBytes[:1]); err != nil || eightBytes[0] != gcRootsFormatVersion {
-		return nil, true, nil
-	}
-	if _, err = io.ReadFull(bufReader, eightBytes[:4]); err != nil {
-		return nil, true, nil
-	}
-	cm.maxGCRoots = int(binary.LittleEndian.Uint32(eightBytes[:4]))
 	return
 }
 

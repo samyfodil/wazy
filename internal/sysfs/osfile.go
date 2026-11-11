@@ -31,6 +31,12 @@ type osFile struct {
 	file *os.File
 	fd   uintptr
 
+	// underRoot is set on a file a bound dirFS opened, whose paths, when it is
+	// a directory, DirFS can resolve through the directory itself. dir is
+	// that dirFS, made on first use.
+	underRoot bool
+	dir       *dirFS
+
 	// reopenDir is true if reopen should be called before Readdir. This flag
 	// is deferred until Readdir to prevent redundant rewinds. This could
 	// happen if Seek(0) was called twice, or if in Windows, Seek(0) was called
@@ -313,6 +319,14 @@ func (f *osFile) Write(buf []byte) (n int, errno sys.Errno) {
 
 // Pwrite implements the same method as documented on sys.File
 func (f *osFile) Pwrite(buf []byte, off int64) (n int, errno sys.Errno) {
+	if f.IsAppend() {
+		// os.File.WriteAt refuses a file opened to append, where pwrite(2)
+		// writes at the offset, or on Linux at the end.
+		if n, errno = pwriteFd(f.fd, buf, off); errno != 0 {
+			errno = fileError(f, f.closed, errno)
+		}
+		return
+	}
 	if n, errno = pwrite(f.file, buf, off); errno != 0 {
 		// Defer validation overhead until we've already had an error.
 		errno = fileError(f, f.closed, errno)
@@ -363,5 +377,40 @@ func (f *osFile) Close() sys.Errno {
 
 func (f *osFile) close() sys.Errno {
 	f.releaseDirentBuf()
+	if f.dir != nil {
+		f.dir.Close()
+		f.dir = nil
+	}
 	return sys.UnwrapOSError(f.file.Close())
+}
+
+// DirHandle is an open directory that paths can be resolved through, so they
+// reach it wherever it has been renamed to since it was opened.
+type DirHandle interface {
+	// DirFS returns the directory as a filesystem rooted at it, which the
+	// file owns and closes with it.
+	DirFS() (sys.FS, sys.Errno)
+}
+
+// DirFS implements DirHandle for a directory a bound dirFS opened.
+func (f *osFile) DirFS() (sys.FS, sys.Errno) {
+	if f.dir != nil {
+		return f.dir, 0
+	}
+	if !f.underRoot || f.closed {
+		return nil, sys.ENOSYS
+	}
+	if isDir, errno := f.IsDir(); errno != 0 {
+		return nil, errno
+	} else if !isDir {
+		return nil, sys.ENOTDIR
+	}
+	d, err := dirFSOf(f.file, f.path)
+	if err != nil {
+		return nil, rootErrno(err)
+	}
+	if d.bound {
+		f.dir = d // it holds the directory open until the file closes
+	}
+	return d, 0
 }

@@ -15,18 +15,19 @@ type regAllocFn struct {
 
 // PostOrderBlockIteratorBegin implements regalloc.Function.
 func (f *regAllocFn) PostOrderBlockIteratorBegin() *labelPosition {
-	f.blockIter = len(f.m.orderedSSABlockLabelPos) - 1
-	return f.PostOrderBlockIteratorNext()
+	return f.labelOf(f.ssaB.BlockIteratorPostOrderBegin())
 }
 
 // PostOrderBlockIteratorNext implements regalloc.Function.
 func (f *regAllocFn) PostOrderBlockIteratorNext() *labelPosition {
-	if f.blockIter < 0 {
+	return f.labelOf(f.ssaB.BlockIteratorPostOrderNext())
+}
+
+func (f *regAllocFn) labelOf(blk ssa.BasicBlock) *labelPosition {
+	if blk == nil {
 		return nil
 	}
-	b := f.m.orderedSSABlockLabelPos[f.blockIter]
-	f.blockIter--
-	return b
+	return f.m.getOrAllocateSSABlockLabelPosition(blk)
 }
 
 // ReversePostOrderBlockIteratorBegin implements regalloc.Function.
@@ -253,6 +254,9 @@ func (m *machine) insertStoreRegisterAt(v regalloc.VReg, instr *instruction, aft
 		cur, prevNext = instr.prev, instr
 	}
 
+	if _, ok := m.remat[v.ID()]; ok {
+		return linkInstr(cur, prevNext) // Its reload loads the constant again.
+	}
 	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), typ.Size())
 	store := m.allocateInstr()
 	mem := newOperandMem(m.newAmodeImmReg(uint32(offsetFromSP), rspVReg))
@@ -284,6 +288,21 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 		cur, prevNext = instr, instr.next
 	} else {
 		cur, prevNext = instr.prev, instr
+	}
+
+	if c, ok := m.remat[v.ID()]; ok {
+		load := m.allocateInstr()
+		if c == 0 {
+			load.asZeros(v)
+		} else {
+			op := sseOpcodeMovss
+			if typ == ssa.TypeF64 {
+				op = sseOpcodeMovsd
+			}
+			load.asXmmUnaryRmR(op, newOperandMem(m.newAmodeRipRel(m.fconstLabel(c))), v)
+		}
+		cur = linkInstr(cur, load)
+		return linkInstr(cur, prevNext)
 	}
 
 	// Load the value to the temporary.

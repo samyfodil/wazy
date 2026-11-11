@@ -593,3 +593,10 @@ func parseU32(s string) (uint32, error) {
 	}
 	return uint32(n), nil
 }
+
+// IsKeyword reports whether s is a WIT keyword, which a name must spell with
+// a leading '%' to be read as a name.
+func IsKeyword(s string) bool {
+	_, ok := keywords[s]
+	return ok
+}

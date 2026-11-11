@@ -7,11 +7,6 @@ import (
 	"github.com/samyfodil/wazy/sys"
 )
 
-// dirNlinkIncludesDot is false because Windows does not return dot entries.
-//
-// Note: this is only used in tests
-const dirNlinkIncludesDot = false
-
 func lstat(path string) (sys.Stat_t, sys.Errno) {
 	attrs := uint32(syscall.FILE_FLAG_BACKUP_SEMANTICS)
 	// Use FILE_FLAG_OPEN_REPARSE_POINT, otherwise CreateFile will follow symlink.

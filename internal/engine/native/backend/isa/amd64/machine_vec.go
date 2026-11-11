@@ -295,6 +295,12 @@ func (m *machine) lowerShr(x, y, ret ssa.Value, lane ssa.VecLane, signed bool) {
 	_xx := m.getOperand_Reg(m.c.ValueDefinition(x))
 	xx := m.copyToTmp(_xx.reg())
 
+	if k, ok := m.vecShiftConst(y, modulo); ok {
+		m.insert(m.allocateInstr().asXmmRmiReg(shiftOp, newOperandImm32(k), xx))
+		m.copyTo(xx, m.c.VRegOf(ret))
+		return
+	}
+
 	tmpGpReg := m.c.AllocateVReg(ssa.TypeI32)
 	// Load the modulo 8 mask to tmpReg.
 	m.lowerIconst(tmpGpReg, modulo, false)
@@ -309,6 +315,15 @@ func (m *machine) lowerShr(x, y, ret ssa.Value, lane ssa.VecLane, signed bool) {
 	m.insert(m.allocateInstr().asXmmRmiReg(shiftOp, newOperandReg(tmpVec), xx))
 
 	m.copyTo(xx, m.c.VRegOf(ret))
+}
+
+// vecShiftConst returns a vector shift's amount, modulo, when y is a constant: the shift then takes it as
+// an immediate rather than in a vector register.
+func (m *machine) vecShiftConst(y ssa.Value, modulo uint64) (uint32, bool) {
+	if def := m.c.ValueDefinition(y); def.IsFromInstr() && def.Instr.Constant() {
+		return uint32(def.Instr.ConstantVal() & modulo), true
+	}
+	return 0, false
 }
 
 func (m *machine) lowerVIshl(x, y, ret ssa.Value, lane ssa.VecLane) {
@@ -335,6 +350,16 @@ func (m *machine) lowerVIshl(x, y, ret ssa.Value, lane ssa.VecLane) {
 
 	_xx := m.getOperand_Reg(m.c.ValueDefinition(x))
 	xx := m.copyToTmp(_xx.reg())
+
+	if k, ok := m.vecShiftConst(y, modulo); ok {
+		m.insert(m.allocateInstr().asXmmRmiReg(shiftOp, newOperandImm32(k), xx))
+		if isI8x16 { // Clear the bits the word shift carried across bytes, with that shift's row of the table.
+			row := uint64(i8x16SHLMaskTable[16*k]) * 0x0101010101010101
+			m.insert(m.allocateInstr().asXmmRmR(sseOpcodePand, newOperandReg(m.loadV128Const(row, row)), xx))
+		}
+		m.copyTo(xx, m.c.VRegOf(ret))
+		return
+	}
 
 	tmpGpReg := m.c.AllocateVReg(ssa.TypeI32)
 	// Load the modulo 8 mask to tmpReg.

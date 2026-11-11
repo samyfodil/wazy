@@ -1174,9 +1174,9 @@ func TestModule_declaredFunctionIndexes(t *testing.T) {
 }
 
 func TestModule_AssignModuleID(t *testing.T) {
-	getID := func(bin []byte, lsns []api.FunctionListener, withEnsureTermination bool) ModuleID {
+	getID := func(bin []byte, lsns []api.FunctionListener) ModuleID {
 		m := Module{}
-		m.AssignModuleID(bin, lsns, withEnsureTermination)
+		m.AssignModuleID(bin, lsns)
 		return m.ID
 	}
 
@@ -1185,66 +1185,20 @@ func TestModule_AssignModuleID(t *testing.T) {
 	// Ensures that different args always produce the different IDs.
 	exists := map[ModuleID]struct{}{}
 	for i, tc := range []struct {
-		bin                   []byte
-		withEnsureTermination bool
-		listeners             []api.FunctionListener
+		bin       []byte
+		listeners []api.FunctionListener
 	}{
-		{bin: []byte{1, 2, 3}, withEnsureTermination: false},
-		{bin: []byte{1, 2, 3}, withEnsureTermination: true},
-		{
-			bin:                   []byte{1, 2, 3},
-			listeners:             []api.FunctionListener{ml},
-			withEnsureTermination: false,
-		},
-		{
-			bin:                   []byte{1, 2, 3},
-			listeners:             []api.FunctionListener{ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3},
-			listeners:             []api.FunctionListener{nil, ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3},
-			listeners:             []api.FunctionListener{ml, ml},
-			withEnsureTermination: true,
-		},
-		{bin: []byte{1, 2, 3, 4}, withEnsureTermination: false},
-		{bin: []byte{1, 2, 3, 4}, withEnsureTermination: true},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{ml},
-			withEnsureTermination: false,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{nil},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{nil, ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{ml, ml},
-			withEnsureTermination: true,
-		},
-		{
-			bin:                   []byte{1, 2, 3, 4},
-			listeners:             []api.FunctionListener{ml, ml},
-			withEnsureTermination: false,
-		},
+		{bin: []byte{1, 2, 3}},
+		{bin: []byte{1, 2, 3}, listeners: []api.FunctionListener{ml}},
+		{bin: []byte{1, 2, 3}, listeners: []api.FunctionListener{nil, ml}},
+		{bin: []byte{1, 2, 3}, listeners: []api.FunctionListener{ml, ml}},
+		{bin: []byte{1, 2, 3, 4}},
+		{bin: []byte{1, 2, 3, 4}, listeners: []api.FunctionListener{ml}},
+		{bin: []byte{1, 2, 3, 4}, listeners: []api.FunctionListener{nil}},
+		{bin: []byte{1, 2, 3, 4}, listeners: []api.FunctionListener{nil, ml}},
+		{bin: []byte{1, 2, 3, 4}, listeners: []api.FunctionListener{ml, ml}},
 	} {
-		id := getID(tc.bin, tc.listeners, tc.withEnsureTermination)
+		id := getID(tc.bin, tc.listeners)
 		_, exist := exists[id]
 		require.False(t, exist, i)
 		exists[id] = struct{}{}
@@ -1260,25 +1214,162 @@ func (m mockListener) After(context.Context, api.Module, api.FunctionDefinition,
 
 func (m mockListener) Abort(context.Context, api.Module, api.FunctionDefinition, error) {}
 
-func TestIndexOutOfRange(t *testing.T) {
-	// The point of the helper is the third case: an index above math.MaxInt32.
-	// "int(index) >= length" reads that as negative where an int is 32 bits
-	// wide (GOARCH=386, arm, wasm) and lets it through, so the caller indexes
-	// out of range and panics. Every index it guards is LEB128-decoded from the
-	// module body, so a malformed module reaches it.
-	require.False(t, indexOutOfRange(0, 1))
-	require.False(t, indexOutOfRange(9, 10))
-	require.True(t, indexOutOfRange(10, 10))
-	require.True(t, indexOutOfRange(math.MaxUint32, 10))
-	require.True(t, indexOutOfRange(math.MaxInt32, 10))
-	require.True(t, indexOutOfRange(math.MaxInt32+1, 10))
-	require.True(t, indexOutOfRange(0, 0))
-}
-
 func repeatValueType(vt ValueType, n int) []ValueType {
 	ret := make([]ValueType, n)
 	for i := range ret {
 		ret[i] = vt
 	}
 	return ret
+}
+
+// TestModule_Validate_constExprGlobals pins down which globals a constant expression may read, at every
+// site one appears, under each feature set. Up to 2.0 only an imported global; from 3.0 (GC) also a
+// module-defined one, though a global's initializer sees only those before it and a table's sees none,
+// the table section preceding the global section. The global must be immutable throughout.
+func TestModule_Validate_constExprGlobals(t *testing.T) {
+	const (
+		importedConst Index = iota
+		importedMut
+		definedConst
+		definedMut
+		self  // the global under test, at the global site
+		later // a global declared after it
+	)
+	refNull := NewConstantExpressionFromOpcode(OpcodeRefNull, []byte{RefTypeFuncref.Kind()})
+	read := func(x Index) ConstantExpression {
+		return NewConstantExpressionFromOpcode(OpcodeGlobalGet, leb128.EncodeUint32(x))
+	}
+	withGlobals := func(vt ValueType, zero ConstantExpression) *Module {
+		return &Module{
+			ImportSection: []Import{
+				{Type: ExternTypeGlobal, Module: "m", Name: "const", DescGlobal: GlobalType{ValType: vt}},
+				{Type: ExternTypeGlobal, Module: "m", Name: "mut", DescGlobal: GlobalType{ValType: vt, Mutable: true}},
+			},
+			ImportGlobalCount: 2,
+			GlobalSection: []Global{
+				{Type: GlobalType{ValType: vt}, Init: zero},
+				{Type: GlobalType{ValType: vt, Mutable: true}, Init: zero},
+			},
+		}
+	}
+
+	type site struct {
+		name   string
+		module func(x Index) *Module
+		reads  []Index
+		// definedReadable reports whether, with GC, the site may read a module-defined global.
+		definedReadable bool
+		// needs is a feature the site cannot be expressed without, or zero.
+		needs api.CoreFeatures
+	}
+	sites := []site{
+		{
+			name: "global init",
+			module: func(x Index) *Module {
+				m := withGlobals(ValueTypeI32, NewConstantExpressionFromI32(0))
+				m.GlobalSection = append(m.GlobalSection,
+					Global{Type: GlobalType{ValType: ValueTypeI32}, Init: read(x)},
+					Global{Type: GlobalType{ValType: ValueTypeI32}, Init: NewConstantExpressionFromI32(0)})
+				return m
+			},
+			reads:           []Index{importedConst, importedMut, definedConst, definedMut, self, later},
+			definedReadable: true,
+		},
+		{
+			name: "data offset",
+			module: func(x Index) *Module {
+				m := withGlobals(ValueTypeI32, NewConstantExpressionFromI32(0))
+				m.MemorySection = []Memory{{Min: 1, Cap: 1, Max: 1}}
+				m.DataSection = []DataSegment{{OffsetExpression: read(x), Init: []byte{1}}}
+				return m
+			},
+			reads:           []Index{importedConst, importedMut, definedConst, definedMut},
+			definedReadable: true,
+		},
+		{
+			name: "elem offset",
+			module: func(x Index) *Module {
+				m := withGlobals(ValueTypeI32, NewConstantExpressionFromI32(0))
+				m.TableSection = []Table{{Min: 1, Type: RefTypeFuncref}}
+				m.ElementSection = []ElementSegment{{Mode: ElementModeActive, Type: RefTypeFuncref, OffsetExpr: read(x)}}
+				return m
+			},
+			reads:           []Index{importedConst, importedMut, definedConst, definedMut},
+			definedReadable: true,
+		},
+		{
+			name: "elem item",
+			module: func(x Index) *Module {
+				m := withGlobals(ValueTypeFuncref, refNull)
+				m.ElementSection = []ElementSegment{{Mode: ElementModePassive, Type: RefTypeFuncref, Init: []Index{NewElementInitGlobalGet(x)}}}
+				return m
+			},
+			reads:           []Index{importedConst, importedMut, definedConst, definedMut},
+			definedReadable: true,
+			needs:           api.CoreFeatureReferenceTypes,
+		},
+		{
+			name: "table init",
+			module: func(x Index) *Module {
+				m := withGlobals(ValueTypeFuncref, refNull)
+				init := read(x)
+				m.TableSection = []Table{{Min: 1, Type: RefTypeFuncref, InitExpr: &init}}
+				return m
+			},
+			reads: []Index{importedConst, importedMut, definedConst, definedMut},
+			needs: api.CoreFeatureTypedFunctionReferences,
+		},
+	}
+
+	features := []struct {
+		name string
+		set  api.CoreFeatures
+		gc   bool
+	}{
+		{name: "V1", set: api.CoreFeaturesV1},
+		{name: "V2", set: api.CoreFeaturesV2},
+		{name: "V2+extended-const", set: api.CoreFeaturesV2 | api.CoreFeatureExtendedConst},
+		{name: "V2+extended-const+typed-function-references", set: api.CoreFeaturesV2 | api.CoreFeatureExtendedConst | api.CoreFeatureTypedFunctionReferences},
+		{name: "V2+GC", set: api.CoreFeaturesV2 | api.CoreFeatureTypedFunctionReferences | api.CoreFeatureGC, gc: true},
+		{name: "V3", set: api.CoreFeaturesV3, gc: true},
+	}
+
+	for _, f := range features {
+		for _, s := range sites {
+			if s.needs != 0 && !f.set.IsEnabled(s.needs) {
+				continue
+			}
+			for _, x := range s.reads {
+				valid := x == importedConst || x == definedConst && f.gc && s.definedReadable
+				t.Run(fmt.Sprintf("%s/%s/global.get %d", f.name, s.name, x), func(t *testing.T) {
+					err := s.module(x).Validate(f.set)
+					if valid {
+						require.NoError(t, err)
+					} else {
+						require.Error(t, err)
+					}
+				})
+			}
+		}
+	}
+
+	// Only a global's initializer is bounded by its own index; the seventh element segment may read the
+	// seventh defined global.
+	t.Run("element segment index does not bound the global it reads", func(t *testing.T) {
+		m := &Module{TableSection: []Table{{Min: 1, Type: RefTypeFuncref}}}
+		for i := 0; i < 7; i++ {
+			m.GlobalSection = append(m.GlobalSection, Global{Type: GlobalType{ValType: ValueTypeI32}, Init: NewConstantExpressionFromI32(0)})
+			m.ElementSection = append(m.ElementSection, ElementSegment{Mode: ElementModeActive, Type: RefTypeFuncref, OffsetExpr: read(Index(i))})
+		}
+		require.NoError(t, m.Validate(api.CoreFeaturesV3))
+	})
+
+	// Validate rejects both before declaredFunctionIndexes asks, so ask directly.
+	t.Run("resolveConstExprGlobalType bounds a module-defined global", func(t *testing.T) {
+		m := withGlobals(ValueTypeI32, NewConstantExpressionFromI32(0))
+		_, err := m.resolveConstExprGlobalType(api.CoreFeaturesV3, SectionIDGlobal, 0, definedConst)
+		require.EqualError(t, err, "global[0] global 2 out of range of initialized globals")
+		_, err = m.resolveConstExprGlobalType(api.CoreFeaturesV3, SectionIDElement, 0, self)
+		require.EqualError(t, err, "element[0] (global.get 4): out of range of initialized globals")
+	})
 }

@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/internal/wasmruntime"
 )
 
@@ -131,7 +132,7 @@ func canonicalIndex(types []FunctionType, i Index) Index {
 }
 
 func typeAt(types []FunctionType, i Index) *FunctionType {
-	if indexOutOfRange(i, len(types)) {
+	if u32.OutOfRange(i, len(types)) {
 		return nil
 	}
 	return &types[i]
@@ -408,10 +409,6 @@ const (
 	GCRefI31
 	GCI31GetS
 	GCI31GetU
-	// GCSafepoint is not a type check at all: it is how the native engine's loop-header poll reaches Go,
-	// sharing the GC trampoline so the safepoint costs no field in the execution context. It never reaches
-	// RunGC -- the engine handles it before dispatching -- and exists here so both sides name one constant.
-	GCSafepoint
 )
 
 // EncodeRefTarget packs the target of ref.test / ref.cast into the descriptor RunGC expects: the type
@@ -556,7 +553,7 @@ func arraySlot(o *GCObject, index, flags uint64) int {
 
 // allocGC handles the five allocating modes, which all end in one GCHeap.Alloc.
 func (m *ModuleInstance) allocGC(mode, typeIndex, count, init, initHi uint64, scratch []uint64) uint64 {
-	if indexOutOfRange(Index(typeIndex), len(m.TypeIDs)) {
+	if u32.OutOfRange(Index(typeIndex), len(m.TypeIDs)) {
 		panic("BUG: validation should have rejected type index")
 	}
 	def := &m.Source.TypeSection[typeIndex]
@@ -625,13 +622,13 @@ func (m *ModuleInstance) newArray(typeIndex, n uint64) *GCObject {
 // The operands are all i32-derived, so src+length*width cannot overflow a uint64.
 func (m *ModuleInstance) checkSegmentRange(fromData bool, segment, src, length, width uint64) {
 	if !fromData {
-		if indexOutOfRange(Index(segment), len(m.ElementInstances)) ||
+		if u32.OutOfRange(Index(segment), len(m.ElementInstances)) ||
 			src+length > uint64(len(m.ElementInstances[segment])) {
 			panic(wasmruntime.ErrRuntimeInvalidTableAccess)
 		}
 		return
 	}
-	if indexOutOfRange(Index(segment), len(m.DataInstances)) ||
+	if u32.OutOfRange(Index(segment), len(m.DataInstances)) ||
 		src+length*width > uint64(len(m.DataInstances[segment])) {
 		panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
 	}
@@ -718,7 +715,7 @@ func (m *ModuleInstance) refMatchesTarget(ref, desc uint64) bool {
 	}
 	if concrete {
 		idx := Index(desc >> 2)
-		if indexOutOfRange(idx, len(m.TypeIDs)) {
+		if u32.OutOfRange(idx, len(m.TypeIDs)) {
 			return false
 		}
 		actual, ok := m.runtimeTypeIDOf(ref, m.Source.TypeSection[idx].CompositeKind)

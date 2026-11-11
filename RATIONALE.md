@@ -913,18 +913,13 @@ third `path_len` has ambiguous semantics.
 
 * `fd`: a file descriptor
 * `path`: the offset for the result path
-* `path_len`: In wazy, `FdPrestatDirName` writes the result path string to
-  `path` offset for the exact length of `path_len`.
+* `path_len`: In wazy, the size of the buffer at `path`. A buffer shorter than
+  the name fails with `ENAMETOOLONG`, and a longer one gets the name, with the
+  bytes past it untouched.
 
-Wasmer considers `path_len` to be the maximum length instead of the exact
-length that should be written.
-See https://github.com/wasmerio/wasmer/blob/3463c51268ed551933392a4063bd4f8e7498b0f6/lib/wasi/src/syscalls/mod.rs#L764
-
-The semantics in wazy follows that of wasmtime.
-See https://github.com/bytecodealliance/wasmtime/blob/2ca01ae9478f199337cf743a6ab543e8c3f3b238/crates/wasi-common/src/snapshots/preview_1.rs#L578-L582
-
-Their semantics match when `path_len` == the length of `path`, so in practice
-this difference won't matter much.
+This follows wasmtime, and wasi-testsuite's `dir_fd_op_failures` checks both
+sides of it.
+See https://github.com/bytecodealliance/wasmtime/blob/v26.0.0/crates/wasi/src/preview1.rs
 
 ## fd_readdir
 
@@ -1231,7 +1226,7 @@ pub fn main() !void {
 ```
 
 Besides Zig, this is also the case with TinyGo (`-target=wasi`) and Rust
-(`--target wasm32-wasi`).
+(`--target wasm32-wasip1`).
 
 We decided to expose `sys.Nanosleep` to allow overriding the implementation
 used in the common case, even if it isn't used by Go, because this gives an
@@ -1862,15 +1857,29 @@ and matches nothing -- which is also what lets slots be reused rather than growi
 without bound. And a stack is only ever read while it is not being written to: a
 collection asks every call in flight to park, waits for all of them, marks,
 sweeps, and lets them go. The parking points are ones execution already passes
-through -- every loop header, and every host call, which is where an execution
-that is blocked outside wasm makes itself scannable. A guest cannot outrun a
-collection except by looping without a back edge, which no loop does.
+through. In compiled code they are its preemption checks: a collection rings each
+call in flight through its goroutine's preemption word, the doorbell a done
+context uses, so the next check yields, and the yield's return to compiled code
+parks. Every other return from Go to compiled code parks too -- after a host call,
+an allocation, a `memory.atomic.wait` -- and a call blocked in a host call or a
+wait is parked for as long as it is blocked. The interpreter reads its pause flag
+wherever it checks for preemption. Those checks bound the work between two of
+them, so a guest cannot outrun a collection: not in a loop, not through a cycle of
+`return_call`s, not blocked outside wasm.
+
+The yield trampoline saves every register the allocator hands out, and an exit to
+Go has the caller-saved ones spilled and the callee-saved ones saved, so a parked
+call's live references are on its stack or in the saved registers, and the
+conservative scan finds them without the backend saying where it kept anything.
 
 Nothing collects in the middle of an instruction: allocation only *asks* for a
-collection, and whichever execution reaches a parking point first runs it, where
-its own stack is stable too. The loop-header poll is one load and a not-taken
-branch, and it is emitted only when the GC proposal is enabled -- codegen for
-every other module is byte-identical to what it was before any of this landed.
+collection, and the call that asked runs it at its next parking point, the return
+from the allocation in compiled code. One that returns first leaves the request to
+whoever allocates next, which marks every call in flight again. Compiled code pays
+nothing for the collector. An earlier design polled the pause flag at every loop
+header with a call into Go behind it, and spilled every live value for the scan:
+that call made the register allocator store loop-carried values on every back
+edge, which cost PDFium 2.6x on some documents and 28% of its compile time.
 
 **A vector field takes two words.** Every other storage type fits in a
 `GCObject`'s single word; `v128` does not, so `FunctionType.FieldSlots` lays a
@@ -1899,42 +1908,138 @@ and as of Go 1.20, these assembler functions are considered as _unsafe_ for asyn
 From the Go runtime point of view, the execution of runtime-generated machine codes is considered as a part of
 that trampoline function. Therefore, runtime-generated machine code is also correctly considered unsafe for async preemption.
 
-## Why context cancellation is checked in native code
+## Why compiled code checks Go's preemption word
 
-Since [wazero v1.0.0-pre.9](https://github.com/tetratelabs/wazero/releases/tag/v1.0.0-pre.9), the runtime
-supports integration with Go contexts to interrupt execution after a timeout, or in response to explicit cancellation.
-It was long implemented as a Go round-trip — an opcode that called `ModuleInstance.FailIfClosed` — rather than
-[a direct read of the sentinel from native code][native_check], on the grounds that native code never preempts:
-checking the flag without leaving the native world would let a guest spin while the goroutine meant to *set* that
-flag never gets scheduled, so cancellation could never take place.
+Go cannot preempt runtime-generated code (see above), so a guest that never calls out holds its goroutine's P for as
+long as it runs. Nothing else can be scheduled on that P, and a stop-the-world -- a garbage collection, say -- waits
+for it, and with it every goroutine in the process. If the code that would stop the guest needs another goroutine to
+run first, the process deadlocks. Context cancellation is one case of the same problem: the goroutine that would
+notice the context is done never gets to run.
 
-The premise is right; what it settles is *where the scheduler gets its turn*, not where the check lives. wazy keeps
-both native. Compiled code carries a **termination fuel counter** in a register reserved out of the allocatable set
-(`fuelVReg` in each backend's `abi.go`), spends one tick at every function entry and every loop back-edge, and
-branches out when it reaches zero. The check is therefore two instructions and no memory reference: a decrement and
-a branch that reads the decrement's own flags.
+wazy closes it the way Go code does. The runtime asks a goroutine to stop by storing `stackPreempt` into its
+`g.stackguard0`, which a Go function prologue compares against; compiled code reads the same word. The entry preamble
+puts its address in a register reserved for it (`preemptVReg` in each backend's `abi.go`), and every loop header, and
+the entry of every function that can repeat without passing one, checks it (`ssa.OpcodePreemptRequested`).
+`stackPreempt` sets the word's sign bit, which no stack bound has, so the check tests that bit in place: on amd64
+`testb $0x80, 7(%r13)`, five bytes and no register, and on arm64 a load and `tbnz #63`. When it is set, the code returns to Go (`ExitCodeCheckModuleExitCode`), which yields there and checks whether the module was
+closed or the call's context is done. Both offsets are runtime internals, pinned against the toolchain's sources by
+`TestPreemptWordLayout`.
 
-Running out is what returns control to Go, and the Go side (`ExitCodeCheckModuleExitCode` in
-`internal/engine/native/call_engine.go`) does three things there: the authoritative atomic `FailIfClosed`, a
-`runtime.Gosched` so the cancellation watchdog can actually be scheduled, and a refill of the counter. The yield is
-the load-bearing part — it is what an earlier design bought by bracketing every entry into compiled code in
-`runtime.entersyscall` / `runtime.exitsyscall`, at the price of that pair on every host-call return.
+The check is kept off the hot path in these ways:
 
-Two properties of the counter matter more than they look:
+- **A loop with a counter** (one back edge that adds a constant to a header value, `ssa.FindLoopCounter`) tests a few
+  bits of that counter first, which an odd step leaves all zero once every 2^w iterations, and reads the word only
+  then, out of line: the loop pays one register test and a branch that is not taken.
+- **A loop that ends soon enough** -- a counter from a constant start against a constant bound, within
+  `wasm.PreemptBudget` -- has no check at all (`ssa.TripBound`). A loop that runs while its counter is not equal to
+  the bound is counted exactly, whatever its step, wrapping included: from zero, `i += 2` while `i != 16` runs eight times.
+  So is one that branches back on the counter itself, which is how LLVM ends a loop it rewrote to count to zero: a
+  cipher's ten double rounds, counted from -20 up by two. A loop stepping by one to its bound may also start from a
+  range rather than a constant: the remainder loop LLVM puts after an unrolled one counts `n & 3` down to zero behind a
+  branch around it when that is zero, so it runs three times at most and has no check either. Of a loop's counters,
+  the one its exit tests is the one these look at, and its start is followed back through the block parameters SSA
+  construction leaves for the locals an enclosing loop carries unchanged, which a later pass removes.
+- **A loop that counts down to zero** pays for neither: zero has every masked bit clear, so the loop's own test for
+  zero moves into the out-of-line half of the check (`foldZeroExit` in each backend), and the loop keeps one test.
+- **A short loop with a counter is strip-mined.** On the way in it works out how far the counter may go before the
+  next check is due, or the loop's own bound if that is nearer, and its exit test compares against that limit
+  instead of the bound: its iterations pay nothing, and running out of the limit is where it checks
+  (`ssa.Builder.StripMine`). A larger body keeps the masked test, since the limit holds a register for the whole loop.
+- **A loop's short calls count by their work.** Validation also works out which functions are sure to return
+  quickly (`wasm.Module.FunctionCallWork`): those with no loop, no bulk memory or table operation, no indirect call and
+  no call to an import, which call only functions like themselves and none recursively. A call to one adds the most
+  code it can run to the loop's body, as a bulk operation of a constant length up to a kilobyte adds its length, and
+  the loop keeps the cheaper checks above. Any other call gives the loop a full check, since a single iteration could
+  then run as long as it likes. Any other bulk operation, and any GC array operation that takes a length, checks just
+  before it runs (`frontend.Compiler.bulkCheck`): validation counts it as the few bytes of code it is, so a call tree
+  could otherwise make thousands of them between two checks. In a function checked on entry it does not: every call
+  checks before reaching it, and the loops around it keep their full checks, so it runs at most once between two.
+- **A loop whose check is cheaper checks on the way in.** A masked or strip-mined loop may run the budget's worth of
+  work before its first check, and one that ends soon enough runs all of it unchecked, while validation counts the
+  loop as the code it is. A call tree calling such a loop many times, or a function running many of them one after
+  another, would add those up between two checks, so each checks once where it is entered
+  (`frontend.Compiler.checkOnEntry`): one check per entry rather than per iteration. Three kinds skip it: a loop that
+  ends within 16 iterations, which stretches the budget sixteenfold at most; a masked loop whose counter starts with
+  the tested bits clear, whose first test runs the full check; and, in a function checked on entry, loops whose work
+  adds up to the budget at most, since a call runs each of them at most once between two checks, its entry check and
+  those of the loops around them.
+- **Function entry is checked only where cycles need it.** Validation works out the call graph
+  (`wasm.Module.FunctionNeedsEntryCheck`) and checks one function on every cycle: on a cycle through an indirect call
+  (one that can reach its caller), the function making that call, and on any other (recursion, mutual recursion,
+  `return_call`), every function on it. Go calls through function values and interfaces everywhere and takes the
+  reference of every function, so nearly all of a Go module is one cycle through indirect calls; checking only the
+  functions that make them leaves the rest unchecked.
+- **A call tree is bounded by checking its heaviest callees.** Of a function whose calls would run more than the
+  budget's worth of loop-free work, as an exponential call tree at a fixed depth does, the heaviest callees are
+  checked on entry until its calls fit; a callee checked this way costs every other caller nothing more. An indirect
+  call counts as the heaviest function it can reach, and only that one is checked, then the next if need be. The
+  function's own body is not counted against the budget: it runs once a call, checking its callees cannot shorten
+  it, and a small callee such as a 128-bit multiply, checked to bring one large caller under the budget, would pay
+  for it on every call from hot code elsewhere. Checking before the calls in the caller instead was measured and
+  lost (Zig +5.0% against +2.0% on the Atom): a callee checked on entry takes its work off every caller's count,
+  while a caller's own checks leave the other callers to choose checks of their own, some on hot calls.
+- **A loop that yields on every way back has no check of its own.** If every path from its header back to it makes a
+  call to a function checked on entry, the callee's check does the job (`frontend.Compiler.finishPreemptCheck`; a
+  recursive function written as a loop around its own call is checked once per call, not twice), as does a call
+  that checks before it is made (see below), and an inner loop that checks each time it is entered, at its header or
+  before it: every way past that loop, on from its end or out of it by a branch, went through that check
+  (`frontend.Compiler.settleExits`). A base64 decoder that enters a loop for every character, and leaves it on the
+  first, checks once per character, not twice. And a function whose body opens with a loop that keeps a full check
+  needs no entry check, as every call runs that one first.
+- **A call that may run another module's code checks first.** Validation sees one module: there, a call to an import,
+  which may be another module's compiled function, counts as nothing, and a chain of modules each calling the one
+  before it twice is an exponential call tree no module sees. So such a call checks just before it is made
+  (`frontend.Compiler.checkFirst`), and so does an indirect call in a module that another module's function may reach
+  (`wasm.Module.foreignFuncRefs`): one with an imported or exported table, an import in a table, or an import or
+  export that carries a reference. A call to a host function returns to Go anyway, so the check costs it next to
+  nothing; of the modules we time, only pdfium, which exports its table, has indirect calls that check.
+- **A dispatch loop checks only on the jumps that go back.** Go's compiler lays out every function as one loop whose
+  header jumps on a local with a `br_table` out of blocks opened right inside it, and every jump in the function sets
+  that local and branches back to the loop, forward jumps included, so a check at the header ran on each of them. A
+  branch back that sets the local to a constant lands at the end of a known block, and when that block is still open
+  at the branch, it lands ahead: a jump forward cannot repeat code, so any way round the loop takes a branch that
+  lands at or behind itself. Those branches check, and the header does not (`frontend.Compiler.detectDispatch`).
 
-- **Function entry, not just loop back-edges.** `loop` is the only backward branch *within* a function, so a
-  loop-free exponential call tree and `return_call` self-recursion both run unboundedly without crossing one. See
-  `TestEnsureTerminationWithoutLoops`.
-- **Preserved across an exit to Go, never refilled by one.** The register is a member of each backend's
-  `calleeSavedVRegs`, so a Go call saves and restores the live count; only the out-of-fuel exit writes a fresh one.
-  Refilling on every exit would let a guest calling a host function inside a loop spend forever without ever
-  reaching a check. See `TestEnsureTerminationHostCallLoop`.
+A check the compiler drops leaves nothing behind: `ssa.passRemoveElidedPreemptChecks` takes its branch and its slow
+block out of the function. One it keeps costs the code around it no registers or spills either: its slow path is a
+single `ssa.OpcodeYield`, which returns to Go through a trampoline that saves and restores every register itself
+(`CompileYieldTrampoline` in each backend), so the register allocator sees no call there and keeps every value live
+across the check where it is. The slow path goes on into the code after the check, which sees every local as the
+check's block left it rather than as a parameter or a copy (`ssa.yieldJoin`), so a check adds no block parameters, no
+arguments to the loop header and no aliases for later passes to resolve. A masked check's slow path is the exception:
+it goes back to the header (`ssa.Builder.ReturnToHeader`), because the backend may have moved the loop's exit test
+into the check's out-of-line half, past which the body goes on; a yield that landed on the way out would otherwise run
+the loop once more (`TestLoopYield_preemptedAtExit`). On amd64 the yield takes 32 bytes of stack,
+within what a leaf function leaves below its frame, so yielding leaves a function a leaf, with no stack check of its
+own; and in a function that keeps the execution context in its reserved slot for its trap paths, the yield reloads it
+from there, rather than keep the function's own live, and in a register, all round a loop for a path that almost
+never runs (`reloadYieldContexts`). arm64's trampoline keeps its registers on the stack, so there a yield still counts
+as a call. And the block layout puts that slow path after everything else (`ssa.sortBlocks`), so the check falls
+through to the code after it rather than jumping around its slow path. That order is no longer a depth-first one, so
+register allocation takes its liveness order from a separate depth-first walk (`ssa.Builder.BlockIteratorPostOrderBegin`).
+Nor does a check cost the bounds checks around it: a yield changes neither the memory nor its size, so what the code
+knew to be in bounds before the check it still knows after (`frontend.Compiler.initializeCurrentBlockKnownBounds`).
 
-Cancellation latency is therefore bounded by the interval (`nativeapi.TerminationFuel`) rather than immediate: the
-flag is read when the fuel runs out, not at every back-edge. The exit re-checks after its `Gosched`, so a close that
-lands during the yield is seen on the same trip rather than the next one.
+The interpreter needs none of this to be preempted, being Go code the runtime preempts itself. It checks only whether
+the module was closed or the call's context is done, on every 1024th loop or entry check, and runs a loop's check as
+part of the branch back to its header and a function's entry check as part of the call (`fuseChecks`), so neither
+costs an instruction dispatch. A call that may run another module's code counts as a check, as in compiled code, and
+so does a bulk operation or a GC array operation that takes a length; one over at least 64K bytes or table entries
+checks every time, since each of the 1024 iterations between two checks could otherwise do one.
 
-[native_check]: https://github.com/tetratelabs/wazero/issues/1409
+A done context stops a call through the same word. `context.AfterFunc` watches it without a goroutine until it is
+done; then the callback marks the call canceled and stores `stackPreempt` into the running goroutine's
+`g.stackguard0`, so the code returns at its next check. The mark comes first because Go code the goroutine runs, a
+host function say, can serve the request and clear the word: every 256th host call checks the mark, and a stack growth,
+which recursion makes and loops do not, stores the word again. Anything else gets the runtime's next request, which
+it makes of every goroutine that has run 10ms. The watcher is registered only once a call first yields or makes its
+256th host call, so a short call pays nothing for its context; the call then ends like a trap and the module stays
+usable.
+
+This is why wazy has no `WithCloseOnContextDone`, which wazero needs for any of it and which wazy removed in v0.6.0:
+there is nothing left for it to turn on. What it did besides -- close the module when the context is done, even while
+the call waits in a host function -- an embedder gets with `context.AfterFunc(ctx, func() { mod.Close(ctx) })`.
+
 
 ## Golang patterns
 

@@ -51,7 +51,7 @@ func TestInstruction_String(t *testing.T) {
 				u1:   uint64(math.Float32bits(3.0)),
 				rd:   regalloc.VReg(0).SetRegType(regalloc.RegTypeFloat),
 			},
-			exp: "ldr s0?, #8; b 8; data.f32 3.000000",
+			exp: "fmov s0?, #3",
 		},
 		{
 			i: &instruction{

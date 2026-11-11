@@ -4,15 +4,16 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
 // readUntilClosed hammers mem through the api.Memory surface from one
 // goroutine while close runs on another, which is issue #69's shape: an
-// embedder that cannot order the two because the close is a kill (see
-// WithCloseOnContextDone) and the reader is a call still unwinding through
-// host code. Run under -race.
+// embedder that cannot order the two because the close is a kill from a
+// watchdog and the reader is a call still unwinding through host code. Run
+// under -race.
 func readUntilClosed(t *testing.T, mem *MemoryInstance, closeFn func()) {
 	t.Helper()
 	var wg sync.WaitGroup
@@ -109,8 +110,8 @@ func TestMemoryClose_DoesNotRecycleWhileACallIsInFlight(t *testing.T) {
 	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
 	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 
-	var slot CallSlot
-	m.RegisterCallSlot(&slot)
+	var own CallSlot
+	slot := m.CallSlotFor(&own)
 	slot.Enter() // a call is running against this memory
 	require.NoError(t, m.ensureResourcesClosed(context.Background()))
 
@@ -124,7 +125,7 @@ func TestMemoryClose_DoesNotRecycleWhileACallIsInFlight(t *testing.T) {
 	mem.Mux.Unlock()
 	require.NotNil(t, pending, "the recycle must be deferred while a call is in flight")
 
-	m.ExitCall(&slot) // last call out performs it
+	m.ExitCall(slot) // last call out performs it
 
 	mem.Mux.Lock()
 	pending = mem.pendingRelease.recycle
@@ -132,16 +133,18 @@ func TestMemoryClose_DoesNotRecycleWhileACallIsInFlight(t *testing.T) {
 	require.Nil(t, pending, "the last call out must have performed the deferred recycle")
 }
 
-// Nested and concurrent calls: only the LAST one out releases.
+// Nested and concurrent calls: only the LAST one out releases, whether its slot is a callEngine's own or one
+// handed out of a chunk.
 func TestMemoryClose_ReleasesOnLastCallOut(t *testing.T) {
 	owner := &mockModuleEngine{}
 	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
 	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 
-	var s1, s2, s3 CallSlot
-	for _, s := range []*CallSlot{&s1, &s2, &s3} {
-		m.RegisterCallSlot(s)
-		s.Enter()
+	owns := make([]CallSlot, callSlotsSingly+callSlotsPerChunk+1) // into a second chunk
+	slots := make([]*CallSlot, len(owns))
+	for i := range owns {
+		slots[i] = m.CallSlotFor(&owns[i])
+		slots[i].Enter()
 	}
 	require.NoError(t, m.ensureResourcesClosed(context.Background()))
 
@@ -151,12 +154,40 @@ func TestMemoryClose_ReleasesOnLastCallOut(t *testing.T) {
 		return mem.pendingRelease.recycle
 	}
 
-	m.ExitCall(&s1)
-	require.NotNil(t, pendingRecycle(), "two calls still in flight")
-	m.ExitCall(&s2)
-	require.NotNil(t, pendingRecycle(), "one call still in flight")
-	m.ExitCall(&s3)
+	// Leave from the last slot back, so the singly registered ones are the last out.
+	for i := len(slots) - 1; i > 0; i-- {
+		m.ExitCall(slots[i])
+		require.NotNil(t, pendingRecycle(), "%d calls still in flight", i)
+	}
+	m.ExitCall(slots[0])
 	require.Nil(t, pendingRecycle(), "the last call out releases")
+}
+
+// The chunk's slots are the last out here.
+func TestMemoryClose_ReleasesOnLastCallOut_chunk(t *testing.T) {
+	owner := &mockModuleEngine{}
+	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
+	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
+
+	owns := make([]CallSlot, callSlotsSingly+2)
+	slots := make([]*CallSlot, len(owns))
+	for i := range owns {
+		slots[i] = m.CallSlotFor(&owns[i])
+	}
+	chunked := slots[callSlotsSingly:]
+	for _, s := range chunked {
+		s.Enter()
+	}
+	require.NoError(t, m.ensureResourcesClosed(context.Background()))
+
+	mem.Mux.Lock()
+	require.NotNil(t, mem.pendingRelease.recycle, "calls on chunk slots are in flight")
+	mem.Mux.Unlock()
+	m.ExitCall(chunked[0])
+	m.ExitCall(chunked[1])
+	mem.Mux.Lock()
+	require.Nil(t, mem.pendingRelease.recycle, "the last call out releases")
+	mem.Mux.Unlock()
 }
 
 // A close that finds no call in flight releases inline, as before -- the
@@ -183,13 +214,13 @@ func TestMemoryClose_ConcurrentCloseAndCallExitReleaseOnce(t *testing.T) {
 		mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
 		m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
 
-		var slot CallSlot
-		m.RegisterCallSlot(&slot)
+		var own CallSlot
+		slot := m.CallSlotFor(&own)
 		slot.Enter()
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); require.NoError(t, m.ensureResourcesClosed(context.Background())) }()
-		go func() { defer wg.Done(); m.ExitCall(&slot) }()
+		go func() { defer wg.Done(); m.ExitCall(slot) }()
 		wg.Wait()
 
 		mem.Mux.Lock()
@@ -223,4 +254,34 @@ func TestMemoryClose_AllocatorFreeIsRaceFree(t *testing.T) {
 
 	_, ok := mem.Read(0, 1)
 	require.False(t, ok, "a read after the allocator freed the pages must fail")
+}
+
+func TestModuleInstance_CallSlotFor(t *testing.T) {
+	t.Run("no memories", func(t *testing.T) {
+		m := &ModuleInstance{}
+		var own CallSlot
+		require.True(t, m.CallSlotFor(&own) == &own)
+		require.Nil(t, m.slotChunk)
+	})
+
+	owner := &mockModuleEngine{}
+	mem := NewMemoryInstance(&Memory{Min: 1, Cap: 1, Max: 1}, nil, owner, uint64(MemoryLimitPages))
+	m := &ModuleInstance{Memories: []*MemoryInstance{mem}, Engine: owner}
+
+	owns := make([]CallSlot, callSlotsSingly+2*callSlotsPerChunk)
+	seen := map[*CallSlot]bool{}
+	for i := range owns {
+		s := m.CallSlotFor(&owns[i])
+		if i < callSlotsSingly {
+			require.True(t, s == &owns[i], "callEngine %d should keep its own slot", i)
+		} else {
+			require.False(t, s == &owns[i], "callEngine %d should get a slot from a chunk", i)
+		}
+		require.False(t, seen[s], "slot handed out twice")
+		seen[s] = true
+	}
+	require.Equal(t, callSlotsSingly, len(mem.callers))
+	require.Equal(t, 2, len(mem.callerChunks))
+	// Each chunk slot is alone on its line.
+	require.Equal(t, uintptr(128), unsafe.Sizeof(callSlotChunk{})/callSlotsPerChunk)
 }

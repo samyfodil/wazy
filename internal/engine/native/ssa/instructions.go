@@ -43,6 +43,15 @@ type Instruction struct {
 	// mayThrow marks a call inside a try_table with catch clauses: a throw
 	// can resume execution right after it. See MarkMayThrow.
 	mayThrow bool
+	// contextLoad marks a load of module state that only a call or a store to the module context can
+	// change. See MarkContextLoad.
+	contextLoad bool
+	// pinned marks a float constant LICM moved out of a loop: it is computed once where it now stands,
+	// into a register the loop reads, rather than at each use. See Constant.
+	pinned bool
+	// inlinedCall marks a call made from a copy of a function's body lowered in place of a call to it.
+	// See MarkInlinedCall.
+	inlinedCall bool
 }
 
 // SourceOffset represents the offset of the source of an instruction.
@@ -95,9 +104,30 @@ func (i *Instruction) MarkMayThrow() {
 	i.mayThrow = true
 }
 
+// MarkContextLoad marks this load as reading module state, such as a memory's base or length, that
+// nothing changes but a call or a store through the module context pointer. A loop doing neither can
+// load it once before it starts: see passLoopInvariantCodeMotionOpt.
+func (i *Instruction) MarkContextLoad() *Instruction {
+	i.contextLoad = true
+	return i
+}
+
 // MayThrow reports whether MarkMayThrow was called on this call.
 func (i *Instruction) MayThrow() bool {
 	return i.mayThrow
+}
+
+// MarkInlinedCall marks this call as made from a copy of a function's body the frontend lowered in place
+// of a call to that function. The function holding the call is the one the copy is of, so a backtrace
+// through the call has a frame for the copy, and one for the function: the backend marks such a call
+// where the unwinder sees it.
+func (i *Instruction) MarkInlinedCall() {
+	i.inlinedCall = true
+}
+
+// InlinedCall reports whether MarkInlinedCall was called on this call.
+func (i *Instruction) InlinedCall() bool {
+	return i.inlinedCall
 }
 
 // resetInstruction resets this instruction to the initial state.
@@ -339,6 +369,9 @@ const (
 	// OpcodeVhighBits performs a lane-wise extract of the high bits: `v = VhighBits.lane a`.
 	OpcodeVhighBits
 
+	// OpcodeVIaddReduce sums the i32 lanes of a vector, wrapping: `v = VIaddReduce.i32x4 a`, an i32.
+	OpcodeVIaddReduce
+
 	// OpcodeIcmp compares two integer values with the given condition: `v = icmp Cond, x, y`.
 	OpcodeIcmp
 
@@ -472,6 +505,10 @@ const (
 
 	// OpcodeImul performs an integer multiplication: `v = Imul x, y`.
 	OpcodeImul
+
+	// OpcodeUmulhi is the high 64 bits of the unsigned 128-bit product of two i64 values: `v = Umulhi x, y`.
+	// WebAssembly has no such instruction; the frontend recognizes the 32-bit schoolbook form producers emit.
+	OpcodeUmulhi
 
 	// OpcodeUdiv performs the unsigned integer division `v = Udiv x, y`.
 	OpcodeUdiv
@@ -663,17 +700,15 @@ const (
 	// for tail calls. Semantically, it combines CallIndirect + Return into a single operation.
 	OpcodeTailCallReturnCallIndirect
 
-	// OpcodeFuelDec decrements the termination fuel counter and returns whether it
-	// ran out: `v = FuelDec`, non-zero when the counter reached zero or below.
+	// OpcodePreemptRequested returns whether the Go runtime has asked the running
+	// goroutine to stop: `v = PreemptRequested`, non-zero when it has.
 	//
-	// The counter is not an SSA value. It lives in one register reserved out of the
-	// allocatable set for the whole program (see the fuel register in each backend's
-	// abi.go), which is what keeps the check to two instructions -- a decrement and
-	// a rarely-taken branch that reads the decrement's own flags -- touching no
-	// memory at all. Reserving that register is not free; it costs the allocator one
-	// of fourteen integer registers on amd64 and one of thirty-one on arm64.
-	// Emitted only under WithCloseOnContextDone; see
-	// (*frontend.Compiler).emitFuelCheck.
+	// It is the check loop headers, and the entries of the functions that need
+	// one, make so that compiled code returns to Go when Go needs it to; see
+	// (*frontend.Compiler).emitPreemptCheck. The runtime asks by storing
+	// nativeapi.StackPreempt into the goroutine's g.stackguard0, and the entry
+	// preamble puts that word's address in a register reserved for it (see the
+	// preempt register in each backend's abi.go).
 	//
 	// It is classified sideEffectTraps rather than sideEffectStrict: "always alive"
 	// keeps it out of dead code elimination, while staying inside its instruction
@@ -681,7 +716,23 @@ const (
 	// strict effect starts a new group, and folding only happens within one).
 	// sideEffectTraps also keeps it out of loop-invariant code motion, which would
 	// otherwise hoist the one check a loop has out of that loop.
-	OpcodeFuelDec
+	OpcodePreemptRequested
+
+	// OpcodeYield returns to Go from the slow path of a preemption check: `Yield execCtx`.
+	//
+	// It is a call, but one that preserves every register: the trampoline it goes
+	// through saves and restores the registers a call would clobber (see
+	// backend.Machine.CompileYieldTrampoline). So the register allocator sees no call
+	// here, and the values live across a check stay where they are, rather than
+	// being spilled, wherever they are defined, for a path that almost never runs.
+	OpcodeYield
+
+	// OpcodeVecMap runs a vector map loop's element program over count elements: `VecMap ptr..., count,
+	// inv...`, where the program, Builder.VecProgram(u1), says how many pointers and invariants there are.
+	// Its operands are all it reads besides memory, and it writes only the store stream's elements. The
+	// backend expands it in place and treats it as a call, since its expansion is free to use the
+	// registers a call clobbers. See VecProgram.
+	OpcodeVecMap
 
 	// opcodeEnd marks the end of the opcode list.
 	opcodeEnd
@@ -729,13 +780,23 @@ func (op AtomicRmwOp) String() string {
 type returnTypesFn func(b *builder, instr *Instruction) (t1 Type, ts []Type)
 
 var (
-	returnTypesFnNoReturns    returnTypesFn = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return typeInvalid, nil }
-	returnTypesFnSingle                     = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return instr.typ, nil }
-	returnTypesFnI32                        = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeI32, nil }
-	returnTypesFnF32                        = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF32, nil }
-	returnTypesFnF64                        = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF64, nil }
-	returnTypesFnV128                       = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeV128, nil }
-	returnTypesFnCallIndirect               = func(b *builder, instr *Instruction) (t1 Type, ts []Type) {
+	returnTypesFnNoReturns returnTypesFn = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return typeInvalid, nil }
+	returnTypesFnSingle                  = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return instr.typ, nil }
+	returnTypesFnVecMap                  = func(b *builder, instr *Instruction) (t1 Type, ts []Type) {
+		p := b.VecProgram(int(instr.u1))
+		if len(p.Reduces) == 0 {
+			return typeInvalid, nil
+		}
+		for k := 1; k < len(p.Reduces); k++ {
+			ts = append(ts, p.ReduceType(k))
+		}
+		return p.ReduceType(0), ts
+	}
+	returnTypesFnI32          = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeI32, nil }
+	returnTypesFnF32          = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF32, nil }
+	returnTypesFnF64          = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF64, nil }
+	returnTypesFnV128         = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeV128, nil }
+	returnTypesFnCallIndirect = func(b *builder, instr *Instruction) (t1 Type, ts []Type) {
 		sigID := SignatureID(instr.u1)
 		sig, ok := b.signatures[sigID]
 		if !ok {
@@ -793,6 +854,7 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeCallIndirect:                sideEffectStrict,
 	OpcodeIadd:                        sideEffectNone,
 	OpcodeImul:                        sideEffectNone,
+	OpcodeUmulhi:                      sideEffectNone,
 	OpcodeIsub:                        sideEffectNone,
 	OpcodeIcmp:                        sideEffectNone,
 	OpcodeExtractlane:                 sideEffectNone,
@@ -885,6 +947,7 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeVanyTrue:                    sideEffectNone,
 	OpcodeVallTrue:                    sideEffectNone,
 	OpcodeVhighBits:                   sideEffectNone,
+	OpcodeVIaddReduce:                 sideEffectNone,
 	OpcodeVIadd:                       sideEffectNone,
 	OpcodeVSaddSat:                    sideEffectNone,
 	OpcodeVUaddSat:                    sideEffectNone,
@@ -928,7 +991,9 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeAtomicStore:                 sideEffectStrict,
 	OpcodeAtomicCas:                   sideEffectStrict,
 	OpcodeFence:                       sideEffectStrict,
-	OpcodeFuelDec:                     sideEffectTraps,
+	OpcodePreemptRequested:            sideEffectTraps,
+	OpcodeYield:                       sideEffectStrict,
+	OpcodeVecMap:                      sideEffectStrict,
 	OpcodeTailCallReturnCall:          sideEffectStrict,
 	OpcodeTailCallReturnCallIndirect:  sideEffectStrict,
 	OpcodeWideningPairwiseDotProductS: sideEffectNone,
@@ -955,6 +1020,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeVanyTrue:                    returnTypesFnI32,
 	OpcodeVallTrue:                    returnTypesFnI32,
 	OpcodeVhighBits:                   returnTypesFnI32,
+	OpcodeVIaddReduce:                 returnTypesFnI32,
 	OpcodeVIadd:                       returnTypesFnV128,
 	OpcodeVSaddSat:                    returnTypesFnV128,
 	OpcodeVUaddSat:                    returnTypesFnV128,
@@ -1020,6 +1086,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeIadd:                        returnTypesFnSingle,
 	OpcodeIsub:                        returnTypesFnSingle,
 	OpcodeImul:                        returnTypesFnSingle,
+	OpcodeUmulhi:                      returnTypesFnSingle,
 	OpcodeIcmp:                        returnTypesFnI32,
 	OpcodeFcmp:                        returnTypesFnI32,
 	OpcodeFadd:                        returnTypesFnSingle,
@@ -1087,7 +1154,9 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeAtomicStore:                 returnTypesFnNoReturns,
 	OpcodeAtomicCas:                   returnTypesFnSingle,
 	OpcodeFence:                       returnTypesFnNoReturns,
-	OpcodeFuelDec:                     returnTypesFnI32,
+	OpcodePreemptRequested:            returnTypesFnI32,
+	OpcodeYield:                       returnTypesFnNoReturns,
+	OpcodeVecMap:                      returnTypesFnVecMap,
 	OpcodeTailCallReturnCallIndirect:  returnTypesFnCallIndirect,
 	OpcodeTailCallReturnCall:          returnTypesFnCall,
 	OpcodeWideningPairwiseDotProductS: returnTypesFnV128,
@@ -1503,6 +1572,15 @@ func (i *Instruction) AsVFdiv(x, y Value, lane VecLane) *Instruction {
 // AsImul initializes this instruction as an integer addition instruction with OpcodeImul.
 func (i *Instruction) AsImul(x, y Value) *Instruction {
 	i.opcode = OpcodeImul
+	i.v = x
+	i.v2 = y
+	i.typ = x.Type()
+	return i
+}
+
+// AsUmulhi initializes this instruction as the high half of an unsigned 64x64->128 multiplication with OpcodeUmulhi.
+func (i *Instruction) AsUmulhi(x, y Value) *Instruction {
+	i.opcode = OpcodeUmulhi
 	i.v = x
 	i.v2 = y
 	i.typ = x.Type()
@@ -2049,6 +2127,15 @@ func (i *Instruction) AsVhighBits(x Value, lane VecLane) *Instruction {
 	return i
 }
 
+// AsVIaddReduce initializes this instruction as the sum of x's i32 lanes with OpcodeVIaddReduce.
+func (i *Instruction) AsVIaddReduce(x Value) *Instruction {
+	i.opcode = OpcodeVIaddReduce
+	i.typ = TypeI32
+	i.v = x
+	i.u1 = uint64(VecLaneI32x4)
+	return i
+}
+
 // VconstData returns the operands of this vector constant instruction.
 func (i *Instruction) VconstData() (lo, hi uint64) {
 	return i.u1, i.u2
@@ -2153,11 +2240,41 @@ func (i *Instruction) AsFence(order byte) *Instruction {
 	return i
 }
 
-// AsFuelDec initializes this instruction as a termination-fuel decrement. See OpcodeFuelDec.
-func (i *Instruction) AsFuelDec() *Instruction {
-	i.opcode = OpcodeFuelDec
+// AsPreemptRequested initializes this instruction as a preemption check. See OpcodePreemptRequested.
+func (i *Instruction) AsPreemptRequested() *Instruction {
+	i.opcode = OpcodePreemptRequested
 	i.typ = TypeI32
 	return i
+}
+
+// AsYield initializes this instruction as a return to Go from a preemption check. See OpcodeYield.
+func (i *Instruction) AsYield(execCtx Value) *Instruction {
+	i.opcode = OpcodeYield
+	i.v = execCtx
+	return i
+}
+
+// MaskPreemptCheck makes this OpcodePreemptRequested check only when counter & mask is zero, which a
+// loop counter whose step is odd once mask's trailing zeros are shifted out reaches once every
+// 2^popcount(mask) iterations. See MaskedCheckBits.
+func (i *Instruction) MaskPreemptCheck(counter Value, mask uint64) {
+	i.v = counter
+	i.u1 = mask
+}
+
+// ElidePreemptCheck makes this OpcodePreemptRequested never check: its loop is known to end soon
+// enough. See Builder.TripBound.
+func (i *Instruction) ElidePreemptCheck() {
+	i.u2 = 1
+}
+
+// PreemptCheckData returns the counter and mask of a masked OpcodePreemptRequested (an invalid counter
+// when it is not masked), and whether the check is elided.
+func (i *Instruction) PreemptCheckData() (counter Value, mask uint64, elided bool) {
+	if i.u1 == 0 {
+		return ValueInvalid, 0, i.u2 != 0
+	}
+	return i.v, i.u1, i.u2 != 0
 }
 
 // AtomicRmwData returns the data for this atomic read-modify-write instruction.
@@ -2671,7 +2788,7 @@ func (i *Instruction) Format(b Builder) string {
 		instSuffix = fmt.Sprintf(" %s, %s", i.v.Format(b), nativeapi.ExitCode(i.u1))
 	case OpcodeExitIfTrueWithCode:
 		instSuffix = fmt.Sprintf(" %s, %s, %s", i.v2.Format(b), i.v.Format(b), nativeapi.ExitCode(i.u1))
-	case OpcodeIadd, OpcodeIsub, OpcodeImul, OpcodeFadd, OpcodeFsub, OpcodeFmin, OpcodeFmax, OpcodeFdiv, OpcodeFmul:
+	case OpcodeIadd, OpcodeIsub, OpcodeImul, OpcodeUmulhi, OpcodeFadd, OpcodeFsub, OpcodeFmin, OpcodeFmax, OpcodeFdiv, OpcodeFmul:
 		instSuffix = fmt.Sprintf(" %s, %s", i.v.Format(b), i.v2.Format(b))
 	case OpcodeIcmp:
 		instSuffix = fmt.Sprintf(" %s, %s, %s", IntegerCmpCond(i.u1), i.v.Format(b), i.v2.Format(b))
@@ -2694,6 +2811,14 @@ func (i *Instruction) Format(b Builder) string {
 		instSuffix = fmt.Sprintf(" %s, %s, %#x", i.v.Format(b), i.v2.Format(b), uint32(i.u1))
 	case OpcodeLoad, OpcodeVZeroExtLoad:
 		instSuffix = fmt.Sprintf(" %s, %#x", i.v.Format(b), int32(i.u1))
+	case OpcodeYield:
+		instSuffix = " " + i.v.Format(b)
+	case OpcodeVecMap:
+		vs := make([]string, 0, len(i.vs.View()))
+		for _, v := range i.vs.View() {
+			vs = append(vs, v.Format(b))
+		}
+		instSuffix = fmt.Sprintf(" #%d %s", i.u1, strings.Join(vs, ", "))
 	case OpcodeLoadSplat:
 		instSuffix = fmt.Sprintf(".%s %s, %#x", VecLane(i.u2), i.v.Format(b), int32(i.u1))
 	case OpcodeUload8, OpcodeUload16, OpcodeUload32, OpcodeSload8, OpcodeSload16, OpcodeSload32:
@@ -2776,7 +2901,7 @@ func (i *Instruction) Format(b Builder) string {
 		OpcodeVFmin, OpcodeVFmax, OpcodeVMinPseudo, OpcodeVMaxPseudo,
 		OpcodeSnarrow, OpcodeUnarrow, OpcodeSwizzle, OpcodeSqmulRoundSat:
 		instSuffix = fmt.Sprintf(".%s %s, %s", VecLane(i.u1), i.v.Format(b), i.v2.Format(b))
-	case OpcodeVIabs, OpcodeVIneg, OpcodeVIpopcnt, OpcodeVhighBits, OpcodeVallTrue, OpcodeVanyTrue,
+	case OpcodeVIabs, OpcodeVIneg, OpcodeVIpopcnt, OpcodeVhighBits, OpcodeVIaddReduce, OpcodeVallTrue, OpcodeVanyTrue,
 		OpcodeVFabs, OpcodeVFneg, OpcodeVSqrt, OpcodeVCeil, OpcodeVFloor, OpcodeVTrunc, OpcodeVNearest,
 		OpcodeVFcvtToUintSat, OpcodeVFcvtToSintSat, OpcodeVFcvtFromUint, OpcodeVFcvtFromSint,
 		OpcodeFvpromoteLow, OpcodeFvdemote, OpcodeSwidenLow, OpcodeUwidenLow, OpcodeSwidenHigh, OpcodeUwidenHigh,
@@ -2812,8 +2937,13 @@ func (i *Instruction) Format(b Builder) string {
 		instSuffix = fmt.Sprintf("_%d, %s, %s, %s", 8*i.u1, i.v.Format(b), i.v2.Format(b), i.v3.Format(b))
 	case OpcodeFence:
 		instSuffix = fmt.Sprintf(" %d", i.u1)
-	case OpcodeFuelDec:
-		instSuffix = ""
+	case OpcodePreemptRequested:
+		switch counter, mask, elided := i.PreemptCheckData(); {
+		case elided:
+			instSuffix = " elided"
+		case counter.Valid():
+			instSuffix = fmt.Sprintf(" %s, %#x", counter.Format(b), mask)
+		}
 	case OpcodeTailCallReturnCall, OpcodeTailCallReturnCallIndirect:
 		view := i.vs.View()
 		vs := make([]string, len(view))
@@ -2861,10 +2991,12 @@ func (i *Instruction) addArgumentBranchInst(b *builder, v Value) {
 }
 
 // Constant returns true if this instruction is a constant instruction.
+//
+// A pinned float constant is not one: it is an ordinary value, defined where it stands.
 func (i *Instruction) Constant() bool {
 	switch i.opcode {
 	case OpcodeIconst, OpcodeF32const, OpcodeF64const:
-		return true
+		return !i.pinned
 	}
 	return false
 }
@@ -2956,6 +3088,8 @@ func (o Opcode) String() (ret string) {
 		return "VallTrue"
 	case OpcodeVhighBits:
 		return "VhighBits"
+	case OpcodeVIaddReduce:
+		return "VIaddReduce"
 	case OpcodeIcmp:
 		return "Icmp"
 	case OpcodeIcmpImm:
@@ -2968,6 +3102,8 @@ func (o Opcode) String() (ret string) {
 		return "Isub"
 	case OpcodeImul:
 		return "Imul"
+	case OpcodeUmulhi:
+		return "Umulhi"
 	case OpcodeUdiv:
 		return "Udiv"
 	case OpcodeSdiv:
@@ -3084,8 +3220,12 @@ func (o Opcode) String() (ret string) {
 		return "AtomicStore"
 	case OpcodeFence:
 		return "Fence"
-	case OpcodeFuelDec:
-		return "FuelDec"
+	case OpcodePreemptRequested:
+		return "PreemptRequested"
+	case OpcodeYield:
+		return "Yield"
+	case OpcodeVecMap:
+		return "VecMap"
 	case OpcodeTailCallReturnCall:
 		return "ReturnCall"
 	case OpcodeTailCallReturnCallIndirect:
@@ -3184,4 +3324,19 @@ func (o Opcode) String() (ret string) {
 		return "VZeroExtLoad"
 	}
 	panic(fmt.Sprintf("unknown opcode %d", o))
+}
+
+// AsVecMap initializes this instruction as an OpcodeVecMap running program number prog over args: the
+// pointers, the element count and the invariants, in that order. It returns the program's totals, in the
+// order of its Reduces.
+func (i *Instruction) AsVecMap(prog int, args Values) *Instruction {
+	i.opcode = OpcodeVecMap
+	i.u1 = uint64(prog)
+	i.vs = args
+	return i
+}
+
+// VecMapData returns an OpcodeVecMap's program number and operands.
+func (i *Instruction) VecMapData() (prog int, args []Value) {
+	return int(i.u1), i.vs.View()
 }

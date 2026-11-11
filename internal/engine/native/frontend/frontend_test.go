@@ -2,6 +2,7 @@ package frontend
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"unsafe"
 
@@ -26,9 +27,8 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 	// what output should look like, you can run:
 	// `~/wasmtime/target/debug/clif-util wasm --target aarch64-apple-darwin testcase.wat -p -t`
 	for _, tc := range []struct {
-		name              string
-		ensureTermination bool
-		needListener      bool
+		name         string
+		needListener bool
 		// m is the *wasm.Module to be compiled in this test.
 		m *wasm.Module
 		// targetIndex is the index of a local function to be compiled in this test.
@@ -38,6 +38,9 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 		// expAfterPasses is not empty when we want to check the result after SSA passes.
 		expAfterPasses string
 		features       api.CoreFeatures
+		// inline lets small callees be lowered in place of their calls, which the other cases keep
+		// as calls so that they pin how a call is lowered.
+		inline bool
 	}{
 		{
 			name: "empty", m: testcases.Empty.Module,
@@ -238,97 +241,108 @@ blk2: () <-- (blk0)
 `,
 		},
 		{
+			name: "loop - counted", m: testcases.LoopCounted.Module,
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Jump blk1, v2
+
+blk1: (v4:i32) <-- (blk0,blk4,blk3)
+	v3:i32 = PreemptRequested v4, 0xfff
+	Brnz v3, blk3
+	Jump blk4
+
+blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk1, v4
+
+blk4: () <-- (blk1)
+	v5:i32 = Iconst_32 0x1
+	v6:i32 = Iadd v4, v5
+	v7:i32 = Iconst_32 0x1
+	Brnz v7, blk1, v6
+	Jump blk5
+
+blk5: () <-- (blk4)
+	Jump blk_ret
+`,
+		},
+		{
+			name: "loop - bounded", m: testcases.LoopBounded.Module,
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	v9:i32 = PreemptRequested
+	Brnz v9, blk6
+	Jump blk1, v2
+
+blk1: (v4:i32) <-- (blk0,blk4,blk6)
+	v3:i32 = PreemptRequested elided
+	Brnz v3, blk3
+	Jump blk4
+
+blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v5:i32 = Iconst_32 0x1
+	v6:i32 = Iadd v4, v5
+	v7:i32 = Iconst_32 0x64
+	v8:i32 = Icmp lt_u, v6, v7
+	Brnz v8, blk1, v6
+	Jump blk5
+
+blk5: () <-- (blk4)
+	Jump blk_ret
+
+blk6: () <-- (blk0)
+	Yield v0
+	Jump blk1, v2
+`,
+		},
+		{
 			name: "loop - br", m: testcases.LoopBr.Module,
 			exp: `
 blk0: (v0:i64, v1:i64)
 	Jump blk1
 
-blk1: () <-- (blk0,blk1)
-	Jump blk1
+blk1: () <-- (blk0,blk4)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk3
+	Jump blk4
 
 blk2: ()
-`,
-			expAfterPasses: `
-blk0: (v0:i64, v1:i64)
-	Jump fallthrough
 
-blk1: () <-- (blk0,blk1)
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
 	Jump blk1
 `,
-		},
-		{
-			name: "loop - br / ensure termination", m: testcases.LoopBr.Module,
-			ensureTermination: true,
-			exp: `
-signatures:
-	sig2: i64_v
-
-blk0: (v0:i64, v1:i64)
-	v2:i32 = FuelDec
-	Brnz v2, blk1
-	Jump blk2
-
-blk1: () <-- (blk0)
-	v5:i64 = Load v0, 0x58
-	CallIndirect v5:sig2, v0
-	Jump blk2
-
-blk2: () <-- (blk0,blk1)
-	Jump blk3
-
-blk3: () <-- (blk2,blk6)
-	v3:i32 = FuelDec
-	Brnz v3, blk5
-	Jump blk6
-
-blk4: ()
-
-blk5: () <-- (blk3)
-	v4:i64 = Load v0, 0x58
-	CallIndirect v4:sig2, v0
-	Jump blk6
-
-blk6: () <-- (blk3,blk5)
-	Jump blk3
-`,
-			// The two slow blocks (blk1 for the entry check, blk5 for the loop's)
-			// land after the loop body, so the out-of-fuel branch is the forward,
-			// predicted-not-taken one and the body stays on the fallthrough.
 			expAfterPasses: `
-signatures:
-	sig2: i64_v
-
 blk0: (v0:i64, v1:i64)
-	v2:i32 = FuelDec
-	Brnz v2, blk1
 	Jump fallthrough
 
-blk7: () <-- (blk0)
+blk1: () <-- (blk0,blk4)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk3
 	Jump fallthrough
 
-blk2: () <-- (blk7,blk1)
+blk5: () <-- (blk1)
 	Jump fallthrough
 
-blk3: () <-- (blk2,blk6)
-	v3:i32 = FuelDec
-	Brnz v3, blk5
-	Jump fallthrough
+blk4: () <-- (blk5,blk3)
+	Jump blk1
 
-blk8: () <-- (blk3)
-	Jump fallthrough
-
-blk6: () <-- (blk8,blk5)
-	Jump blk3
-
-blk5: () <-- (blk3)
-	v4:i64 = Load v0, 0x58
-	CallIndirect v4:sig2, v0
-	Jump blk6
-
-blk1: () <-- (blk0)
-	v5:i64 = Load v0, 0x58
-	CallIndirect v5:sig2, v0
-	Jump blk2
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -337,30 +351,51 @@ blk1: () <-- (blk0)
 blk0: (v0:i64, v1:i64)
 	Jump blk1
 
-blk1: () <-- (blk0,blk1)
-	v2:i32 = Iconst_32 0x1
-	Brnz v2, blk1
-	Jump blk3
+blk1: () <-- (blk0,blk4)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk3
+	Jump blk4
 
 blk2: ()
 
 blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v3:i32 = Iconst_32 0x1
+	Brnz v3, blk1
+	Jump blk5
+
+blk5: () <-- (blk4)
 	Return
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64)
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk4)
-	v2:i32 = Iconst_32 0x1
-	Brz v2, blk3
+blk1: () <-- (blk0,blk7)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk3
 	Jump fallthrough
 
-blk4: () <-- (blk1)
+blk6: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk6,blk3)
+	v3:i32 = Iconst_32 0x1
+	Brz v3, blk5
+	Jump fallthrough
+
+blk7: () <-- (blk4)
 	Jump blk1
 
-blk3: () <-- (blk1)
+blk5: () <-- (blk4)
 	Return
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -419,6 +454,76 @@ blk2: () <-- (blk0)
 	Jump blk_ret
 
 blk3: () <-- (blk1)
+	Jump blk_ret
+`,
+		},
+		{
+			// The hint says the if is rarely true, so the then arm and the block only it reaches go last, and
+			// the branch is inverted for the else arm to fall through.
+			name: "if-else hinted unlikely", m: branchHinted(testcases.IfElse.Module, wasm.BranchHint{Offset: 2, Likely: false}),
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Brz v2, blk2
+	Jump blk1
+
+blk1: () <-- (blk0)
+	Jump blk3
+
+blk2: () <-- (blk0)
+	Jump blk_ret
+
+blk3: () <-- (blk1)
+	Jump blk_ret
+`,
+			expAfterPasses: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Brnz v2, blk1
+	Jump fallthrough
+
+blk2: () <-- (blk0)
+	Jump blk_ret
+
+blk1: () <-- (blk0)
+	Jump fallthrough
+
+blk3: () <-- (blk1)
+	Jump blk_ret
+`,
+		},
+		{
+			// The hint says the if is usually true, so the else arm goes last and the then arm falls through
+			// to the block after the if, which it cannot when the else arm sits between them.
+			name: "if-else hinted likely", m: branchHinted(testcases.IfElse.Module, wasm.BranchHint{Offset: 2, Likely: true}),
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Brz v2, blk2
+	Jump blk1
+
+blk1: () <-- (blk0)
+	Jump blk3
+
+blk2: () <-- (blk0)
+	Jump blk_ret
+
+blk3: () <-- (blk1)
+	Jump blk_ret
+`,
+			expAfterPasses: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x0
+	Brz v2, blk2
+	Jump fallthrough
+
+blk1: () <-- (blk0)
+	Jump fallthrough
+
+blk3: () <-- (blk1)
+	Jump blk_ret
+
+blk2: () <-- (blk0)
 	Jump blk_ret
 `,
 		},
@@ -496,16 +601,28 @@ blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i32 = Iconst_32 0x0
 	Jump blk1, v2
 
-blk1: (v4:i32) <-- (blk0)
-	Return v4
+blk1: (v5:i32) <-- (blk0)
+	v4:i32 = PreemptRequested elided
+	Brnz v4, blk3
+	Jump blk4
 
 blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	Return v5
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump fallthrough
 
 blk1: () <-- (blk0)
+	Jump fallthrough
+
+blk4: () <-- (blk1)
 	Return v2
 `,
 		},
@@ -516,32 +633,53 @@ blk1: () <-- (blk0)
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump blk1, v2
 
-blk1: (v3:i32) <-- (blk0,blk1)
-	Brnz v3, blk1, v3
+blk1: (v4:i32) <-- (blk0,blk4)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
 	Jump blk4
 
 blk2: ()
 
-blk3: ()
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 
-blk4: () <-- (blk1)
-	v4:i32 = Iconst_32 0x0
-	Jump blk_ret, v4
+blk4: () <-- (blk1,blk3)
+	Brnz v4, blk1, v4
+	Jump blk6
+
+blk5: ()
+
+blk6: () <-- (blk4)
+	v5:i32 = Iconst_32 0x0
+	Jump blk_ret, v5
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk5)
-	Brz v2, blk4
+blk1: () <-- (blk0,blk8)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
 	Jump fallthrough
 
-blk5: () <-- (blk1)
+blk7: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk7,blk3)
+	Brz v2, blk6
+	Jump fallthrough
+
+blk8: () <-- (blk4)
 	Jump blk1
 
-blk4: () <-- (blk1)
-	v4:i32 = Iconst_32 0x0
-	Jump blk_ret, v4
+blk6: () <-- (blk4)
+	v5:i32 = Iconst_32 0x0
+	Jump blk_ret, v5
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -551,32 +689,53 @@ blk4: () <-- (blk1)
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump blk1, v2
 
-blk1: (v3:i32) <-- (blk0,blk4)
-	Brnz v3, blk_ret
+blk1: (v4:i32) <-- (blk0,blk6)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
 	Jump blk4
 
 blk2: ()
 
-blk3: ()
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 
-blk4: () <-- (blk1)
-	v4:i32 = Iconst_32 0x1
-	Jump blk1, v4
+blk4: () <-- (blk1,blk3)
+	Brnz v4, blk_ret
+	Jump blk6
+
+blk5: ()
+
+blk6: () <-- (blk4)
+	v5:i32 = Iconst_32 0x1
+	Jump blk1, v5
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	Jump fallthrough, v2
 
-blk1: (v3:i32) <-- (blk0,blk4)
-	Brnz v3, blk5
-	Jump blk4
+blk1: (v4:i32) <-- (blk0,blk6)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
+	Jump fallthrough
 
-blk5: () <-- (blk1)
+blk7: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk7,blk3)
+	Brnz v4, blk8
+	Jump blk6
+
+blk8: () <-- (blk4)
 	Jump blk_ret
 
-blk4: () <-- (blk1)
-	v4:i32 = Iconst_32 0x1
-	Jump blk1, v4
+blk6: () <-- (blk4)
+	v5:i32 = Iconst_32 0x1
+	Jump blk1, v5
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -594,6 +753,16 @@ blk0: (v0:i64, v1:i64)
 	v4:i32 = Call f2:sig2, v0, v1, v2, v3
 	v5:i32, v6:i32 = Call f3:sig3, v0, v1, v4
 	Jump blk_ret, v5, v6
+`,
+		},
+		{
+			name: "call_inlined", m: testcases.Call.Module, inline: true,
+			exp: `
+blk0: (v0:i64, v1:i64)
+	v2:i32 = Iconst_32 0x28
+	v3:i32 = Iconst_32 0x5
+	v4:i32 = Iadd v2, v3
+	Jump blk_ret, v4, v4
 `,
 		},
 		{
@@ -799,30 +968,51 @@ blk0: (v0:i64, v1:i64, v2:f64, v3:f32)
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	Jump blk1, v2, v3
 
-blk1: (v4:i32,v5:i32) <-- (blk0,blk1)
-	v7:i32 = Iconst_32 0x1
-	Brnz v7, blk1, v4, v5
-	Jump blk3
+blk1: (v4:i32,v5:i32) <-- (blk0,blk4)
+	v7:i32 = PreemptRequested
+	Brnz v7, blk3
+	Jump blk4
 
 blk2: (v6:i32)
 
 blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v8:i32 = Iconst_32 0x1
+	Brnz v8, blk1, v4, v5
+	Jump blk5
+
+blk5: () <-- (blk4)
 	Jump blk_ret, v4
 `,
 			expAfterPasses: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk4)
-	v7:i32 = Iconst_32 0x1
-	Brz v7, blk3
+blk1: () <-- (blk0,blk7)
+	v7:i32 = PreemptRequested
+	Brnz v7, blk3
 	Jump fallthrough
 
-blk4: () <-- (blk1)
+blk6: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk6,blk3)
+	v8:i32 = Iconst_32 0x1
+	Brz v8, blk5
+	Jump fallthrough
+
+blk7: () <-- (blk4)
 	Jump blk1
 
-blk3: () <-- (blk1)
+blk5: () <-- (blk4)
 	Jump blk_ret, v2
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
 `,
 		},
 		{
@@ -870,124 +1060,127 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:f32, v5:f64, v6:i32, v7:i64, v8:f32, v
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:f32)
 	v4:i32 = Iconst_32 0x1
-	v5:i32 = Imul v2, v4
-	v6:i32 = Iconst_32 0x2
-	v7:i32 = Imul v2, v6
+	v5:i32 = Iconst_32 0x2
+	v6:i32 = Iconst_32 0x1
+	v7:i32 = Ishl v2, v6
 	v8:i32 = Iconst_32 0x3
 	v9:i32 = Imul v2, v8
 	v10:i32 = Iconst_32 0x4
-	v11:i32 = Imul v2, v10
-	v12:i32 = Iconst_32 0x5
-	v13:i32 = Imul v2, v12
-	v14:i32 = Iconst_32 0x6
-	v15:i32 = Imul v2, v14
-	v16:i32 = Iconst_32 0x7
-	v17:i32 = Imul v2, v16
-	v18:i32 = Iconst_32 0x8
-	v19:i32 = Imul v2, v18
-	v20:i32 = Iconst_32 0x9
-	v21:i32 = Imul v2, v20
-	v22:i32 = Iconst_32 0xa
+	v11:i32 = Iconst_32 0x2
+	v12:i32 = Ishl v2, v11
+	v13:i32 = Iconst_32 0x5
+	v14:i32 = Imul v2, v13
+	v15:i32 = Iconst_32 0x6
+	v16:i32 = Imul v2, v15
+	v17:i32 = Iconst_32 0x7
+	v18:i32 = Imul v2, v17
+	v19:i32 = Iconst_32 0x8
+	v20:i32 = Iconst_32 0x3
+	v21:i32 = Ishl v2, v20
+	v22:i32 = Iconst_32 0x9
 	v23:i32 = Imul v2, v22
-	v24:i32 = Iconst_32 0xb
+	v24:i32 = Iconst_32 0xa
 	v25:i32 = Imul v2, v24
-	v26:i32 = Iconst_32 0xc
+	v26:i32 = Iconst_32 0xb
 	v27:i32 = Imul v2, v26
-	v28:i32 = Iconst_32 0xd
+	v28:i32 = Iconst_32 0xc
 	v29:i32 = Imul v2, v28
-	v30:i32 = Iconst_32 0xe
+	v30:i32 = Iconst_32 0xd
 	v31:i32 = Imul v2, v30
-	v32:i32 = Iconst_32 0xf
+	v32:i32 = Iconst_32 0xe
 	v33:i32 = Imul v2, v32
-	v34:i32 = Iconst_32 0x10
+	v34:i32 = Iconst_32 0xf
 	v35:i32 = Imul v2, v34
-	v36:i32 = Iconst_32 0x11
-	v37:i32 = Imul v2, v36
-	v38:i32 = Iconst_32 0x12
-	v39:i32 = Imul v2, v38
-	v40:i32 = Iconst_32 0x13
-	v41:i32 = Imul v2, v40
-	v42:i32 = Iconst_32 0x14
-	v43:i32 = Imul v2, v42
-	v44:i32 = Iadd v41, v43
-	v45:i32 = Iadd v39, v44
-	v46:i32 = Iadd v37, v45
-	v47:i32 = Iadd v35, v46
-	v48:i32 = Iadd v33, v47
-	v49:i32 = Iadd v31, v48
-	v50:i32 = Iadd v29, v49
-	v51:i32 = Iadd v27, v50
-	v52:i32 = Iadd v25, v51
-	v53:i32 = Iadd v23, v52
-	v54:i32 = Iadd v21, v53
-	v55:i32 = Iadd v19, v54
-	v56:i32 = Iadd v17, v55
-	v57:i32 = Iadd v15, v56
-	v58:i32 = Iadd v13, v57
-	v59:i32 = Iadd v11, v58
-	v60:i32 = Iadd v9, v59
-	v61:i32 = Iadd v7, v60
-	v62:i32 = Iadd v5, v61
-	v63:f32 = F32const 1.000000
-	v64:f32 = Fmul v3, v63
-	v65:f32 = F32const 2.000000
-	v66:f32 = Fmul v3, v65
-	v67:f32 = F32const 3.000000
-	v68:f32 = Fmul v3, v67
-	v69:f32 = F32const 4.000000
-	v70:f32 = Fmul v3, v69
-	v71:f32 = F32const 5.000000
-	v72:f32 = Fmul v3, v71
-	v73:f32 = F32const 6.000000
-	v74:f32 = Fmul v3, v73
-	v75:f32 = F32const 7.000000
-	v76:f32 = Fmul v3, v75
-	v77:f32 = F32const 8.000000
-	v78:f32 = Fmul v3, v77
-	v79:f32 = F32const 9.000000
-	v80:f32 = Fmul v3, v79
-	v81:f32 = F32const 10.000000
-	v82:f32 = Fmul v3, v81
-	v83:f32 = F32const 11.000000
-	v84:f32 = Fmul v3, v83
-	v85:f32 = F32const 12.000000
-	v86:f32 = Fmul v3, v85
-	v87:f32 = F32const 13.000000
-	v88:f32 = Fmul v3, v87
-	v89:f32 = F32const 14.000000
-	v90:f32 = Fmul v3, v89
-	v91:f32 = F32const 15.000000
-	v92:f32 = Fmul v3, v91
-	v93:f32 = F32const 16.000000
-	v94:f32 = Fmul v3, v93
-	v95:f32 = F32const 17.000000
-	v96:f32 = Fmul v3, v95
-	v97:f32 = F32const 18.000000
-	v98:f32 = Fmul v3, v97
-	v99:f32 = F32const 19.000000
-	v100:f32 = Fmul v3, v99
-	v101:f32 = F32const 20.000000
-	v102:f32 = Fmul v3, v101
-	v103:f32 = Fadd v100, v102
-	v104:f32 = Fadd v98, v103
-	v105:f32 = Fadd v96, v104
-	v106:f32 = Fadd v94, v105
-	v107:f32 = Fadd v92, v106
-	v108:f32 = Fadd v90, v107
-	v109:f32 = Fadd v88, v108
-	v110:f32 = Fadd v86, v109
-	v111:f32 = Fadd v84, v110
-	v112:f32 = Fadd v82, v111
-	v113:f32 = Fadd v80, v112
-	v114:f32 = Fadd v78, v113
-	v115:f32 = Fadd v76, v114
-	v116:f32 = Fadd v74, v115
-	v117:f32 = Fadd v72, v116
-	v118:f32 = Fadd v70, v117
-	v119:f32 = Fadd v68, v118
-	v120:f32 = Fadd v66, v119
-	v121:f32 = Fadd v64, v120
-	Jump blk_ret, v62, v121
+	v36:i32 = Iconst_32 0x10
+	v37:i32 = Iconst_32 0x4
+	v38:i32 = Ishl v2, v37
+	v39:i32 = Iconst_32 0x11
+	v40:i32 = Imul v2, v39
+	v41:i32 = Iconst_32 0x12
+	v42:i32 = Imul v2, v41
+	v43:i32 = Iconst_32 0x13
+	v44:i32 = Imul v2, v43
+	v45:i32 = Iconst_32 0x14
+	v46:i32 = Imul v2, v45
+	v47:i32 = Iadd v44, v46
+	v48:i32 = Iadd v42, v47
+	v49:i32 = Iadd v40, v48
+	v50:i32 = Iadd v38, v49
+	v51:i32 = Iadd v35, v50
+	v52:i32 = Iadd v33, v51
+	v53:i32 = Iadd v31, v52
+	v54:i32 = Iadd v29, v53
+	v55:i32 = Iadd v27, v54
+	v56:i32 = Iadd v25, v55
+	v57:i32 = Iadd v23, v56
+	v58:i32 = Iadd v21, v57
+	v59:i32 = Iadd v18, v58
+	v60:i32 = Iadd v16, v59
+	v61:i32 = Iadd v14, v60
+	v62:i32 = Iadd v12, v61
+	v63:i32 = Iadd v9, v62
+	v64:i32 = Iadd v7, v63
+	v65:i32 = Iadd v2, v64
+	v66:f32 = F32const 1.000000
+	v67:f32 = Fmul v3, v66
+	v68:f32 = F32const 2.000000
+	v69:f32 = Fmul v3, v68
+	v70:f32 = F32const 3.000000
+	v71:f32 = Fmul v3, v70
+	v72:f32 = F32const 4.000000
+	v73:f32 = Fmul v3, v72
+	v74:f32 = F32const 5.000000
+	v75:f32 = Fmul v3, v74
+	v76:f32 = F32const 6.000000
+	v77:f32 = Fmul v3, v76
+	v78:f32 = F32const 7.000000
+	v79:f32 = Fmul v3, v78
+	v80:f32 = F32const 8.000000
+	v81:f32 = Fmul v3, v80
+	v82:f32 = F32const 9.000000
+	v83:f32 = Fmul v3, v82
+	v84:f32 = F32const 10.000000
+	v85:f32 = Fmul v3, v84
+	v86:f32 = F32const 11.000000
+	v87:f32 = Fmul v3, v86
+	v88:f32 = F32const 12.000000
+	v89:f32 = Fmul v3, v88
+	v90:f32 = F32const 13.000000
+	v91:f32 = Fmul v3, v90
+	v92:f32 = F32const 14.000000
+	v93:f32 = Fmul v3, v92
+	v94:f32 = F32const 15.000000
+	v95:f32 = Fmul v3, v94
+	v96:f32 = F32const 16.000000
+	v97:f32 = Fmul v3, v96
+	v98:f32 = F32const 17.000000
+	v99:f32 = Fmul v3, v98
+	v100:f32 = F32const 18.000000
+	v101:f32 = Fmul v3, v100
+	v102:f32 = F32const 19.000000
+	v103:f32 = Fmul v3, v102
+	v104:f32 = F32const 20.000000
+	v105:f32 = Fmul v3, v104
+	v106:f32 = Fadd v103, v105
+	v107:f32 = Fadd v101, v106
+	v108:f32 = Fadd v99, v107
+	v109:f32 = Fadd v97, v108
+	v110:f32 = Fadd v95, v109
+	v111:f32 = Fadd v93, v110
+	v112:f32 = Fadd v91, v111
+	v113:f32 = Fadd v89, v112
+	v114:f32 = Fadd v87, v113
+	v115:f32 = Fadd v85, v114
+	v116:f32 = Fadd v83, v115
+	v117:f32 = Fadd v81, v116
+	v118:f32 = Fadd v79, v117
+	v119:f32 = Fadd v77, v118
+	v120:f32 = Fadd v75, v119
+	v121:f32 = Fadd v73, v120
+	v122:f32 = Fadd v71, v121
+	v123:f32 = Fadd v69, v122
+	v124:f32 = Fadd v67, v123
+	Jump blk_ret, v65, v124
 `,
 		},
 		{
@@ -997,52 +1190,73 @@ signatures:
 	sig0: i64i64i32_i32
 
 blk0: (v0:i64, v1:i64, v2:i32)
-	v3:i32 = Iconst_32 0x2
-	v4:i32 = Icmp lt_s, v2, v3
-	Brz v4, blk2
-	Jump blk1
+	v3:i32 = PreemptRequested
+	Brnz v3, blk1
+	Jump blk2
 
 blk1: () <-- (blk0)
-	Return v2
+	Yield v0
+	Jump blk2
 
-blk2: () <-- (blk0)
+blk2: () <-- (blk0,blk1)
+	v4:i32 = Iconst_32 0x2
+	v5:i32 = Icmp lt_s, v2, v4
+	Brz v5, blk4
 	Jump blk3
 
 blk3: () <-- (blk2)
-	v5:i32 = Iconst_32 0x1
-	v6:i32 = Isub v2, v5
-	v7:i32 = Call f0:sig0, v0, v1, v6
-	v8:i32 = Iconst_32 0x2
-	v9:i32 = Isub v2, v8
-	v10:i32 = Call f0:sig0, v0, v1, v9
-	v11:i32 = Iadd v7, v10
-	Jump blk_ret, v11
+	Return v2
+
+blk4: () <-- (blk2)
+	Jump blk5
+
+blk5: () <-- (blk4)
+	v6:i32 = Iconst_32 0x1
+	v7:i32 = Isub v2, v6
+	v8:i32 = Call f0:sig0, v0, v1, v7
+	v9:i32 = Iconst_32 0x2
+	v10:i32 = Isub v2, v9
+	v11:i32 = Call f0:sig0, v0, v1, v10
+	v12:i32 = Iadd v8, v11
+	Jump blk_ret, v12
 `,
 			expAfterPasses: `
 signatures:
 	sig0: i64i64i32_i32
 
 blk0: (v0:i64, v1:i64, v2:i32)
-	v3:i32 = Iconst_32 0x2
-	v4:i32 = Icmp lt_s, v2, v3
-	Brz v4, blk2
+	v3:i32 = PreemptRequested
+	Brnz v3, blk1
 	Jump fallthrough
 
-blk1: () <-- (blk0)
-	Return v2
+blk6: () <-- (blk0)
+	Jump fallthrough
 
-blk2: () <-- (blk0)
+blk2: () <-- (blk6,blk1)
+	v4:i32 = Iconst_32 0x2
+	v5:i32 = Icmp lt_s, v2, v4
+	Brz v5, blk4
 	Jump fallthrough
 
 blk3: () <-- (blk2)
-	v5:i32 = Iconst_32 0x1
-	v6:i32 = Isub v2, v5
-	v7:i32 = Call f0:sig0, v0, v1, v6
-	v8:i32 = Iconst_32 0x2
-	v9:i32 = Isub v2, v8
-	v10:i32 = Call f0:sig0, v0, v1, v9
-	v11:i32 = Iadd v7, v10
-	Jump blk_ret, v11
+	Return v2
+
+blk4: () <-- (blk2)
+	Jump fallthrough
+
+blk5: () <-- (blk4)
+	v6:i32 = Iconst_32 0x1
+	v7:i32 = Isub v2, v6
+	v8:i32 = Call f0:sig0, v0, v1, v7
+	v9:i32 = Iconst_32 0x2
+	v10:i32 = Isub v2, v9
+	v11:i32 = Call f0:sig0, v0, v1, v10
+	v12:i32 = Iadd v8, v11
+	Jump blk_ret, v12
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
 `,
 		},
 		{
@@ -1052,14 +1266,13 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	v4:i64 = Iconst_64 0x4
 	v5:i64 = UExtend v2, 32->64
 	v6:i64 = Load v1, 0x10
-	v7:i64 = Iadd v5, v4
-	v8:i32 = Icmp lt_u, v6, v7
+	v7:i64 = Isub v6, v4
+	v8:i32 = Icmp gt_u, v5, v7
 	ExitIfTrue v8, v0, memory_out_of_bounds
 	v9:i64 = Load v1, 0x8
 	v10:i64 = Iadd v9, v5
 	Store v3, v10, 0x0
-	v11:i32 = Load v10, 0x0
-	Jump blk_ret, v11
+	Jump blk_ret, v3
 `,
 		},
 		{
@@ -1069,8 +1282,8 @@ blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i64 = Iconst_64 0x4
 	v4:i64 = UExtend v2, 32->64
 	v5:i64 = Load v1, 0x10
-	v6:i64 = Iadd v4, v3
-	v7:i32 = Icmp lt_u, v5, v6
+	v6:i64 = Isub v5, v3
+	v7:i32 = Icmp gt_u, v4, v6
 	ExitIfTrue v7, v0, memory_out_of_bounds
 	v8:i64 = Load v1, 0x8
 	v9:i64 = Iadd v8, v4
@@ -1083,14 +1296,19 @@ blk0: (v0:i64, v1:i64, v2:i32)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i32 = Iconst_32 0xfffd
-	v4:i32 = Urem v2, v3
-	v5:i32 = Iconst_32 0x100000
-	v6:i32 = Iadd v4, v5
-	v7:i64 = Load v1, 0x8
-	v8:i64 = UExtend v6, 32->64
-	v9:i64 = Iadd v7, v8
-	v10:i32 = Load v9, 0x0
-	Jump blk_ret, v10
+	v4:i64 = UExtend v2, 32->64
+	v5:i64 = Iconst_64 0x100030009001c
+	v6:i64 = Imul v4, v5
+	v7:i64 = Iconst_64 0xfffd
+	v8:i64 = Umulhi v6, v7
+	v9:i32 = Ireduce v8
+	v10:i32 = Iconst_32 0x100000
+	v11:i32 = Iadd v9, v10
+	v12:i64 = Load v1, 0x8
+	v13:i64 = UExtend v11, 32->64
+	v14:i64 = Iadd v12, v13
+	v15:i32 = Load v14, 0x0
+	Jump blk_ret, v15
 `,
 		},
 		{
@@ -1118,8 +1336,8 @@ blk3: () <-- (blk1,blk2)
 	v8:i64 = Iconst_64 0x4
 	v9:i64 = UExtend v2, 32->64
 	v10:i64 = Load v1, 0x10
-	v11:i64 = Iadd v9, v8
-	v12:i32 = Icmp lt_u, v10, v11
+	v11:i64 = Isub v10, v8
+	v12:i32 = Icmp gt_u, v9, v11
 	ExitIfTrue v12, v0, memory_out_of_bounds
 	v13:i64 = Load v1, 0x8
 	v14:i64 = Iadd v13, v9
@@ -1147,13 +1365,45 @@ blk3: () <-- (blk1,blk2)
 	v8:i64 = Iconst_64 0x4
 	v9:i64 = UExtend v2, 32->64
 	v10:i64 = Load v1, 0x10
-	v11:i64 = Iadd v9, v8
-	v12:i32 = Icmp lt_u, v10, v11
+	v11:i64 = Isub v10, v8
+	v12:i32 = Icmp gt_u, v9, v11
 	ExitIfTrue v12, v0, memory_out_of_bounds
 	v13:i64 = Load v1, 0x8
 	v14:i64 = Iadd v13, v9
 	v15:i32 = Load v14, 0x0
 	Jump blk_ret, v15
+`,
+		},
+		{
+			name: "memory_load_after_pure_call", m: testcases.MemoryLoadAfterPureCall.Module,
+			exp: `
+signatures:
+	sig1: i64i64_v
+
+blk0: (v0:i64, v1:i64, v2:i32)
+	v3:i32 = Iconst_32 0x0
+	v4:i32 = Icmp eq, v2, v3
+	Brz v4, blk2
+	Jump blk1
+
+blk1: () <-- (blk0)
+	Call f1:sig1, v0, v1
+	Jump blk3
+
+blk2: () <-- (blk0)
+	Jump blk3
+
+blk3: () <-- (blk1,blk2)
+	v6:i64 = Iconst_64 0x4
+	v7:i64 = UExtend v2, 32->64
+	v8:i64 = Load v1, 0x10
+	v9:i64 = Isub v8, v6
+	v10:i32 = Icmp gt_u, v7, v9
+	ExitIfTrue v10, v0, memory_out_of_bounds
+	v11:i64 = Load v1, 0x8
+	v12:i64 = Iadd v11, v7
+	v13:i32 = Load v12, 0x0
+	Jump blk_ret, v13
 `,
 		},
 		{
@@ -1163,11 +1413,20 @@ signatures:
 	sig1: i64i64i32i32_i32
 
 blk0: (v0:i64, v1:i64, v2:i32)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk1
+	Jump blk2
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
+
+blk2: () <-- (blk0,blk1)
 	Store v1, v0, 0x8
-	v3:i64 = Load v1, 0x8
-	v4:i64 = Load v1, 0x10
-	v5:i32 = CallIndirect v3:sig1, v0, v4, v2, v2
-	Jump blk_ret, v5
+	v4:i64 = Load v1, 0x8
+	v5:i64 = Load v1, 0x10
+	v6:i32 = CallIndirect v4:sig1, v0, v5, v2, v2
+	Jump blk_ret, v6
 `,
 		},
 		{
@@ -1177,16 +1436,16 @@ blk0: (v0:i64, v1:i64, v2:i32)
 	v3:i64 = Iconst_64 0x4
 	v4:i64 = UExtend v2, 32->64
 	v5:i64 = Load v1, 0x10
-	v6:i64 = Iadd v4, v3
-	v7:i32 = Icmp lt_u, v5, v6
+	v6:i64 = Isub v5, v3
+	v7:i32 = Icmp gt_u, v4, v6
 	ExitIfTrue v7, v0, memory_out_of_bounds
 	v8:i64 = Load v1, 0x8
 	v9:i64 = Iadd v8, v4
 	v10:i32 = Load v9, 0x0
 	v11:i64 = Iconst_64 0x8
 	v12:i64 = UExtend v2, 32->64
-	v13:i64 = Iadd v12, v11
-	v14:i32 = Icmp lt_u, v5, v13
+	v13:i64 = Isub v5, v11
+	v14:i32 = Icmp gt_u, v12, v13
 	ExitIfTrue v14, v0, memory_out_of_bounds
 	v15:i64 = Load v9, 0x0
 	v16:f32 = Load v9, 0x0
@@ -1304,40 +1563,58 @@ signatures:
 	sig2: i64i32i64_i64
 
 blk0: (v0:i64, v1:i64)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk1
+	Jump blk2
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
+
+blk2: () <-- (blk0,blk1)
 	Store v1, v0, 0x8
-	v2:i64 = Load v1, 0x20
-	v3:i64 = Load v1, 0x28
-	v4:i32 = CallIndirect v2:sig0, v0, v3
-	v5:i64 = Load v1, 0x8
-	v6:i64 = Load v5, 0x8
-	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x0
-	v9:i64 = Iconst_64 0x10
-	v10:i64 = Ushr v8, v9
-	v11:i32 = Ireduce v10
-	v12:i32 = Iconst_32 0xa
-	v13:i64 = UExtend v12, 32->64
+	v3:i64 = Load v1, 0x20
+	v4:i64 = Load v1, 0x28
+	v5:i32 = CallIndirect v3:sig0, v0, v4
+	v6:i64 = Load v1, 0x8
+	v7:i64 = Load v6, 0x8
+	v8:i64 = Load v1, 0x8
+	v9:i64 = Load v8, 0x0
+	v10:i64 = Iconst_64 0x10
+	v11:i64 = Ushr v9, v10
+	v12:i32 = Ireduce v11
+	v13:i32 = Iconst_32 0xa
+	v14:i64 = UExtend v13, 32->64
 	Store v1, v0, 0x8
-	v14:i64 = Load v0, 0x48
-	v15:i32 = Iconst_32 0x0
-	v16:i64 = CallIndirect v14:sig2, v0, v15, v13
-	v17:i32 = Ireduce v16
-	v18:i64 = Load v1, 0x8
-	v19:i64 = Load v18, 0x8
-	v20:i64 = Load v1, 0x8
-	v21:i64 = Load v20, 0x0
+	v15:i64 = Load v0, 0x48
+	v16:i32 = Iconst_32 0x0
+	v17:i64 = CallIndirect v15:sig2, v0, v16, v14
+	v18:i32 = Ireduce v17
+	v19:i64 = Load v1, 0x8
+	v20:i64 = Load v19, 0x8
+	v21:i64 = Load v1, 0x8
+	v22:i64 = Load v21, 0x0
+	v23:i32 = PreemptRequested
+	Brnz v23, blk3
+	Jump blk4
+
+blk3: () <-- (blk2)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk2,blk3)
 	Store v1, v0, 0x8
-	v22:i64 = Load v1, 0x20
-	v23:i64 = Load v1, 0x28
-	v24:i32 = CallIndirect v22:sig0, v0, v23
-	v25:i64 = Load v1, 0x8
-	v26:i64 = Load v25, 0x8
+	v24:i64 = Load v1, 0x20
+	v25:i64 = Load v1, 0x28
+	v26:i32 = CallIndirect v24:sig0, v0, v25
 	v27:i64 = Load v1, 0x8
-	v28:i64 = Load v27, 0x0
-	v29:i64 = Iconst_64 0x10
-	v30:i64 = Ushr v28, v29
-	v31:i32 = Ireduce v30
-	Jump blk_ret, v4, v11, v24, v31
+	v28:i64 = Load v27, 0x8
+	v29:i64 = Load v1, 0x8
+	v30:i64 = Load v29, 0x0
+	v31:i64 = Iconst_64 0x10
+	v32:i64 = Ushr v30, v31
+	v33:i32 = Ireduce v32
+	Jump blk_ret, v5, v12, v26, v33
 `,
 			expAfterPasses: `
 signatures:
@@ -1345,31 +1622,55 @@ signatures:
 	sig2: i64i32i64_i64
 
 blk0: (v0:i64, v1:i64)
+	v2:i32 = PreemptRequested
+	Brnz v2, blk1
+	Jump fallthrough
+
+blk5: () <-- (blk0)
+	Jump fallthrough
+
+blk2: () <-- (blk5,blk1)
 	Store v1, v0, 0x8
-	v2:i64 = Load v1, 0x20
-	v3:i64 = Load v1, 0x28
-	v4:i32 = CallIndirect v2:sig0, v0, v3
-	v7:i64 = Load v1, 0x8
-	v8:i64 = Load v7, 0x0
-	v9:i64 = Iconst_64 0x10
-	v10:i64 = Ushr v8, v9
-	v11:i32 = Ireduce v10
-	v12:i32 = Iconst_32 0xa
-	v13:i64 = UExtend v12, 32->64
+	v3:i64 = Load v1, 0x20
+	v4:i64 = Load v1, 0x28
+	v5:i32 = CallIndirect v3:sig0, v0, v4
+	v8:i64 = Load v1, 0x8
+	v9:i64 = Load v8, 0x0
+	v10:i64 = Iconst_64 0x10
+	v11:i64 = Ushr v9, v10
+	v12:i32 = Ireduce v11
+	v13:i32 = Iconst_32 0xa
+	v14:i64 = UExtend v13, 32->64
 	Store v1, v0, 0x8
-	v14:i64 = Load v0, 0x48
-	v15:i32 = Iconst_32 0x0
-	v16:i64 = CallIndirect v14:sig2, v0, v15, v13
+	v15:i64 = Load v0, 0x48
+	v16:i32 = Iconst_32 0x0
+	v17:i64 = CallIndirect v15:sig2, v0, v16, v14
+	v23:i32 = PreemptRequested
+	Brnz v23, blk3
+	Jump fallthrough
+
+blk6: () <-- (blk2)
+	Jump fallthrough
+
+blk4: () <-- (blk6,blk3)
 	Store v1, v0, 0x8
-	v22:i64 = Load v1, 0x20
-	v23:i64 = Load v1, 0x28
-	v24:i32 = CallIndirect v22:sig0, v0, v23
-	v27:i64 = Load v1, 0x8
-	v28:i64 = Load v27, 0x0
-	v29:i64 = Iconst_64 0x10
-	v30:i64 = Ushr v28, v29
-	v31:i32 = Ireduce v30
-	Jump blk_ret, v4, v11, v24, v31
+	v24:i64 = Load v1, 0x20
+	v25:i64 = Load v1, 0x28
+	v26:i32 = CallIndirect v24:sig0, v0, v25
+	v29:i64 = Load v1, 0x8
+	v30:i64 = Load v29, 0x0
+	v31:i64 = Iconst_64 0x10
+	v32:i64 = Ushr v30, v31
+	v33:i32 = Ireduce v32
+	Jump blk_ret, v5, v12, v26, v33
+
+blk3: () <-- (blk2)
+	Yield v0
+	Jump blk4
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
 `,
 		},
 		{
@@ -1562,28 +1863,37 @@ signatures:
 	sig2: i64i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32)
-	v3:i64 = Load v1, 0x10
-	v4:i32 = Load v3, 0x8
-	v5:i32 = Icmp ge_u, v2, v4
-	ExitIfTrue v5, v0, table_out_of_bounds
-	v6:i64 = Load v3, 0x0
-	v7:i64 = Iconst_64 0x3
-	v8:i32 = Ishl v2, v7
-	v9:i64 = Iadd v6, v8
-	v10:i64 = Load v9, 0x0
-	v11:i64 = Iconst_64 0x0
-	v12:i32 = Icmp eq, v10, v11
-	ExitIfTrue v12, v0, indirect_call_null_pointer
-	v13:i32 = Load v10, 0x10
-	v14:i64 = Load v1, 0x8
-	v15:i32 = Load v14, 0x8
-	v16:i32 = Icmp neq, v13, v15
-	ExitIfTrue v16, v0, indirect_call_type_mismatch
-	v17:i64 = Load v10, 0x0
-	v18:i64 = Load v10, 0x8
+	v3:i32 = PreemptRequested
+	Brnz v3, blk1
+	Jump blk2
+
+blk1: () <-- (blk0)
+	Yield v0
+	Jump blk2
+
+blk2: () <-- (blk0,blk1)
+	v4:i64 = Load v1, 0x10
+	v5:i32 = Load v4, 0x8
+	v6:i32 = Icmp ge_u, v2, v5
+	ExitIfTrue v6, v0, table_out_of_bounds
+	v7:i64 = Load v4, 0x0
+	v8:i64 = Iconst_64 0x3
+	v9:i32 = Ishl v2, v8
+	v10:i64 = Iadd v7, v9
+	v11:i64 = Load v10, 0x0
+	v12:i64 = Iconst_64 0x0
+	v13:i32 = Icmp eq, v11, v12
+	ExitIfTrue v13, v0, indirect_call_null_pointer
+	v14:i32 = Load v11, 0x10
+	v15:i64 = Load v1, 0x8
+	v16:i32 = Load v15, 0x8
+	v17:i32 = Icmp neq, v14, v16
+	ExitIfTrue v17, v0, indirect_call_type_mismatch
+	v18:i64 = Load v11, 0x0
+	v19:i64 = Load v11, 0x8
 	Store v1, v0, 0x8
-	v19:i32 = CallIndirect v17:sig2, v0, v18
-	Jump blk_ret, v19
+	v20:i32 = CallIndirect v18:sig2, v0, v19
+	Jump blk_ret, v20
 `,
 		},
 		{
@@ -1812,31 +2122,34 @@ blk0: (v0:i64, v1:i64, v2:v128, v3:v128)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig6: i64i32i64i32i64_i32
+	sig5: i64i32i64i32i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 	Store v1, v0, 0x8
-	v5:i64 = Iconst_64 0xc
-	v6:i64 = UExtend v2, 32->64
-	v7:i64 = Iconst_64 0x10
-	v8:i64 = Iadd v1, v7
-	v9:i64 = AtomicLoad_64, v8
-	v10:i64 = Iadd v6, v5
-	v11:i32 = Icmp lt_u, v9, v10
-	ExitIfTrue v11, v0, memory_out_of_bounds
-	v12:i64 = Load v1, 0x8
-	v13:i64 = Iadd v12, v6
-	v14:i64 = Iconst_64 0x8
-	v15:i64 = Iadd v13, v14
-	v16:i64 = Iconst_64 0x3
-	v17:i64 = Band v15, v16
-	v18:i64 = Iconst_64 0x0
-	v19:i32 = Icmp neq, v17, v18
-	ExitIfTrue v19, v0, unaligned_atomic
-	v20:i64 = Load v0, 0x288
-	v21:i32 = Iconst_32 0x0
-	v22:i32 = CallIndirect v20:sig6, v0, v21, v4, v3, v15
-	Jump blk_ret, v22
+	v5:i64 = UExtend v2, 32->64
+	v6:i64 = Iconst_64 0x8
+	v7:i64 = Iadd v5, v6
+	v8:i64 = Iconst_64 0x3
+	v9:i64 = Band v7, v8
+	v10:i64 = Iconst_64 0x0
+	v11:i32 = Icmp neq, v9, v10
+	ExitIfTrue v11, v0, unaligned_atomic
+	v12:i64 = Iconst_64 0xc
+	v13:i64 = UExtend v2, 32->64
+	v14:i64 = Iconst_64 0x10
+	v15:i64 = Iadd v1, v14
+	v16:i64 = AtomicLoad_64, v15
+	v17:i64 = Iadd v13, v12
+	v18:i32 = Icmp lt_u, v16, v17
+	ExitIfTrue v18, v0, memory_out_of_bounds
+	v19:i64 = Load v1, 0x8
+	v20:i64 = Iadd v19, v13
+	v21:i64 = Iconst_64 0x8
+	v22:i64 = Iadd v20, v21
+	v23:i64 = Load v0, 0x288
+	v24:i32 = Iconst_32 0x0
+	v25:i32 = CallIndirect v23:sig5, v0, v24, v4, v3, v22
+	Jump blk_ret, v25
 `,
 		},
 		{
@@ -1845,31 +2158,34 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i64)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig7: i64i32i64i64i64_i32
+	sig6: i64i32i64i64i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 	Store v1, v0, 0x8
-	v5:i64 = Iconst_64 0x10
-	v6:i64 = UExtend v2, 32->64
-	v7:i64 = Iconst_64 0x10
-	v8:i64 = Iadd v1, v7
-	v9:i64 = AtomicLoad_64, v8
-	v10:i64 = Iadd v6, v5
-	v11:i32 = Icmp lt_u, v9, v10
-	ExitIfTrue v11, v0, memory_out_of_bounds
-	v12:i64 = Load v1, 0x8
-	v13:i64 = Iadd v12, v6
-	v14:i64 = Iconst_64 0x8
-	v15:i64 = Iadd v13, v14
-	v16:i64 = Iconst_64 0x7
-	v17:i64 = Band v15, v16
-	v18:i64 = Iconst_64 0x0
-	v19:i32 = Icmp neq, v17, v18
-	ExitIfTrue v19, v0, unaligned_atomic
-	v20:i64 = Load v0, 0x290
-	v21:i32 = Iconst_32 0x0
-	v22:i32 = CallIndirect v20:sig7, v0, v21, v4, v3, v15
-	Jump blk_ret, v22
+	v5:i64 = UExtend v2, 32->64
+	v6:i64 = Iconst_64 0x8
+	v7:i64 = Iadd v5, v6
+	v8:i64 = Iconst_64 0x7
+	v9:i64 = Band v7, v8
+	v10:i64 = Iconst_64 0x0
+	v11:i32 = Icmp neq, v9, v10
+	ExitIfTrue v11, v0, unaligned_atomic
+	v12:i64 = Iconst_64 0x10
+	v13:i64 = UExtend v2, 32->64
+	v14:i64 = Iconst_64 0x10
+	v15:i64 = Iadd v1, v14
+	v16:i64 = AtomicLoad_64, v15
+	v17:i64 = Iadd v13, v12
+	v18:i32 = Icmp lt_u, v16, v17
+	ExitIfTrue v18, v0, memory_out_of_bounds
+	v19:i64 = Load v1, 0x8
+	v20:i64 = Iadd v19, v13
+	v21:i64 = Iconst_64 0x8
+	v22:i64 = Iadd v20, v21
+	v23:i64 = Load v0, 0x290
+	v24:i32 = Iconst_32 0x0
+	v25:i32 = CallIndirect v23:sig6, v0, v24, v4, v3, v22
+	Jump blk_ret, v25
 `,
 		},
 		{
@@ -1878,31 +2194,34 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i64, v4:i64)
 			features: api.CoreFeaturesV2 | experimental.CoreFeaturesThreads,
 			exp: `
 signatures:
-	sig8: i64i32i32i64_i32
+	sig7: i64i32i32i64_i32
 
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 	Store v1, v0, 0x8
-	v4:i64 = Iconst_64 0xc
-	v5:i64 = UExtend v2, 32->64
-	v6:i64 = Iconst_64 0x10
-	v7:i64 = Iadd v1, v6
-	v8:i64 = AtomicLoad_64, v7
-	v9:i64 = Iadd v5, v4
-	v10:i32 = Icmp lt_u, v8, v9
-	ExitIfTrue v10, v0, memory_out_of_bounds
-	v11:i64 = Load v1, 0x8
-	v12:i64 = Iadd v11, v5
-	v13:i64 = Iconst_64 0x8
-	v14:i64 = Iadd v12, v13
-	v15:i64 = Iconst_64 0x3
-	v16:i64 = Band v14, v15
-	v17:i64 = Iconst_64 0x0
-	v18:i32 = Icmp neq, v16, v17
-	ExitIfTrue v18, v0, unaligned_atomic
-	v19:i64 = Load v0, 0x298
-	v20:i32 = Iconst_32 0x0
-	v21:i32 = CallIndirect v19:sig8, v0, v20, v3, v14
-	Jump blk_ret, v21
+	v4:i64 = UExtend v2, 32->64
+	v5:i64 = Iconst_64 0x8
+	v6:i64 = Iadd v4, v5
+	v7:i64 = Iconst_64 0x3
+	v8:i64 = Band v6, v7
+	v9:i64 = Iconst_64 0x0
+	v10:i32 = Icmp neq, v8, v9
+	ExitIfTrue v10, v0, unaligned_atomic
+	v11:i64 = Iconst_64 0xc
+	v12:i64 = UExtend v2, 32->64
+	v13:i64 = Iconst_64 0x10
+	v14:i64 = Iadd v1, v13
+	v15:i64 = AtomicLoad_64, v14
+	v16:i64 = Iadd v12, v11
+	v17:i32 = Icmp lt_u, v15, v16
+	ExitIfTrue v17, v0, memory_out_of_bounds
+	v18:i64 = Load v1, 0x8
+	v19:i64 = Iadd v18, v12
+	v20:i64 = Iconst_64 0x8
+	v21:i64 = Iadd v19, v20
+	v22:i64 = Load v0, 0x298
+	v23:i32 = Iconst_32 0x0
+	v24:i32 = CallIndirect v22:sig7, v0, v23, v3, v21
+	Jump blk_ret, v24
 `,
 		},
 		{
@@ -1912,60 +2231,67 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v9:i32 = Iconst_32 0x0
-	v10:i64 = Load v1, 0x8
-	v11:i64 = UExtend v9, 32->64
-	v12:i64 = Iadd v10, v11
-	v13:i32 = AtomicRmw add_8, v12, v2
-	v14:i32 = Iconst_32 0x8
-	v15:i64 = UExtend v14, 32->64
-	v16:i64 = Iadd v10, v15
+	v10:i64 = UExtend v9, 32->64
+	v11:i64 = Load v1, 0x8
+	v12:i64 = UExtend v9, 32->64
+	v13:i64 = Iadd v11, v12
+	v14:i32 = AtomicRmw add_8, v13, v2
+	v15:i32 = Iconst_32 0x8
+	v16:i64 = UExtend v15, 32->64
 	v17:i64 = Iconst_64 0x1
 	v18:i64 = Band v16, v17
 	v19:i64 = Iconst_64 0x0
 	v20:i32 = Icmp neq, v18, v19
 	ExitIfTrue v20, v0, unaligned_atomic
-	v21:i32 = AtomicRmw add_16, v16, v3
-	v22:i32 = Iconst_32 0x10
-	v23:i64 = UExtend v22, 32->64
-	v24:i64 = Iadd v10, v23
-	v25:i64 = Iconst_64 0x3
-	v26:i64 = Band v24, v25
-	v27:i64 = Iconst_64 0x0
-	v28:i32 = Icmp neq, v26, v27
-	ExitIfTrue v28, v0, unaligned_atomic
-	v29:i32 = AtomicRmw add_32, v24, v4
-	v30:i32 = Iconst_32 0x18
-	v31:i64 = UExtend v30, 32->64
-	v32:i64 = Iadd v10, v31
-	v33:i64 = AtomicRmw add_8, v32, v5
-	v34:i32 = Iconst_32 0x20
-	v35:i64 = UExtend v34, 32->64
-	v36:i64 = Iadd v10, v35
-	v37:i64 = Iconst_64 0x1
-	v38:i64 = Band v36, v37
-	v39:i64 = Iconst_64 0x0
-	v40:i32 = Icmp neq, v38, v39
-	ExitIfTrue v40, v0, unaligned_atomic
-	v41:i64 = AtomicRmw add_16, v36, v6
-	v42:i32 = Iconst_32 0x28
-	v43:i64 = UExtend v42, 32->64
-	v44:i64 = Iadd v10, v43
-	v45:i64 = Iconst_64 0x3
-	v46:i64 = Band v44, v45
-	v47:i64 = Iconst_64 0x0
-	v48:i32 = Icmp neq, v46, v47
-	ExitIfTrue v48, v0, unaligned_atomic
-	v49:i64 = AtomicRmw add_32, v44, v7
-	v50:i32 = Iconst_32 0x30
-	v51:i64 = UExtend v50, 32->64
-	v52:i64 = Iadd v10, v51
-	v53:i64 = Iconst_64 0x7
-	v54:i64 = Band v52, v53
-	v55:i64 = Iconst_64 0x0
-	v56:i32 = Icmp neq, v54, v55
-	ExitIfTrue v56, v0, unaligned_atomic
-	v57:i64 = AtomicRmw add_64, v52, v8
-	Jump blk_ret, v13, v21, v29, v33, v41, v49, v57
+	v21:i64 = UExtend v15, 32->64
+	v22:i64 = Iadd v11, v21
+	v23:i32 = AtomicRmw add_16, v22, v3
+	v24:i32 = Iconst_32 0x10
+	v25:i64 = UExtend v24, 32->64
+	v26:i64 = Iconst_64 0x3
+	v27:i64 = Band v25, v26
+	v28:i64 = Iconst_64 0x0
+	v29:i32 = Icmp neq, v27, v28
+	ExitIfTrue v29, v0, unaligned_atomic
+	v30:i64 = UExtend v24, 32->64
+	v31:i64 = Iadd v11, v30
+	v32:i32 = AtomicRmw add_32, v31, v4
+	v33:i32 = Iconst_32 0x18
+	v34:i64 = UExtend v33, 32->64
+	v35:i64 = UExtend v33, 32->64
+	v36:i64 = Iadd v11, v35
+	v37:i64 = AtomicRmw add_8, v36, v5
+	v38:i32 = Iconst_32 0x20
+	v39:i64 = UExtend v38, 32->64
+	v40:i64 = Iconst_64 0x1
+	v41:i64 = Band v39, v40
+	v42:i64 = Iconst_64 0x0
+	v43:i32 = Icmp neq, v41, v42
+	ExitIfTrue v43, v0, unaligned_atomic
+	v44:i64 = UExtend v38, 32->64
+	v45:i64 = Iadd v11, v44
+	v46:i64 = AtomicRmw add_16, v45, v6
+	v47:i32 = Iconst_32 0x28
+	v48:i64 = UExtend v47, 32->64
+	v49:i64 = Iconst_64 0x3
+	v50:i64 = Band v48, v49
+	v51:i64 = Iconst_64 0x0
+	v52:i32 = Icmp neq, v50, v51
+	ExitIfTrue v52, v0, unaligned_atomic
+	v53:i64 = UExtend v47, 32->64
+	v54:i64 = Iadd v11, v53
+	v55:i64 = AtomicRmw add_32, v54, v7
+	v56:i32 = Iconst_32 0x30
+	v57:i64 = UExtend v56, 32->64
+	v58:i64 = Iconst_64 0x7
+	v59:i64 = Band v57, v58
+	v60:i64 = Iconst_64 0x0
+	v61:i32 = Icmp neq, v59, v60
+	ExitIfTrue v61, v0, unaligned_atomic
+	v62:i64 = UExtend v56, 32->64
+	v63:i64 = Iadd v11, v62
+	v64:i64 = AtomicRmw add_64, v63, v8
+	Jump blk_ret, v14, v23, v32, v37, v46, v55, v64
 `,
 		},
 		{
@@ -1975,60 +2301,67 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v9:i32 = Iconst_32 0x0
-	v10:i64 = Load v1, 0x8
-	v11:i64 = UExtend v9, 32->64
-	v12:i64 = Iadd v10, v11
-	v13:i32 = AtomicRmw sub_8, v12, v2
-	v14:i32 = Iconst_32 0x8
-	v15:i64 = UExtend v14, 32->64
-	v16:i64 = Iadd v10, v15
+	v10:i64 = UExtend v9, 32->64
+	v11:i64 = Load v1, 0x8
+	v12:i64 = UExtend v9, 32->64
+	v13:i64 = Iadd v11, v12
+	v14:i32 = AtomicRmw sub_8, v13, v2
+	v15:i32 = Iconst_32 0x8
+	v16:i64 = UExtend v15, 32->64
 	v17:i64 = Iconst_64 0x1
 	v18:i64 = Band v16, v17
 	v19:i64 = Iconst_64 0x0
 	v20:i32 = Icmp neq, v18, v19
 	ExitIfTrue v20, v0, unaligned_atomic
-	v21:i32 = AtomicRmw sub_16, v16, v3
-	v22:i32 = Iconst_32 0x10
-	v23:i64 = UExtend v22, 32->64
-	v24:i64 = Iadd v10, v23
-	v25:i64 = Iconst_64 0x3
-	v26:i64 = Band v24, v25
-	v27:i64 = Iconst_64 0x0
-	v28:i32 = Icmp neq, v26, v27
-	ExitIfTrue v28, v0, unaligned_atomic
-	v29:i32 = AtomicRmw sub_32, v24, v4
-	v30:i32 = Iconst_32 0x18
-	v31:i64 = UExtend v30, 32->64
-	v32:i64 = Iadd v10, v31
-	v33:i64 = AtomicRmw sub_8, v32, v5
-	v34:i32 = Iconst_32 0x20
-	v35:i64 = UExtend v34, 32->64
-	v36:i64 = Iadd v10, v35
-	v37:i64 = Iconst_64 0x1
-	v38:i64 = Band v36, v37
-	v39:i64 = Iconst_64 0x0
-	v40:i32 = Icmp neq, v38, v39
-	ExitIfTrue v40, v0, unaligned_atomic
-	v41:i64 = AtomicRmw sub_16, v36, v6
-	v42:i32 = Iconst_32 0x28
-	v43:i64 = UExtend v42, 32->64
-	v44:i64 = Iadd v10, v43
-	v45:i64 = Iconst_64 0x3
-	v46:i64 = Band v44, v45
-	v47:i64 = Iconst_64 0x0
-	v48:i32 = Icmp neq, v46, v47
-	ExitIfTrue v48, v0, unaligned_atomic
-	v49:i64 = AtomicRmw sub_32, v44, v7
-	v50:i32 = Iconst_32 0x30
-	v51:i64 = UExtend v50, 32->64
-	v52:i64 = Iadd v10, v51
-	v53:i64 = Iconst_64 0x7
-	v54:i64 = Band v52, v53
-	v55:i64 = Iconst_64 0x0
-	v56:i32 = Icmp neq, v54, v55
-	ExitIfTrue v56, v0, unaligned_atomic
-	v57:i64 = AtomicRmw sub_64, v52, v8
-	Jump blk_ret, v13, v21, v29, v33, v41, v49, v57
+	v21:i64 = UExtend v15, 32->64
+	v22:i64 = Iadd v11, v21
+	v23:i32 = AtomicRmw sub_16, v22, v3
+	v24:i32 = Iconst_32 0x10
+	v25:i64 = UExtend v24, 32->64
+	v26:i64 = Iconst_64 0x3
+	v27:i64 = Band v25, v26
+	v28:i64 = Iconst_64 0x0
+	v29:i32 = Icmp neq, v27, v28
+	ExitIfTrue v29, v0, unaligned_atomic
+	v30:i64 = UExtend v24, 32->64
+	v31:i64 = Iadd v11, v30
+	v32:i32 = AtomicRmw sub_32, v31, v4
+	v33:i32 = Iconst_32 0x18
+	v34:i64 = UExtend v33, 32->64
+	v35:i64 = UExtend v33, 32->64
+	v36:i64 = Iadd v11, v35
+	v37:i64 = AtomicRmw sub_8, v36, v5
+	v38:i32 = Iconst_32 0x20
+	v39:i64 = UExtend v38, 32->64
+	v40:i64 = Iconst_64 0x1
+	v41:i64 = Band v39, v40
+	v42:i64 = Iconst_64 0x0
+	v43:i32 = Icmp neq, v41, v42
+	ExitIfTrue v43, v0, unaligned_atomic
+	v44:i64 = UExtend v38, 32->64
+	v45:i64 = Iadd v11, v44
+	v46:i64 = AtomicRmw sub_16, v45, v6
+	v47:i32 = Iconst_32 0x28
+	v48:i64 = UExtend v47, 32->64
+	v49:i64 = Iconst_64 0x3
+	v50:i64 = Band v48, v49
+	v51:i64 = Iconst_64 0x0
+	v52:i32 = Icmp neq, v50, v51
+	ExitIfTrue v52, v0, unaligned_atomic
+	v53:i64 = UExtend v47, 32->64
+	v54:i64 = Iadd v11, v53
+	v55:i64 = AtomicRmw sub_32, v54, v7
+	v56:i32 = Iconst_32 0x30
+	v57:i64 = UExtend v56, 32->64
+	v58:i64 = Iconst_64 0x7
+	v59:i64 = Band v57, v58
+	v60:i64 = Iconst_64 0x0
+	v61:i32 = Icmp neq, v59, v60
+	ExitIfTrue v61, v0, unaligned_atomic
+	v62:i64 = UExtend v56, 32->64
+	v63:i64 = Iadd v11, v62
+	v64:i64 = AtomicRmw sub_64, v63, v8
+	Jump blk_ret, v14, v23, v32, v37, v46, v55, v64
 `,
 		},
 		{
@@ -2038,13 +2371,13 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v9:i32 = Iconst_32 0x0
-	v10:i64 = Load v1, 0x8
-	v11:i64 = UExtend v9, 32->64
-	v12:i64 = Iadd v10, v11
-	v13:i32 = AtomicRmw and_8, v12, v2
-	v14:i32 = Iconst_32 0x0
-	v15:i64 = UExtend v14, 32->64
-	v16:i64 = Iadd v10, v15
+	v10:i64 = UExtend v9, 32->64
+	v11:i64 = Load v1, 0x8
+	v12:i64 = UExtend v9, 32->64
+	v13:i64 = Iadd v11, v12
+	v14:i32 = AtomicRmw and_8, v13, v2
+	v15:i32 = Iconst_32 0x0
+	v16:i64 = UExtend v15, 32->64
 	v17:i64 = Iconst_64 0x8
 	v18:i64 = Iadd v16, v17
 	v19:i64 = Iconst_64 0x1
@@ -2052,58 +2385,77 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v21:i64 = Iconst_64 0x0
 	v22:i32 = Icmp neq, v20, v21
 	ExitIfTrue v22, v0, unaligned_atomic
-	v23:i32 = AtomicRmw and_16, v18, v3
-	v24:i32 = Iconst_32 0x0
-	v25:i64 = UExtend v24, 32->64
-	v26:i64 = Iadd v10, v25
-	v27:i64 = Iconst_64 0x10
-	v28:i64 = Iadd v26, v27
-	v29:i64 = Iconst_64 0x3
-	v30:i64 = Band v28, v29
-	v31:i64 = Iconst_64 0x0
-	v32:i32 = Icmp neq, v30, v31
-	ExitIfTrue v32, v0, unaligned_atomic
-	v33:i32 = AtomicRmw and_32, v28, v4
-	v34:i32 = Iconst_32 0x0
-	v35:i64 = UExtend v34, 32->64
-	v36:i64 = Iadd v10, v35
-	v37:i64 = Iconst_64 0x18
-	v38:i64 = Iadd v36, v37
-	v39:i64 = AtomicRmw and_8, v38, v5
-	v40:i32 = Iconst_32 0x0
-	v41:i64 = UExtend v40, 32->64
-	v42:i64 = Iadd v10, v41
-	v43:i64 = Iconst_64 0x20
+	v23:i64 = UExtend v15, 32->64
+	v24:i64 = Iadd v11, v23
+	v25:i64 = Iconst_64 0x8
+	v26:i64 = Iadd v24, v25
+	v27:i32 = AtomicRmw and_16, v26, v3
+	v28:i32 = Iconst_32 0x0
+	v29:i64 = UExtend v28, 32->64
+	v30:i64 = Iconst_64 0x10
+	v31:i64 = Iadd v29, v30
+	v32:i64 = Iconst_64 0x3
+	v33:i64 = Band v31, v32
+	v34:i64 = Iconst_64 0x0
+	v35:i32 = Icmp neq, v33, v34
+	ExitIfTrue v35, v0, unaligned_atomic
+	v36:i64 = UExtend v28, 32->64
+	v37:i64 = Iadd v11, v36
+	v38:i64 = Iconst_64 0x10
+	v39:i64 = Iadd v37, v38
+	v40:i32 = AtomicRmw and_32, v39, v4
+	v41:i32 = Iconst_32 0x0
+	v42:i64 = UExtend v41, 32->64
+	v43:i64 = Iconst_64 0x18
 	v44:i64 = Iadd v42, v43
-	v45:i64 = Iconst_64 0x1
-	v46:i64 = Band v44, v45
-	v47:i64 = Iconst_64 0x0
-	v48:i32 = Icmp neq, v46, v47
-	ExitIfTrue v48, v0, unaligned_atomic
-	v49:i64 = AtomicRmw and_16, v44, v6
+	v45:i64 = UExtend v41, 32->64
+	v46:i64 = Iadd v11, v45
+	v47:i64 = Iconst_64 0x18
+	v48:i64 = Iadd v46, v47
+	v49:i64 = AtomicRmw and_8, v48, v5
 	v50:i32 = Iconst_32 0x0
 	v51:i64 = UExtend v50, 32->64
-	v52:i64 = Iadd v10, v51
-	v53:i64 = Iconst_64 0x28
-	v54:i64 = Iadd v52, v53
-	v55:i64 = Iconst_64 0x3
-	v56:i64 = Band v54, v55
-	v57:i64 = Iconst_64 0x0
-	v58:i32 = Icmp neq, v56, v57
-	ExitIfTrue v58, v0, unaligned_atomic
-	v59:i64 = AtomicRmw and_32, v54, v7
-	v60:i32 = Iconst_32 0x0
-	v61:i64 = UExtend v60, 32->64
-	v62:i64 = Iadd v10, v61
-	v63:i64 = Iconst_64 0x30
-	v64:i64 = Iadd v62, v63
-	v65:i64 = Iconst_64 0x7
-	v66:i64 = Band v64, v65
-	v67:i64 = Iconst_64 0x0
-	v68:i32 = Icmp neq, v66, v67
-	ExitIfTrue v68, v0, unaligned_atomic
-	v69:i64 = AtomicRmw and_64, v64, v8
-	Jump blk_ret, v13, v23, v33, v39, v49, v59, v69
+	v52:i64 = Iconst_64 0x20
+	v53:i64 = Iadd v51, v52
+	v54:i64 = Iconst_64 0x1
+	v55:i64 = Band v53, v54
+	v56:i64 = Iconst_64 0x0
+	v57:i32 = Icmp neq, v55, v56
+	ExitIfTrue v57, v0, unaligned_atomic
+	v58:i64 = UExtend v50, 32->64
+	v59:i64 = Iadd v11, v58
+	v60:i64 = Iconst_64 0x20
+	v61:i64 = Iadd v59, v60
+	v62:i64 = AtomicRmw and_16, v61, v6
+	v63:i32 = Iconst_32 0x0
+	v64:i64 = UExtend v63, 32->64
+	v65:i64 = Iconst_64 0x28
+	v66:i64 = Iadd v64, v65
+	v67:i64 = Iconst_64 0x3
+	v68:i64 = Band v66, v67
+	v69:i64 = Iconst_64 0x0
+	v70:i32 = Icmp neq, v68, v69
+	ExitIfTrue v70, v0, unaligned_atomic
+	v71:i64 = UExtend v63, 32->64
+	v72:i64 = Iadd v11, v71
+	v73:i64 = Iconst_64 0x28
+	v74:i64 = Iadd v72, v73
+	v75:i64 = AtomicRmw and_32, v74, v7
+	v76:i32 = Iconst_32 0x0
+	v77:i64 = UExtend v76, 32->64
+	v78:i64 = Iconst_64 0x30
+	v79:i64 = Iadd v77, v78
+	v80:i64 = Iconst_64 0x7
+	v81:i64 = Band v79, v80
+	v82:i64 = Iconst_64 0x0
+	v83:i32 = Icmp neq, v81, v82
+	ExitIfTrue v83, v0, unaligned_atomic
+	v84:i64 = UExtend v76, 32->64
+	v85:i64 = Iadd v11, v84
+	v86:i64 = Iconst_64 0x30
+	v87:i64 = Iadd v85, v86
+	v88:i64 = AtomicRmw and_64, v87, v8
+	Jump blk_ret, v14, v27, v40, v49, v62, v75, v88
 `,
 		},
 		{
@@ -2113,13 +2465,13 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v9:i32 = Iconst_32 0x0
-	v10:i64 = Load v1, 0x8
-	v11:i64 = UExtend v9, 32->64
-	v12:i64 = Iadd v10, v11
-	v13:i32 = AtomicRmw or_8, v12, v2
-	v14:i32 = Iconst_32 0x0
-	v15:i64 = UExtend v14, 32->64
-	v16:i64 = Iadd v10, v15
+	v10:i64 = UExtend v9, 32->64
+	v11:i64 = Load v1, 0x8
+	v12:i64 = UExtend v9, 32->64
+	v13:i64 = Iadd v11, v12
+	v14:i32 = AtomicRmw or_8, v13, v2
+	v15:i32 = Iconst_32 0x0
+	v16:i64 = UExtend v15, 32->64
 	v17:i64 = Iconst_64 0x8
 	v18:i64 = Iadd v16, v17
 	v19:i64 = Iconst_64 0x1
@@ -2127,58 +2479,77 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v21:i64 = Iconst_64 0x0
 	v22:i32 = Icmp neq, v20, v21
 	ExitIfTrue v22, v0, unaligned_atomic
-	v23:i32 = AtomicRmw or_16, v18, v3
-	v24:i32 = Iconst_32 0x0
-	v25:i64 = UExtend v24, 32->64
-	v26:i64 = Iadd v10, v25
-	v27:i64 = Iconst_64 0x10
-	v28:i64 = Iadd v26, v27
-	v29:i64 = Iconst_64 0x3
-	v30:i64 = Band v28, v29
-	v31:i64 = Iconst_64 0x0
-	v32:i32 = Icmp neq, v30, v31
-	ExitIfTrue v32, v0, unaligned_atomic
-	v33:i32 = AtomicRmw or_32, v28, v4
-	v34:i32 = Iconst_32 0x0
-	v35:i64 = UExtend v34, 32->64
-	v36:i64 = Iadd v10, v35
-	v37:i64 = Iconst_64 0x18
-	v38:i64 = Iadd v36, v37
-	v39:i64 = AtomicRmw or_8, v38, v5
-	v40:i32 = Iconst_32 0x0
-	v41:i64 = UExtend v40, 32->64
-	v42:i64 = Iadd v10, v41
-	v43:i64 = Iconst_64 0x20
+	v23:i64 = UExtend v15, 32->64
+	v24:i64 = Iadd v11, v23
+	v25:i64 = Iconst_64 0x8
+	v26:i64 = Iadd v24, v25
+	v27:i32 = AtomicRmw or_16, v26, v3
+	v28:i32 = Iconst_32 0x0
+	v29:i64 = UExtend v28, 32->64
+	v30:i64 = Iconst_64 0x10
+	v31:i64 = Iadd v29, v30
+	v32:i64 = Iconst_64 0x3
+	v33:i64 = Band v31, v32
+	v34:i64 = Iconst_64 0x0
+	v35:i32 = Icmp neq, v33, v34
+	ExitIfTrue v35, v0, unaligned_atomic
+	v36:i64 = UExtend v28, 32->64
+	v37:i64 = Iadd v11, v36
+	v38:i64 = Iconst_64 0x10
+	v39:i64 = Iadd v37, v38
+	v40:i32 = AtomicRmw or_32, v39, v4
+	v41:i32 = Iconst_32 0x0
+	v42:i64 = UExtend v41, 32->64
+	v43:i64 = Iconst_64 0x18
 	v44:i64 = Iadd v42, v43
-	v45:i64 = Iconst_64 0x1
-	v46:i64 = Band v44, v45
-	v47:i64 = Iconst_64 0x0
-	v48:i32 = Icmp neq, v46, v47
-	ExitIfTrue v48, v0, unaligned_atomic
-	v49:i64 = AtomicRmw or_16, v44, v6
+	v45:i64 = UExtend v41, 32->64
+	v46:i64 = Iadd v11, v45
+	v47:i64 = Iconst_64 0x18
+	v48:i64 = Iadd v46, v47
+	v49:i64 = AtomicRmw or_8, v48, v5
 	v50:i32 = Iconst_32 0x0
 	v51:i64 = UExtend v50, 32->64
-	v52:i64 = Iadd v10, v51
-	v53:i64 = Iconst_64 0x28
-	v54:i64 = Iadd v52, v53
-	v55:i64 = Iconst_64 0x3
-	v56:i64 = Band v54, v55
-	v57:i64 = Iconst_64 0x0
-	v58:i32 = Icmp neq, v56, v57
-	ExitIfTrue v58, v0, unaligned_atomic
-	v59:i64 = AtomicRmw or_32, v54, v7
-	v60:i32 = Iconst_32 0x0
-	v61:i64 = UExtend v60, 32->64
-	v62:i64 = Iadd v10, v61
-	v63:i64 = Iconst_64 0x30
-	v64:i64 = Iadd v62, v63
-	v65:i64 = Iconst_64 0x7
-	v66:i64 = Band v64, v65
-	v67:i64 = Iconst_64 0x0
-	v68:i32 = Icmp neq, v66, v67
-	ExitIfTrue v68, v0, unaligned_atomic
-	v69:i64 = AtomicRmw or_64, v64, v8
-	Jump blk_ret, v13, v23, v33, v39, v49, v59, v69
+	v52:i64 = Iconst_64 0x20
+	v53:i64 = Iadd v51, v52
+	v54:i64 = Iconst_64 0x1
+	v55:i64 = Band v53, v54
+	v56:i64 = Iconst_64 0x0
+	v57:i32 = Icmp neq, v55, v56
+	ExitIfTrue v57, v0, unaligned_atomic
+	v58:i64 = UExtend v50, 32->64
+	v59:i64 = Iadd v11, v58
+	v60:i64 = Iconst_64 0x20
+	v61:i64 = Iadd v59, v60
+	v62:i64 = AtomicRmw or_16, v61, v6
+	v63:i32 = Iconst_32 0x0
+	v64:i64 = UExtend v63, 32->64
+	v65:i64 = Iconst_64 0x28
+	v66:i64 = Iadd v64, v65
+	v67:i64 = Iconst_64 0x3
+	v68:i64 = Band v66, v67
+	v69:i64 = Iconst_64 0x0
+	v70:i32 = Icmp neq, v68, v69
+	ExitIfTrue v70, v0, unaligned_atomic
+	v71:i64 = UExtend v63, 32->64
+	v72:i64 = Iadd v11, v71
+	v73:i64 = Iconst_64 0x28
+	v74:i64 = Iadd v72, v73
+	v75:i64 = AtomicRmw or_32, v74, v7
+	v76:i32 = Iconst_32 0x0
+	v77:i64 = UExtend v76, 32->64
+	v78:i64 = Iconst_64 0x30
+	v79:i64 = Iadd v77, v78
+	v80:i64 = Iconst_64 0x7
+	v81:i64 = Band v79, v80
+	v82:i64 = Iconst_64 0x0
+	v83:i32 = Icmp neq, v81, v82
+	ExitIfTrue v83, v0, unaligned_atomic
+	v84:i64 = UExtend v76, 32->64
+	v85:i64 = Iadd v11, v84
+	v86:i64 = Iconst_64 0x30
+	v87:i64 = Iadd v85, v86
+	v88:i64 = AtomicRmw or_64, v87, v8
+	Jump blk_ret, v14, v27, v40, v49, v62, v75, v88
 `,
 		},
 		{
@@ -2188,13 +2559,13 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v9:i32 = Iconst_32 0x0
-	v10:i64 = Load v1, 0x8
-	v11:i64 = UExtend v9, 32->64
-	v12:i64 = Iadd v10, v11
-	v13:i32 = AtomicRmw xor_8, v12, v2
-	v14:i32 = Iconst_32 0x0
-	v15:i64 = UExtend v14, 32->64
-	v16:i64 = Iadd v10, v15
+	v10:i64 = UExtend v9, 32->64
+	v11:i64 = Load v1, 0x8
+	v12:i64 = UExtend v9, 32->64
+	v13:i64 = Iadd v11, v12
+	v14:i32 = AtomicRmw xor_8, v13, v2
+	v15:i32 = Iconst_32 0x0
+	v16:i64 = UExtend v15, 32->64
 	v17:i64 = Iconst_64 0x8
 	v18:i64 = Iadd v16, v17
 	v19:i64 = Iconst_64 0x1
@@ -2202,58 +2573,77 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v21:i64 = Iconst_64 0x0
 	v22:i32 = Icmp neq, v20, v21
 	ExitIfTrue v22, v0, unaligned_atomic
-	v23:i32 = AtomicRmw xor_16, v18, v3
-	v24:i32 = Iconst_32 0x0
-	v25:i64 = UExtend v24, 32->64
-	v26:i64 = Iadd v10, v25
-	v27:i64 = Iconst_64 0x10
-	v28:i64 = Iadd v26, v27
-	v29:i64 = Iconst_64 0x3
-	v30:i64 = Band v28, v29
-	v31:i64 = Iconst_64 0x0
-	v32:i32 = Icmp neq, v30, v31
-	ExitIfTrue v32, v0, unaligned_atomic
-	v33:i32 = AtomicRmw xor_32, v28, v4
-	v34:i32 = Iconst_32 0x0
-	v35:i64 = UExtend v34, 32->64
-	v36:i64 = Iadd v10, v35
-	v37:i64 = Iconst_64 0x18
-	v38:i64 = Iadd v36, v37
-	v39:i64 = AtomicRmw xor_8, v38, v5
-	v40:i32 = Iconst_32 0x0
-	v41:i64 = UExtend v40, 32->64
-	v42:i64 = Iadd v10, v41
-	v43:i64 = Iconst_64 0x20
+	v23:i64 = UExtend v15, 32->64
+	v24:i64 = Iadd v11, v23
+	v25:i64 = Iconst_64 0x8
+	v26:i64 = Iadd v24, v25
+	v27:i32 = AtomicRmw xor_16, v26, v3
+	v28:i32 = Iconst_32 0x0
+	v29:i64 = UExtend v28, 32->64
+	v30:i64 = Iconst_64 0x10
+	v31:i64 = Iadd v29, v30
+	v32:i64 = Iconst_64 0x3
+	v33:i64 = Band v31, v32
+	v34:i64 = Iconst_64 0x0
+	v35:i32 = Icmp neq, v33, v34
+	ExitIfTrue v35, v0, unaligned_atomic
+	v36:i64 = UExtend v28, 32->64
+	v37:i64 = Iadd v11, v36
+	v38:i64 = Iconst_64 0x10
+	v39:i64 = Iadd v37, v38
+	v40:i32 = AtomicRmw xor_32, v39, v4
+	v41:i32 = Iconst_32 0x0
+	v42:i64 = UExtend v41, 32->64
+	v43:i64 = Iconst_64 0x18
 	v44:i64 = Iadd v42, v43
-	v45:i64 = Iconst_64 0x1
-	v46:i64 = Band v44, v45
-	v47:i64 = Iconst_64 0x0
-	v48:i32 = Icmp neq, v46, v47
-	ExitIfTrue v48, v0, unaligned_atomic
-	v49:i64 = AtomicRmw xor_16, v44, v6
+	v45:i64 = UExtend v41, 32->64
+	v46:i64 = Iadd v11, v45
+	v47:i64 = Iconst_64 0x18
+	v48:i64 = Iadd v46, v47
+	v49:i64 = AtomicRmw xor_8, v48, v5
 	v50:i32 = Iconst_32 0x0
 	v51:i64 = UExtend v50, 32->64
-	v52:i64 = Iadd v10, v51
-	v53:i64 = Iconst_64 0x28
-	v54:i64 = Iadd v52, v53
-	v55:i64 = Iconst_64 0x3
-	v56:i64 = Band v54, v55
-	v57:i64 = Iconst_64 0x0
-	v58:i32 = Icmp neq, v56, v57
-	ExitIfTrue v58, v0, unaligned_atomic
-	v59:i64 = AtomicRmw xor_32, v54, v7
-	v60:i32 = Iconst_32 0x0
-	v61:i64 = UExtend v60, 32->64
-	v62:i64 = Iadd v10, v61
-	v63:i64 = Iconst_64 0x30
-	v64:i64 = Iadd v62, v63
-	v65:i64 = Iconst_64 0x7
-	v66:i64 = Band v64, v65
-	v67:i64 = Iconst_64 0x0
-	v68:i32 = Icmp neq, v66, v67
-	ExitIfTrue v68, v0, unaligned_atomic
-	v69:i64 = AtomicRmw xor_64, v64, v8
-	Jump blk_ret, v13, v23, v33, v39, v49, v59, v69
+	v52:i64 = Iconst_64 0x20
+	v53:i64 = Iadd v51, v52
+	v54:i64 = Iconst_64 0x1
+	v55:i64 = Band v53, v54
+	v56:i64 = Iconst_64 0x0
+	v57:i32 = Icmp neq, v55, v56
+	ExitIfTrue v57, v0, unaligned_atomic
+	v58:i64 = UExtend v50, 32->64
+	v59:i64 = Iadd v11, v58
+	v60:i64 = Iconst_64 0x20
+	v61:i64 = Iadd v59, v60
+	v62:i64 = AtomicRmw xor_16, v61, v6
+	v63:i32 = Iconst_32 0x0
+	v64:i64 = UExtend v63, 32->64
+	v65:i64 = Iconst_64 0x28
+	v66:i64 = Iadd v64, v65
+	v67:i64 = Iconst_64 0x3
+	v68:i64 = Band v66, v67
+	v69:i64 = Iconst_64 0x0
+	v70:i32 = Icmp neq, v68, v69
+	ExitIfTrue v70, v0, unaligned_atomic
+	v71:i64 = UExtend v63, 32->64
+	v72:i64 = Iadd v11, v71
+	v73:i64 = Iconst_64 0x28
+	v74:i64 = Iadd v72, v73
+	v75:i64 = AtomicRmw xor_32, v74, v7
+	v76:i32 = Iconst_32 0x0
+	v77:i64 = UExtend v76, 32->64
+	v78:i64 = Iconst_64 0x30
+	v79:i64 = Iadd v77, v78
+	v80:i64 = Iconst_64 0x7
+	v81:i64 = Band v79, v80
+	v82:i64 = Iconst_64 0x0
+	v83:i32 = Icmp neq, v81, v82
+	ExitIfTrue v83, v0, unaligned_atomic
+	v84:i64 = UExtend v76, 32->64
+	v85:i64 = Iadd v11, v84
+	v86:i64 = Iconst_64 0x30
+	v87:i64 = Iadd v85, v86
+	v88:i64 = AtomicRmw xor_64, v87, v8
+	Jump blk_ret, v14, v27, v40, v49, v62, v75, v88
 `,
 		},
 		{
@@ -2263,13 +2653,13 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v9:i32 = Iconst_32 0x0
-	v10:i64 = Load v1, 0x8
-	v11:i64 = UExtend v9, 32->64
-	v12:i64 = Iadd v10, v11
-	v13:i32 = AtomicRmw xchg_8, v12, v2
-	v14:i32 = Iconst_32 0x0
-	v15:i64 = UExtend v14, 32->64
-	v16:i64 = Iadd v10, v15
+	v10:i64 = UExtend v9, 32->64
+	v11:i64 = Load v1, 0x8
+	v12:i64 = UExtend v9, 32->64
+	v13:i64 = Iadd v11, v12
+	v14:i32 = AtomicRmw xchg_8, v13, v2
+	v15:i32 = Iconst_32 0x0
+	v16:i64 = UExtend v15, 32->64
 	v17:i64 = Iconst_64 0x8
 	v18:i64 = Iadd v16, v17
 	v19:i64 = Iconst_64 0x1
@@ -2277,58 +2667,77 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v21:i64 = Iconst_64 0x0
 	v22:i32 = Icmp neq, v20, v21
 	ExitIfTrue v22, v0, unaligned_atomic
-	v23:i32 = AtomicRmw xchg_16, v18, v3
-	v24:i32 = Iconst_32 0x0
-	v25:i64 = UExtend v24, 32->64
-	v26:i64 = Iadd v10, v25
-	v27:i64 = Iconst_64 0x10
-	v28:i64 = Iadd v26, v27
-	v29:i64 = Iconst_64 0x3
-	v30:i64 = Band v28, v29
-	v31:i64 = Iconst_64 0x0
-	v32:i32 = Icmp neq, v30, v31
-	ExitIfTrue v32, v0, unaligned_atomic
-	v33:i32 = AtomicRmw xchg_32, v28, v4
-	v34:i32 = Iconst_32 0x0
-	v35:i64 = UExtend v34, 32->64
-	v36:i64 = Iadd v10, v35
-	v37:i64 = Iconst_64 0x18
-	v38:i64 = Iadd v36, v37
-	v39:i64 = AtomicRmw xchg_8, v38, v5
-	v40:i32 = Iconst_32 0x0
-	v41:i64 = UExtend v40, 32->64
-	v42:i64 = Iadd v10, v41
-	v43:i64 = Iconst_64 0x20
+	v23:i64 = UExtend v15, 32->64
+	v24:i64 = Iadd v11, v23
+	v25:i64 = Iconst_64 0x8
+	v26:i64 = Iadd v24, v25
+	v27:i32 = AtomicRmw xchg_16, v26, v3
+	v28:i32 = Iconst_32 0x0
+	v29:i64 = UExtend v28, 32->64
+	v30:i64 = Iconst_64 0x10
+	v31:i64 = Iadd v29, v30
+	v32:i64 = Iconst_64 0x3
+	v33:i64 = Band v31, v32
+	v34:i64 = Iconst_64 0x0
+	v35:i32 = Icmp neq, v33, v34
+	ExitIfTrue v35, v0, unaligned_atomic
+	v36:i64 = UExtend v28, 32->64
+	v37:i64 = Iadd v11, v36
+	v38:i64 = Iconst_64 0x10
+	v39:i64 = Iadd v37, v38
+	v40:i32 = AtomicRmw xchg_32, v39, v4
+	v41:i32 = Iconst_32 0x0
+	v42:i64 = UExtend v41, 32->64
+	v43:i64 = Iconst_64 0x18
 	v44:i64 = Iadd v42, v43
-	v45:i64 = Iconst_64 0x1
-	v46:i64 = Band v44, v45
-	v47:i64 = Iconst_64 0x0
-	v48:i32 = Icmp neq, v46, v47
-	ExitIfTrue v48, v0, unaligned_atomic
-	v49:i64 = AtomicRmw xchg_16, v44, v6
+	v45:i64 = UExtend v41, 32->64
+	v46:i64 = Iadd v11, v45
+	v47:i64 = Iconst_64 0x18
+	v48:i64 = Iadd v46, v47
+	v49:i64 = AtomicRmw xchg_8, v48, v5
 	v50:i32 = Iconst_32 0x0
 	v51:i64 = UExtend v50, 32->64
-	v52:i64 = Iadd v10, v51
-	v53:i64 = Iconst_64 0x28
-	v54:i64 = Iadd v52, v53
-	v55:i64 = Iconst_64 0x3
-	v56:i64 = Band v54, v55
-	v57:i64 = Iconst_64 0x0
-	v58:i32 = Icmp neq, v56, v57
-	ExitIfTrue v58, v0, unaligned_atomic
-	v59:i64 = AtomicRmw xchg_32, v54, v7
-	v60:i32 = Iconst_32 0x0
-	v61:i64 = UExtend v60, 32->64
-	v62:i64 = Iadd v10, v61
-	v63:i64 = Iconst_64 0x30
-	v64:i64 = Iadd v62, v63
-	v65:i64 = Iconst_64 0x7
-	v66:i64 = Band v64, v65
-	v67:i64 = Iconst_64 0x0
-	v68:i32 = Icmp neq, v66, v67
-	ExitIfTrue v68, v0, unaligned_atomic
-	v69:i64 = AtomicRmw xchg_64, v64, v8
-	Jump blk_ret, v13, v23, v33, v39, v49, v59, v69
+	v52:i64 = Iconst_64 0x20
+	v53:i64 = Iadd v51, v52
+	v54:i64 = Iconst_64 0x1
+	v55:i64 = Band v53, v54
+	v56:i64 = Iconst_64 0x0
+	v57:i32 = Icmp neq, v55, v56
+	ExitIfTrue v57, v0, unaligned_atomic
+	v58:i64 = UExtend v50, 32->64
+	v59:i64 = Iadd v11, v58
+	v60:i64 = Iconst_64 0x20
+	v61:i64 = Iadd v59, v60
+	v62:i64 = AtomicRmw xchg_16, v61, v6
+	v63:i32 = Iconst_32 0x0
+	v64:i64 = UExtend v63, 32->64
+	v65:i64 = Iconst_64 0x28
+	v66:i64 = Iadd v64, v65
+	v67:i64 = Iconst_64 0x3
+	v68:i64 = Band v66, v67
+	v69:i64 = Iconst_64 0x0
+	v70:i32 = Icmp neq, v68, v69
+	ExitIfTrue v70, v0, unaligned_atomic
+	v71:i64 = UExtend v63, 32->64
+	v72:i64 = Iadd v11, v71
+	v73:i64 = Iconst_64 0x28
+	v74:i64 = Iadd v72, v73
+	v75:i64 = AtomicRmw xchg_32, v74, v7
+	v76:i32 = Iconst_32 0x0
+	v77:i64 = UExtend v76, 32->64
+	v78:i64 = Iconst_64 0x30
+	v79:i64 = Iadd v77, v78
+	v80:i64 = Iconst_64 0x7
+	v81:i64 = Band v79, v80
+	v82:i64 = Iconst_64 0x0
+	v83:i32 = Icmp neq, v81, v82
+	ExitIfTrue v83, v0, unaligned_atomic
+	v84:i64 = UExtend v76, 32->64
+	v85:i64 = Iadd v11, v84
+	v86:i64 = Iconst_64 0x30
+	v87:i64 = Iadd v85, v86
+	v88:i64 = AtomicRmw xchg_64, v87, v8
+	Jump blk_ret, v14, v27, v40, v49, v62, v75, v88
 `,
 		},
 		{
@@ -2338,137 +2747,175 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 	v9:i32 = Iconst_32 0x0
-	v10:i64 = Load v1, 0x8
-	v11:i64 = UExtend v9, 32->64
-	v12:i64 = Iadd v10, v11
-	AtomicStore_8, v12, v2
-	v13:i32 = Iconst_32 0x0
-	v14:i64 = UExtend v13, 32->64
-	v15:i64 = Iadd v10, v14
-	v16:i32 = AtomicLoad_8, v15
-	v17:i32 = Iconst_32 0x0
-	v18:i64 = UExtend v17, 32->64
-	v19:i64 = Iadd v10, v18
-	v20:i64 = Iconst_64 0x8
-	v21:i64 = Iadd v19, v20
-	v22:i64 = Iconst_64 0x1
-	v23:i64 = Band v21, v22
-	v24:i64 = Iconst_64 0x0
-	v25:i32 = Icmp neq, v23, v24
-	ExitIfTrue v25, v0, unaligned_atomic
-	AtomicStore_16, v21, v3
-	v26:i32 = Iconst_32 0x0
-	v27:i64 = UExtend v26, 32->64
-	v28:i64 = Iadd v10, v27
+	v10:i64 = UExtend v9, 32->64
+	v11:i64 = Load v1, 0x8
+	v12:i64 = UExtend v9, 32->64
+	v13:i64 = Iadd v11, v12
+	AtomicStore_8, v13, v2
+	v14:i32 = Iconst_32 0x0
+	v15:i64 = UExtend v14, 32->64
+	v16:i64 = UExtend v14, 32->64
+	v17:i64 = Iadd v11, v16
+	v18:i32 = AtomicLoad_8, v17
+	v19:i32 = Iconst_32 0x0
+	v20:i64 = UExtend v19, 32->64
+	v21:i64 = Iconst_64 0x8
+	v22:i64 = Iadd v20, v21
+	v23:i64 = Iconst_64 0x1
+	v24:i64 = Band v22, v23
+	v25:i64 = Iconst_64 0x0
+	v26:i32 = Icmp neq, v24, v25
+	ExitIfTrue v26, v0, unaligned_atomic
+	v27:i64 = UExtend v19, 32->64
+	v28:i64 = Iadd v11, v27
 	v29:i64 = Iconst_64 0x8
 	v30:i64 = Iadd v28, v29
-	v31:i64 = Iconst_64 0x1
-	v32:i64 = Band v30, v31
-	v33:i64 = Iconst_64 0x0
-	v34:i32 = Icmp neq, v32, v33
-	ExitIfTrue v34, v0, unaligned_atomic
-	v35:i32 = AtomicLoad_16, v30
-	v36:i32 = Iconst_32 0x0
-	v37:i64 = UExtend v36, 32->64
-	v38:i64 = Iadd v10, v37
-	v39:i64 = Iconst_64 0x10
-	v40:i64 = Iadd v38, v39
-	v41:i64 = Iconst_64 0x3
-	v42:i64 = Band v40, v41
-	v43:i64 = Iconst_64 0x0
-	v44:i32 = Icmp neq, v42, v43
-	ExitIfTrue v44, v0, unaligned_atomic
-	AtomicStore_32, v40, v4
-	v45:i32 = Iconst_32 0x0
-	v46:i64 = UExtend v45, 32->64
-	v47:i64 = Iadd v10, v46
-	v48:i64 = Iconst_64 0x10
-	v49:i64 = Iadd v47, v48
-	v50:i64 = Iconst_64 0x3
-	v51:i64 = Band v49, v50
-	v52:i64 = Iconst_64 0x0
-	v53:i32 = Icmp neq, v51, v52
-	ExitIfTrue v53, v0, unaligned_atomic
-	v54:i32 = AtomicLoad_32, v49
-	v55:i32 = Iconst_32 0x0
-	v56:i64 = UExtend v55, 32->64
-	v57:i64 = Iadd v10, v56
-	v58:i64 = Iconst_64 0x18
+	AtomicStore_16, v30, v3
+	v31:i32 = Iconst_32 0x0
+	v32:i64 = UExtend v31, 32->64
+	v33:i64 = Iconst_64 0x8
+	v34:i64 = Iadd v32, v33
+	v35:i64 = Iconst_64 0x1
+	v36:i64 = Band v34, v35
+	v37:i64 = Iconst_64 0x0
+	v38:i32 = Icmp neq, v36, v37
+	ExitIfTrue v38, v0, unaligned_atomic
+	v39:i64 = UExtend v31, 32->64
+	v40:i64 = Iadd v11, v39
+	v41:i64 = Iconst_64 0x8
+	v42:i64 = Iadd v40, v41
+	v43:i32 = AtomicLoad_16, v42
+	v44:i32 = Iconst_32 0x0
+	v45:i64 = UExtend v44, 32->64
+	v46:i64 = Iconst_64 0x10
+	v47:i64 = Iadd v45, v46
+	v48:i64 = Iconst_64 0x3
+	v49:i64 = Band v47, v48
+	v50:i64 = Iconst_64 0x0
+	v51:i32 = Icmp neq, v49, v50
+	ExitIfTrue v51, v0, unaligned_atomic
+	v52:i64 = UExtend v44, 32->64
+	v53:i64 = Iadd v11, v52
+	v54:i64 = Iconst_64 0x10
+	v55:i64 = Iadd v53, v54
+	AtomicStore_32, v55, v4
+	v56:i32 = Iconst_32 0x0
+	v57:i64 = UExtend v56, 32->64
+	v58:i64 = Iconst_64 0x10
 	v59:i64 = Iadd v57, v58
-	AtomicStore_8, v59, v5
-	v60:i32 = Iconst_32 0x0
-	v61:i64 = UExtend v60, 32->64
-	v62:i64 = Iadd v10, v61
-	v63:i64 = Iconst_64 0x18
-	v64:i64 = Iadd v62, v63
-	v65:i64 = AtomicLoad_8, v64
-	v66:i32 = Iconst_32 0x0
-	v67:i64 = UExtend v66, 32->64
-	v68:i64 = Iadd v10, v67
-	v69:i64 = Iconst_64 0x20
-	v70:i64 = Iadd v68, v69
-	v71:i64 = Iconst_64 0x1
-	v72:i64 = Band v70, v71
-	v73:i64 = Iconst_64 0x0
-	v74:i32 = Icmp neq, v72, v73
-	ExitIfTrue v74, v0, unaligned_atomic
-	AtomicStore_16, v70, v6
-	v75:i32 = Iconst_32 0x0
-	v76:i64 = UExtend v75, 32->64
-	v77:i64 = Iadd v10, v76
-	v78:i64 = Iconst_64 0x20
-	v79:i64 = Iadd v77, v78
-	v80:i64 = Iconst_64 0x1
-	v81:i64 = Band v79, v80
-	v82:i64 = Iconst_64 0x0
-	v83:i32 = Icmp neq, v81, v82
-	ExitIfTrue v83, v0, unaligned_atomic
-	v84:i64 = AtomicLoad_16, v79
-	v85:i32 = Iconst_32 0x0
-	v86:i64 = UExtend v85, 32->64
-	v87:i64 = Iadd v10, v86
-	v88:i64 = Iconst_64 0x28
+	v60:i64 = Iconst_64 0x3
+	v61:i64 = Band v59, v60
+	v62:i64 = Iconst_64 0x0
+	v63:i32 = Icmp neq, v61, v62
+	ExitIfTrue v63, v0, unaligned_atomic
+	v64:i64 = UExtend v56, 32->64
+	v65:i64 = Iadd v11, v64
+	v66:i64 = Iconst_64 0x10
+	v67:i64 = Iadd v65, v66
+	v68:i32 = AtomicLoad_32, v67
+	v69:i32 = Iconst_32 0x0
+	v70:i64 = UExtend v69, 32->64
+	v71:i64 = Iconst_64 0x18
+	v72:i64 = Iadd v70, v71
+	v73:i64 = UExtend v69, 32->64
+	v74:i64 = Iadd v11, v73
+	v75:i64 = Iconst_64 0x18
+	v76:i64 = Iadd v74, v75
+	AtomicStore_8, v76, v5
+	v77:i32 = Iconst_32 0x0
+	v78:i64 = UExtend v77, 32->64
+	v79:i64 = Iconst_64 0x18
+	v80:i64 = Iadd v78, v79
+	v81:i64 = UExtend v77, 32->64
+	v82:i64 = Iadd v11, v81
+	v83:i64 = Iconst_64 0x18
+	v84:i64 = Iadd v82, v83
+	v85:i64 = AtomicLoad_8, v84
+	v86:i32 = Iconst_32 0x0
+	v87:i64 = UExtend v86, 32->64
+	v88:i64 = Iconst_64 0x20
 	v89:i64 = Iadd v87, v88
-	v90:i64 = Iconst_64 0x3
+	v90:i64 = Iconst_64 0x1
 	v91:i64 = Band v89, v90
 	v92:i64 = Iconst_64 0x0
 	v93:i32 = Icmp neq, v91, v92
 	ExitIfTrue v93, v0, unaligned_atomic
-	AtomicStore_32, v89, v7
-	v94:i32 = Iconst_32 0x0
-	v95:i64 = UExtend v94, 32->64
-	v96:i64 = Iadd v10, v95
-	v97:i64 = Iconst_64 0x28
-	v98:i64 = Iadd v96, v97
-	v99:i64 = Iconst_64 0x3
-	v100:i64 = Band v98, v99
-	v101:i64 = Iconst_64 0x0
-	v102:i32 = Icmp neq, v100, v101
-	ExitIfTrue v102, v0, unaligned_atomic
-	v103:i64 = AtomicLoad_32, v98
-	v104:i32 = Iconst_32 0x0
-	v105:i64 = UExtend v104, 32->64
-	v106:i64 = Iadd v10, v105
-	v107:i64 = Iconst_64 0x30
-	v108:i64 = Iadd v106, v107
-	v109:i64 = Iconst_64 0x7
-	v110:i64 = Band v108, v109
-	v111:i64 = Iconst_64 0x0
-	v112:i32 = Icmp neq, v110, v111
-	ExitIfTrue v112, v0, unaligned_atomic
-	AtomicStore_64, v108, v8
-	v113:i32 = Iconst_32 0x0
-	v114:i64 = UExtend v113, 32->64
-	v115:i64 = Iadd v10, v114
-	v116:i64 = Iconst_64 0x30
-	v117:i64 = Iadd v115, v116
-	v118:i64 = Iconst_64 0x7
-	v119:i64 = Band v117, v118
-	v120:i64 = Iconst_64 0x0
-	v121:i32 = Icmp neq, v119, v120
-	ExitIfTrue v121, v0, unaligned_atomic
-	v122:i64 = AtomicLoad_64, v117
-	Jump blk_ret, v16, v35, v54, v65, v84, v103, v122
+	v94:i64 = UExtend v86, 32->64
+	v95:i64 = Iadd v11, v94
+	v96:i64 = Iconst_64 0x20
+	v97:i64 = Iadd v95, v96
+	AtomicStore_16, v97, v6
+	v98:i32 = Iconst_32 0x0
+	v99:i64 = UExtend v98, 32->64
+	v100:i64 = Iconst_64 0x20
+	v101:i64 = Iadd v99, v100
+	v102:i64 = Iconst_64 0x1
+	v103:i64 = Band v101, v102
+	v104:i64 = Iconst_64 0x0
+	v105:i32 = Icmp neq, v103, v104
+	ExitIfTrue v105, v0, unaligned_atomic
+	v106:i64 = UExtend v98, 32->64
+	v107:i64 = Iadd v11, v106
+	v108:i64 = Iconst_64 0x20
+	v109:i64 = Iadd v107, v108
+	v110:i64 = AtomicLoad_16, v109
+	v111:i32 = Iconst_32 0x0
+	v112:i64 = UExtend v111, 32->64
+	v113:i64 = Iconst_64 0x28
+	v114:i64 = Iadd v112, v113
+	v115:i64 = Iconst_64 0x3
+	v116:i64 = Band v114, v115
+	v117:i64 = Iconst_64 0x0
+	v118:i32 = Icmp neq, v116, v117
+	ExitIfTrue v118, v0, unaligned_atomic
+	v119:i64 = UExtend v111, 32->64
+	v120:i64 = Iadd v11, v119
+	v121:i64 = Iconst_64 0x28
+	v122:i64 = Iadd v120, v121
+	AtomicStore_32, v122, v7
+	v123:i32 = Iconst_32 0x0
+	v124:i64 = UExtend v123, 32->64
+	v125:i64 = Iconst_64 0x28
+	v126:i64 = Iadd v124, v125
+	v127:i64 = Iconst_64 0x3
+	v128:i64 = Band v126, v127
+	v129:i64 = Iconst_64 0x0
+	v130:i32 = Icmp neq, v128, v129
+	ExitIfTrue v130, v0, unaligned_atomic
+	v131:i64 = UExtend v123, 32->64
+	v132:i64 = Iadd v11, v131
+	v133:i64 = Iconst_64 0x28
+	v134:i64 = Iadd v132, v133
+	v135:i64 = AtomicLoad_32, v134
+	v136:i32 = Iconst_32 0x0
+	v137:i64 = UExtend v136, 32->64
+	v138:i64 = Iconst_64 0x30
+	v139:i64 = Iadd v137, v138
+	v140:i64 = Iconst_64 0x7
+	v141:i64 = Band v139, v140
+	v142:i64 = Iconst_64 0x0
+	v143:i32 = Icmp neq, v141, v142
+	ExitIfTrue v143, v0, unaligned_atomic
+	v144:i64 = UExtend v136, 32->64
+	v145:i64 = Iadd v11, v144
+	v146:i64 = Iconst_64 0x30
+	v147:i64 = Iadd v145, v146
+	AtomicStore_64, v147, v8
+	v148:i32 = Iconst_32 0x0
+	v149:i64 = UExtend v148, 32->64
+	v150:i64 = Iconst_64 0x30
+	v151:i64 = Iadd v149, v150
+	v152:i64 = Iconst_64 0x7
+	v153:i64 = Band v151, v152
+	v154:i64 = Iconst_64 0x0
+	v155:i32 = Icmp neq, v153, v154
+	ExitIfTrue v155, v0, unaligned_atomic
+	v156:i64 = UExtend v148, 32->64
+	v157:i64 = Iadd v11, v156
+	v158:i64 = Iconst_64 0x30
+	v159:i64 = Iadd v157, v158
+	v160:i64 = AtomicLoad_64, v159
+	Jump blk_ret, v18, v43, v68, v85, v110, v135, v160
 `,
 		},
 		{
@@ -2478,13 +2925,13 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i64, v6:i64, v7:i64, v8:i64)
 			exp: `
 blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i32, v6:i32, v7:i32, v8:i64, v9:i64, v10:i64, v11:i64, v12:i64, v13:i64, v14:i64, v15:i64)
 	v16:i32 = Iconst_32 0x0
-	v17:i64 = Load v1, 0x8
-	v18:i64 = UExtend v16, 32->64
-	v19:i64 = Iadd v17, v18
-	v20:i32 = AtomicCas_8, v19, v2, v3
-	v21:i32 = Iconst_32 0x0
-	v22:i64 = UExtend v21, 32->64
-	v23:i64 = Iadd v17, v22
+	v17:i64 = UExtend v16, 32->64
+	v18:i64 = Load v1, 0x8
+	v19:i64 = UExtend v16, 32->64
+	v20:i64 = Iadd v18, v19
+	v21:i32 = AtomicCas_8, v20, v2, v3
+	v22:i32 = Iconst_32 0x0
+	v23:i64 = UExtend v22, 32->64
 	v24:i64 = Iconst_64 0x8
 	v25:i64 = Iadd v23, v24
 	v26:i64 = Iconst_64 0x1
@@ -2492,58 +2939,77 @@ blk0: (v0:i64, v1:i64, v2:i32, v3:i32, v4:i32, v5:i32, v6:i32, v7:i32, v8:i64, v
 	v28:i64 = Iconst_64 0x0
 	v29:i32 = Icmp neq, v27, v28
 	ExitIfTrue v29, v0, unaligned_atomic
-	v30:i32 = AtomicCas_16, v25, v4, v5
-	v31:i32 = Iconst_32 0x0
-	v32:i64 = UExtend v31, 32->64
-	v33:i64 = Iadd v17, v32
-	v34:i64 = Iconst_64 0x10
-	v35:i64 = Iadd v33, v34
-	v36:i64 = Iconst_64 0x3
-	v37:i64 = Band v35, v36
-	v38:i64 = Iconst_64 0x0
-	v39:i32 = Icmp neq, v37, v38
-	ExitIfTrue v39, v0, unaligned_atomic
-	v40:i32 = AtomicCas_32, v35, v6, v7
-	v41:i32 = Iconst_32 0x0
-	v42:i64 = UExtend v41, 32->64
-	v43:i64 = Iadd v17, v42
-	v44:i64 = Iconst_64 0x18
-	v45:i64 = Iadd v43, v44
-	v46:i64 = AtomicCas_8, v45, v8, v9
-	v47:i32 = Iconst_32 0x0
-	v48:i64 = UExtend v47, 32->64
-	v49:i64 = Iadd v17, v48
-	v50:i64 = Iconst_64 0x20
+	v30:i64 = UExtend v22, 32->64
+	v31:i64 = Iadd v18, v30
+	v32:i64 = Iconst_64 0x8
+	v33:i64 = Iadd v31, v32
+	v34:i32 = AtomicCas_16, v33, v4, v5
+	v35:i32 = Iconst_32 0x0
+	v36:i64 = UExtend v35, 32->64
+	v37:i64 = Iconst_64 0x10
+	v38:i64 = Iadd v36, v37
+	v39:i64 = Iconst_64 0x3
+	v40:i64 = Band v38, v39
+	v41:i64 = Iconst_64 0x0
+	v42:i32 = Icmp neq, v40, v41
+	ExitIfTrue v42, v0, unaligned_atomic
+	v43:i64 = UExtend v35, 32->64
+	v44:i64 = Iadd v18, v43
+	v45:i64 = Iconst_64 0x10
+	v46:i64 = Iadd v44, v45
+	v47:i32 = AtomicCas_32, v46, v6, v7
+	v48:i32 = Iconst_32 0x0
+	v49:i64 = UExtend v48, 32->64
+	v50:i64 = Iconst_64 0x18
 	v51:i64 = Iadd v49, v50
-	v52:i64 = Iconst_64 0x1
-	v53:i64 = Band v51, v52
-	v54:i64 = Iconst_64 0x0
-	v55:i32 = Icmp neq, v53, v54
-	ExitIfTrue v55, v0, unaligned_atomic
-	v56:i64 = AtomicCas_16, v51, v10, v11
+	v52:i64 = UExtend v48, 32->64
+	v53:i64 = Iadd v18, v52
+	v54:i64 = Iconst_64 0x18
+	v55:i64 = Iadd v53, v54
+	v56:i64 = AtomicCas_8, v55, v8, v9
 	v57:i32 = Iconst_32 0x0
 	v58:i64 = UExtend v57, 32->64
-	v59:i64 = Iadd v17, v58
-	v60:i64 = Iconst_64 0x28
-	v61:i64 = Iadd v59, v60
-	v62:i64 = Iconst_64 0x3
-	v63:i64 = Band v61, v62
-	v64:i64 = Iconst_64 0x0
-	v65:i32 = Icmp neq, v63, v64
-	ExitIfTrue v65, v0, unaligned_atomic
-	v66:i64 = AtomicCas_32, v61, v12, v13
-	v67:i32 = Iconst_32 0x0
-	v68:i64 = UExtend v67, 32->64
-	v69:i64 = Iadd v17, v68
-	v70:i64 = Iconst_64 0x30
-	v71:i64 = Iadd v69, v70
-	v72:i64 = Iconst_64 0x7
-	v73:i64 = Band v71, v72
-	v74:i64 = Iconst_64 0x0
-	v75:i32 = Icmp neq, v73, v74
-	ExitIfTrue v75, v0, unaligned_atomic
-	v76:i64 = AtomicCas_64, v71, v14, v15
-	Jump blk_ret, v20, v30, v40, v46, v56, v66, v76
+	v59:i64 = Iconst_64 0x20
+	v60:i64 = Iadd v58, v59
+	v61:i64 = Iconst_64 0x1
+	v62:i64 = Band v60, v61
+	v63:i64 = Iconst_64 0x0
+	v64:i32 = Icmp neq, v62, v63
+	ExitIfTrue v64, v0, unaligned_atomic
+	v65:i64 = UExtend v57, 32->64
+	v66:i64 = Iadd v18, v65
+	v67:i64 = Iconst_64 0x20
+	v68:i64 = Iadd v66, v67
+	v69:i64 = AtomicCas_16, v68, v10, v11
+	v70:i32 = Iconst_32 0x0
+	v71:i64 = UExtend v70, 32->64
+	v72:i64 = Iconst_64 0x28
+	v73:i64 = Iadd v71, v72
+	v74:i64 = Iconst_64 0x3
+	v75:i64 = Band v73, v74
+	v76:i64 = Iconst_64 0x0
+	v77:i32 = Icmp neq, v75, v76
+	ExitIfTrue v77, v0, unaligned_atomic
+	v78:i64 = UExtend v70, 32->64
+	v79:i64 = Iadd v18, v78
+	v80:i64 = Iconst_64 0x28
+	v81:i64 = Iadd v79, v80
+	v82:i64 = AtomicCas_32, v81, v12, v13
+	v83:i32 = Iconst_32 0x0
+	v84:i64 = UExtend v83, 32->64
+	v85:i64 = Iconst_64 0x30
+	v86:i64 = Iadd v84, v85
+	v87:i64 = Iconst_64 0x7
+	v88:i64 = Band v86, v87
+	v89:i64 = Iconst_64 0x0
+	v90:i32 = Icmp neq, v88, v89
+	ExitIfTrue v90, v0, unaligned_atomic
+	v91:i64 = UExtend v83, 32->64
+	v92:i64 = Iadd v18, v91
+	v93:i64 = Iconst_64 0x30
+	v94:i64 = Iadd v92, v93
+	v95:i64 = AtomicCas_64, v94, v14, v15
+	Jump blk_ret, v21, v34, v47, v56, v69, v82, v95
 `,
 		},
 		{
@@ -2696,51 +3162,69 @@ blk0: (v0:i64, v1:i64, v2:i32)
 	v10:i32 = Load v9, 0x10
 	Jump blk1, v2
 
-blk1: (v11:i32) <-- (blk0,blk6)
-	v12:i64 = Iconst_64 0x24
-	v13:i64 = UExtend v11, 32->64
-	v14:i64 = Load v1, 0x10
-	v15:i64 = Iadd v13, v12
-	v16:i32 = Icmp lt_u, v14, v15
-	ExitIfTrue v16, v0, memory_out_of_bounds
-	v17:i64 = Load v1, 0x8
-	v18:i64 = Iadd v17, v13
-	v19:i32 = Load v18, 0x20
-	Brz v19, blk4
-	Jump blk3
+blk1: (v12:i32) <-- (blk0,blk11)
+	v11:i32 = PreemptRequested
+	Brnz v11, blk3
+	Jump blk4
 
 blk2: ()
 
 blk3: () <-- (blk1)
-	Jump blk6, v11
+	Yield v0
+	Jump blk4
 
-blk4: () <-- (blk1)
-	Brnz v11, blk_ret
-	Jump blk9
+blk4: () <-- (blk1,blk3)
+	v13:i64 = Iconst_64 0x24
+	v14:i64 = UExtend v12, 32->64
+	v15:i64 = Load v1, 0x10
+	v16:i64 = Iadd v14, v13
+	v17:i32 = Icmp lt_u, v15, v16
+	ExitIfTrue v17, v0, memory_out_of_bounds
+	v18:i64 = Load v1, 0x8
+	v19:i64 = Iadd v18, v14
+	v20:i32 = Load v19, 0x20
+	Brz v20, blk6
+	Jump blk5
 
-blk5: () <-- (blk8,blk9)
+blk5: () <-- (blk4)
+	Jump blk8, v12
+
+blk6: () <-- (blk4)
+	Brnz v12, blk_ret
+	Jump blk13
+
+blk7: () <-- (blk12,blk13)
 	Jump blk_ret
 
-blk6: (v20:i32) <-- (blk3)
-	v21:i64 = Iconst_64 0x54
-	v22:i64 = UExtend v20, 32->64
-	v23:i64 = Load v1, 0x10
-	v24:i64 = Iadd v22, v21
-	v25:i32 = Icmp lt_u, v23, v24
-	ExitIfTrue v25, v0, memory_out_of_bounds
-	v26:i64 = Load v1, 0x8
-	v27:i64 = Iadd v26, v22
-	v28:i32 = Load v27, 0x50
-	Brnz v28, blk1, v20
-	Jump blk8
+blk8: (v22:i32) <-- (blk5)
+	v21:i32 = PreemptRequested elided
+	Brnz v21, blk10
+	Jump blk11
 
-blk7: ()
+blk9: ()
 
-blk8: () <-- (blk6)
-	Jump blk5
+blk10: () <-- (blk8)
+	Yield v0
+	Jump blk11
 
-blk9: () <-- (blk4)
-	Jump blk5
+blk11: () <-- (blk8,blk10)
+	v23:i64 = Iconst_64 0x54
+	v24:i64 = UExtend v22, 32->64
+	v25:i64 = Load v1, 0x10
+	v26:i64 = Iadd v24, v23
+	v27:i32 = Icmp lt_u, v25, v26
+	ExitIfTrue v27, v0, memory_out_of_bounds
+	v28:i64 = Load v1, 0x8
+	v29:i64 = Iadd v28, v24
+	v30:i32 = Load v29, 0x50
+	Brnz v30, blk1, v22
+	Jump blk12
+
+blk12: () <-- (blk11)
+	Jump blk7
+
+blk13: () <-- (blk6)
+	Jump blk7
 `,
 		},
 	} {
@@ -2758,7 +3242,9 @@ blk9: () <-- (blk4)
 			b := ssa.NewBuilder()
 
 			offset := nativeapi.NewModuleContextOffsetData(tc.m, tc.needListener)
-			fc := NewFrontendCompiler(tc.m, b, &offset, tc.ensureTermination, tc.needListener, false)
+			fc := NewFrontendCompiler(tc.m, b, &offset, tc.needListener, false)
+			fc.SetInlineLeaves(tc.inline)
+			fc.SetVecMap(false)
 			typeIndex := tc.m.FunctionSection[tc.targetIndex]
 			code := &tc.m.CodeSection[tc.targetIndex]
 			fc.Init(tc.targetIndex, typeIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body, tc.needListener, 0)
@@ -2842,22 +3328,21 @@ func TestCompiler_declareSignatures(t *testing.T) {
 			{ID: 2, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeF64, ssa.TypeI32}},
 			{ID: 3, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
 			{ID: 4, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 5, Params: []ssa.Type{ssa.TypeI64}},
-			{ID: 6, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 7, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 8, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
-			{ID: 9, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 10, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 5, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 6, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 7, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
+			{ID: 8, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 9, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 10, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
 			// EH signatures.
-			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 13, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 			// GC runtime. The safepoint shares it rather than declaring one of its own.
-			{ID: 14, Params: []ssa.Type{
+			{ID: 13, Params: []ssa.Type{
 				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
 			}, Results: []ssa.Type{ssa.TypeI64}},
 			// memclr signature.
-			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 		}
 
 		require.Equal(t, len(expected), len(declaredSigs))
@@ -2890,22 +3375,21 @@ func TestCompiler_declareSignatures(t *testing.T) {
 			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32}},
 			// Misc.
 			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 13, Params: []ssa.Type{ssa.TypeI64}},
-			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 16, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
-			{ID: 17, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 18, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
-			{ID: 19, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 13, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}},
+			{ID: 16, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 17, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 18, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
 			// EH signatures.
-			{ID: 20, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
-			{ID: 21, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 19, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 20, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 			// GC runtime. The safepoint shares it rather than declaring one of its own.
-			{ID: 22, Params: []ssa.Type{
+			{ID: 21, Params: []ssa.Type{
 				ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI64,
 			}, Results: []ssa.Type{ssa.TypeI64}},
 			// memclr signature.
-			{ID: 23, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 22, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
 		}
 		require.Equal(t, len(expected), len(declaredSigs))
 		for i := 0; i < len(declaredSigs); i++ {
@@ -2984,7 +3468,7 @@ func TestKnownSafeBound_valid(t *testing.T) {
 }
 
 func TestCompiler_finalizeKnownSafeBoundsAtTheEndOoBlock(t *testing.T) {
-	c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false, false)
+	c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
 	blk := c.ssaBuilder.AllocateBasicBlock()
 	require.True(t, len(c.getKnownSafeBoundsAtTheEndOfBlocks(blk.ID()).View()) == 0)
 	c.ssaBuilder.SetCurrentBlock(blk)
@@ -3005,7 +3489,7 @@ func TestCompiler_finalizeKnownSafeBoundsAtTheEndOoBlock(t *testing.T) {
 
 func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 	t.Run("single (sealed)", func(t *testing.T) {
-		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false, false)
+		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
 		builder := c.ssaBuilder
 		child := builder.AllocateBasicBlock()
 		{
@@ -3036,7 +3520,7 @@ func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 		require.Equal(t, ssa.Value(54321), kb.absoluteAddr)
 	})
 	t.Run("single (unsealed)", func(t *testing.T) {
-		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false, false)
+		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
 		builder := c.ssaBuilder
 		child := builder.AllocateBasicBlock()
 		{
@@ -3065,8 +3549,32 @@ func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 		require.Equal(t, uint64(666), kb.bound)
 		require.NotEqual(t, ssa.Value(54321), kb.absoluteAddr)
 	})
+	t.Run("one predecessor reaching twice", func(t *testing.T) {
+		// A br_table can name the same target twice; that is still a single predecessor,
+		// including when the epoch that deduplicates them wraps around.
+		for _, epoch := range []uint32{0, math.MaxUint32} {
+			c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
+			c.predSeenEpoch = epoch
+			builder := c.ssaBuilder
+			child := builder.AllocateBasicBlock()
+			parent := builder.AllocateBasicBlock()
+			builder.SetCurrentBlock(parent)
+			c.recordKnownSafeBound(1, 99, 9999)
+			builder.AllocateInstruction().AsJump(ssa.ValuesNil, child).Insert(builder)
+			builder.AllocateInstruction().AsJump(ssa.ValuesNil, child).Insert(builder)
+			c.finalizeKnownSafeBoundsAtTheEndOfBlock(parent.ID())
+
+			builder.Seal(child)
+			builder.SetCurrentBlock(child)
+			c.initializeCurrentBlockKnownBounds()
+			require.Equal(t, []ssa.BasicBlockID{parent.ID()}, c.preds)
+			kb := c.getKnownSafeBound(1)
+			require.True(t, kb.valid())
+			require.Equal(t, ssa.Value(9999), kb.absoluteAddr)
+		}
+	})
 	t.Run("multiple predecessors", func(t *testing.T) {
-		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false, false)
+		c := NewFrontendCompiler(&wasm.Module{}, ssa.NewBuilder(), nil, false, false)
 		builder := c.ssaBuilder
 		child := builder.AllocateBasicBlock()
 		{
@@ -3130,4 +3638,15 @@ func TestCompiler_initializeCurrentBlockKnownBounds(t *testing.T) {
 			})
 		}
 	})
+}
+
+// branchHinted returns single-function module m with that function carrying hints, as a branch hint section would
+// give them.
+func branchHinted(m *wasm.Module, hints ...wasm.BranchHint) *wasm.Module {
+	code := m.CodeSection[0]
+	code.BranchHints = hints
+	return &wasm.Module{
+		TypeSection: m.TypeSection, FunctionSection: m.FunctionSection,
+		CodeSection: []wasm.Code{code}, ExportSection: m.ExportSection,
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	socketapi "github.com/samyfodil/wazy/internal/sock"
 	"github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/sysfs"
 	"github.com/samyfodil/wazy/internal/wasip1"
 	"github.com/samyfodil/wazy/internal/wasm"
 	sysapi "github.com/samyfodil/wazy/sys"
@@ -89,6 +90,8 @@ func fdAllocateFn(_ context.Context, mod api.Module, params []uint64) sysapi.Err
 	st, errno := f.File.Stat()
 	if errno != 0 {
 		return errno
+	} else if st.Mode.IsDir() {
+		return sysapi.EISDIR
 	}
 
 	if st.Size >= tail {
@@ -209,6 +212,15 @@ func fdFdstatGetFn(_ context.Context, mod api.Module, params []uint64) sysapi.Er
 	if isNonblock(f.File) {
 		fdflags |= wasip1.FD_NONBLOCK
 	}
+	if f.Oflag&sysapi.O_DSYNC != 0 {
+		fdflags |= wasip1.FD_DSYNC
+	}
+	if f.Oflag&sysapi.O_RSYNC != 0 {
+		fdflags |= wasip1.FD_RSYNC
+	}
+	if f.Oflag&sysapi.O_SYNC != 0 {
+		fdflags |= wasip1.FD_SYNC
+	}
 
 	var fsRightsBase uint32
 	var fsRightsInheriting uint32
@@ -227,6 +239,15 @@ func fdFdstatGetFn(_ context.Context, mod api.Module, params []uint64) sysapi.Er
 		fsRightsBase = fileRightsBase &^ wasip1.RIGHT_FD_SEEK &^ wasip1.RIGHT_FD_TELL
 	default:
 		fsRightsBase = fileRightsBase
+		if f.Opened {
+			// A file opened by path_open has the rights its access mode gives.
+			switch f.Oflag & (sysapi.O_RDONLY | sysapi.O_WRONLY | sysapi.O_RDWR) {
+			case sysapi.O_RDONLY:
+				fsRightsBase &^= wasip1.RIGHT_FD_WRITE
+			case sysapi.O_WRONLY:
+				fsRightsBase &^= wasip1.RIGHT_FD_READ
+			}
+		}
 	}
 
 	writeFdstat(buf, fileType, fdflags, fsRightsBase, fsRightsInheriting)
@@ -277,7 +298,9 @@ const dirRightsBase = wasip1.RIGHT_FD_DATASYNC |
 	wasip1.RIGHT_PATH_RENAME_SOURCE |
 	wasip1.RIGHT_PATH_RENAME_TARGET |
 	wasip1.RIGHT_PATH_FILESTAT_GET |
-	wasip1.RIGHT_PATH_FILESTAT_SET_SIZE |
+	// RIGHT_PATH_FILESTAT_SET_SIZE is left out: wasi-testsuite reads it as a
+	// right that can be dropped and is then enforced, which rights here are
+	// not. See fdFdstatSetRights.
 	wasip1.RIGHT_PATH_FILESTAT_SET_TIMES |
 	wasip1.RIGHT_FD_FILESTAT_GET |
 	wasip1.RIGHT_FD_FILESTAT_SET_TIMES |
@@ -330,14 +353,24 @@ func fdFdstatSetFlagsFn(_ context.Context, mod api.Module, params []uint64) sysa
 	return 0
 }
 
-// fdFdstatSetRights will not be implemented as rights were removed from WASI.
+// fdFdstatSetRights reports ENOTSUP for an open fd, as rights were removed
+// from WASI and are not enforced. wasi-testsuite reads ENOTSUP as a host
+// without rights, which wasmtime is too.
 //
 // See https://github.com/bytecodealliance/wasmtime/pull/4666
-var fdFdstatSetRights = stubFunction(
-	wasip1.FdFdstatSetRightsName,
+var fdFdstatSetRights = newHostFunc(
+	wasip1.FdFdstatSetRightsName, fdFdstatSetRightsFn,
 	[]wasm.ValueType{i32, i64, i64},
 	"fd", "fs_rights_base", "fs_rights_inheriting",
 )
+
+func fdFdstatSetRightsFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno {
+	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
+	if _, ok := fsc.LookupFile(int32(params[0])); !ok {
+		return sysapi.EBADF
+	}
+	return sysapi.ENOTSUP
+}
 
 // fdFilestatGet is the WASI function named FdFilestatGetName which returns
 // the stat attributes of an open file.
@@ -668,12 +701,13 @@ func fdPrestatDirNameFn(_ context.Context, mod api.Module, params []uint64) sysa
 		return errno
 	}
 
-	// Some runtimes may have another semantics. See /RATIONALE.md
-	if uint32(len(name)) < pathLen {
+	// path_len is the size of the buffer at path, which must hold the name.
+	// See /RATIONALE.md
+	if pathLen < uint32(len(name)) {
 		return sysapi.ENAMETOOLONG
 	}
 
-	if !mod.Memory().WriteString(path, name[:pathLen]) {
+	if !mod.Memory().WriteString(path, name) {
 		return sysapi.EFAULT
 	}
 	return 0
@@ -805,13 +839,12 @@ func fdReadOrPread(mod api.Module, params []uint64, isPread bool) sysapi.Errno {
 
 func readv(mem api.Memory, iovs uint32, iovsCount uint32, reader func(buf []byte) (nread int, errno sysapi.Errno)) (uint32, sysapi.Errno) {
 	var nread uint32
-	iovsStop := iovsCount << 3 // iovsCount * 8
-	iovsBuf, ok := mem.Read(iovs, iovsStop)
-	if !ok {
-		return 0, sysapi.EFAULT
+	iovsBuf, errno := readIovs(mem, iovs, iovsCount)
+	if errno != 0 {
+		return 0, errno
 	}
 
-	for iovsPos := uint32(0); iovsPos < iovsStop; iovsPos += 8 {
+	for iovsPos := 0; iovsPos < len(iovsBuf); iovsPos += 8 {
 		offset := le.Uint32(iovsBuf[iovsPos:])
 		l := le.Uint32(iovsBuf[iovsPos+4:])
 
@@ -836,6 +869,20 @@ func readv(mem api.Memory, iovs uint32, iovsCount uint32, reader func(buf []byte
 		}
 	}
 	return nread, 0
+}
+
+// readIovs returns the iovsCount iovec records at iovs. The size is computed
+// in 64 bits, as iovsCount*8 in 32 would wrap and silently drop iovecs.
+func readIovs(mem api.Memory, iovs, iovsCount uint32) ([]byte, sysapi.Errno) {
+	size := uint64(iovsCount) * 8
+	if size > math.MaxUint32 {
+		return nil, sysapi.EFAULT
+	}
+	buf, ok := mem.Read(iovs, uint32(size))
+	if !ok {
+		return nil, sysapi.EFAULT
+	}
+	return buf, 0
 }
 
 // fdReaddir is the WASI function named wasip1.FdReaddirName which reads
@@ -1288,13 +1335,12 @@ func fdWriteOrPwrite(mod api.Module, params []uint64, isPwrite bool) sysapi.Errn
 
 func writev(mem api.Memory, iovs uint32, iovsCount uint32, writer func(buf []byte) (n int, errno sysapi.Errno)) (uint32, sysapi.Errno) {
 	var nwritten uint32
-	iovsStop := iovsCount << 3 // iovsCount * 8
-	iovsBuf, ok := mem.Read(iovs, iovsStop)
-	if !ok {
-		return 0, sysapi.EFAULT
+	iovsBuf, errno := readIovs(mem, iovs, iovsCount)
+	if errno != 0 {
+		return 0, errno
 	}
 
-	for iovsPos := uint32(0); iovsPos < iovsStop; iovsPos += 8 {
+	for iovsPos := 0; iovsPos < len(iovsBuf); iovsPos += 8 {
 		offset := le.Uint32(iovsBuf[iovsPos:])
 		l := le.Uint32(iovsBuf[iovsPos+4:])
 
@@ -1465,6 +1511,9 @@ func pathFilestatSetTimesFn(_ context.Context, mod api.Module, params []uint64) 
 	if symlinkFollow {
 		return preopen.Utimens(pathName, atim, mtim)
 	}
+	if lfs, ok := preopen.(sysfs.LutimensFS); ok {
+		return lfs.Lutimens(pathName, atim, mtim)
+	}
 	// Otherwise, we need to emulate don't follow by opening the file by path.
 	if f, errno := preopen.OpenFile(pathName, sysapi.O_WRONLY, 0); errno != 0 {
 		return errno
@@ -1489,8 +1538,10 @@ func pathLinkFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 	fsc := mod.(*wasm.ModuleInstance).Sys.FS()
 
 	oldFD := int32(params[0])
-	// TODO: use old_flags?
-	_ = uint32(params[1])
+	// Linking to what a symlink points to is not supported, as in wasmtime.
+	if uint16(params[1])&wasip1.LOOKUP_SYMLINK_FOLLOW != 0 {
+		return sysapi.EINVAL
+	}
 	oldPath := uint32(params[2])
 	oldPathLen := uint32(params[3])
 
@@ -1508,6 +1559,16 @@ func pathLinkFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 		return errno
 	}
 
+	if oldFS != newFS {
+		// Two directories each resolve through themselves; within one mount
+		// both resolve from it.
+		if oldFS, oldName, errno = atMountPath(fsc, mem, oldFD, oldPath, oldPathLen); errno != 0 {
+			return errno
+		}
+		if newFS, newName, errno = atMountPath(fsc, mem, newFD, newPath, newPathLen); errno != 0 {
+			return errno
+		}
+	}
 	if oldFS != newFS { // TODO: handle link across filesystems
 		return sysapi.ENOSYS
 	}
@@ -1595,7 +1656,7 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 	fdflags := uint16(params[7])
 	resultOpenedFD := uint32(params[8])
 
-	preopen, pathName, errno := atPath(fsc, mod.Memory(), preopenFD, path, pathLen)
+	dir, pathName, errno := atDir(fsc, mod.Memory(), preopenFD, path, pathLen)
 	if errno != 0 {
 		return errno
 	}
@@ -1611,7 +1672,11 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 		return sysapi.EINVAL // use pathCreateDirectory!
 	}
 
-	newFD, errno := fsc.OpenFile(preopen, pathName, fileOpenFlags, 0o600)
+	// The entry records the file by its name in the mount, as it outlives the
+	// directory it may have been opened through.
+	fs, name := throughDir(dir, pathName)
+	mount, mountName := atMount(dir, pathName)
+	newFD, errno := fsc.OpenFileAs(fs, name, mount, mountName, fileOpenFlags, 0o600)
 	if errno != 0 {
 		return errno
 	}
@@ -1653,19 +1718,63 @@ func pathOpenFn(_ context.Context, mod api.Module, params []uint64) sysapi.Errno
 // See https://github.com/WebAssembly/wasi-libc/blob/659ff414560721b1660a19685110e484a081c3d4/libc-bottom-half/sources/at_fdcwd.c
 // See https://linux.die.net/man/2/openat
 func atPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (sysapi.FS, string, sysapi.Errno) {
+	f, pathName, errno := atDir(fsc, mem, fd, p, pathLen)
+	if errno != 0 {
+		return nil, "", errno
+	}
+	fs, name := throughDir(f, pathName)
+	return fs, name, 0
+}
+
+// atMountPath is atPath resolving from the mount, by the directory's name,
+// for an operation that spans two directories.
+func atMountPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (sysapi.FS, string, sysapi.Errno) {
+	f, pathName, errno := atDir(fsc, mem, fd, p, pathLen)
+	if errno != 0 {
+		return nil, "", errno
+	}
+	fs, name := atMount(f, pathName)
+	return fs, name, 0
+}
+
+// throughDir resolves pathName under the directory f. One the guest opened
+// resolves it through itself, so it still reaches the directory after a
+// rename.
+func throughDir(f *sys.FileEntry, pathName string) (sysapi.FS, string) {
+	if !f.IsPreopen {
+		if h, ok := f.File.(sysfs.DirHandle); ok {
+			if dirFS, errno := h.DirFS(); errno == 0 {
+				return dirFS, pathName
+			}
+		}
+	}
+	return atMount(f, pathName)
+}
+
+// atMount resolves pathName under the directory f from its mount, by name.
+func atMount(f *sys.FileEntry, pathName string) (sysapi.FS, string) {
+	if f.IsPreopen { // don't append the pre-open name
+		return f.FS, pathName
+	}
+	// Join via concat to avoid name conflict on path.Join
+	return f.FS, f.Name + "/" + pathName
+}
+
+// atDir is the directory fd names and path, cleaned and checked, under it.
+func atDir(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (*sys.FileEntry, string, sysapi.Errno) {
 	b, ok := mem.Read(p, pathLen)
 	if !ok {
 		return nil, "", sysapi.EFAULT
 	}
-	pathName := string(b)
+	rawPath := string(b)
 
 	// interesting_paths wants us to break on trailing slash if the input ends
 	// up a file, not a directory!
-	hasTrailingSlash := strings.HasSuffix(pathName, "/")
+	hasTrailingSlash := strings.HasSuffix(rawPath, "/")
 
 	// interesting_paths includes paths that include relative links but end up
 	// not escaping
-	pathName = path.Clean(pathName)
+	pathName := path.Clean(rawPath)
 
 	// interesting_paths wants to break on root paths or anything that escapes.
 	// This part is the same as fs.FS.Open()
@@ -1678,18 +1787,53 @@ func atPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (sy
 		pathName = pathName + "/"
 	}
 
-	if f, ok := fsc.LookupFile(fd); !ok {
+	f, ok := fsc.LookupFile(fd)
+	if !ok {
 		return nil, "", sysapi.EBADF // closed or invalid
 	} else if isDir, errno := f.File.IsDir(); errno != 0 {
 		return nil, "", errno
 	} else if !isDir {
 		return nil, "", sysapi.ENOTDIR
-	} else if f.IsPreopen { // don't append the pre-open name
-		return f.FS, pathName, 0
-	} else {
-		// Join via concat to avoid name conflict on path.Join
-		return f.FS, f.Name + "/" + pathName, 0
 	}
+
+	if strings.Contains(rawPath, "..") {
+		// throughDir with no path gives the filesystem and the prefix the
+		// path resolves under.
+		fsys, base := throughDir(f, "")
+		if errno := dotDotParentsAreDirs(fsys, base, rawPath); errno != 0 {
+			return nil, "", errno
+		}
+	}
+	return f, pathName, 0
+}
+
+// dotDotParentsAreDirs fails where looking p up one component at a time
+// would: at a ".." after a component that is missing or not a directory, as
+// in "a/.." with "a" a file. path.Clean erases that step, so without this the
+// lookup of the cleaned path succeeds. p must not escape, see fs.ValidPath.
+func dotDotParentsAreDirs(fsys sysapi.FS, base, p string) sysapi.Errno {
+	var parts []string
+	verified := 0 // leading parts known to be directories
+	for _, c := range strings.Split(p, "/") {
+		switch c {
+		case "", ".":
+		case "..":
+			if len(parts) > verified {
+				st, errno := fsys.Stat(base + strings.Join(parts, "/"))
+				if errno != 0 {
+					return errno
+				}
+				if !st.Mode.IsDir() {
+					return sysapi.ENOTDIR
+				}
+			}
+			parts = parts[:len(parts)-1]
+			verified = len(parts)
+		default:
+			parts = append(parts, c)
+		}
+	}
+	return 0
 }
 
 func preopenPath(fsc *sys.FSContext, fd int32) (string, sysapi.Errno) {
@@ -1816,8 +1960,9 @@ func pathReadlinkFn(_ context.Context, mod api.Module, params []uint64) sysapi.E
 		return errno
 	}
 
+	// As readlink(2), a buffer too small for the target gets its start.
 	if len(dst) > int(bufLen) {
-		return sysapi.ERANGE
+		dst = dst[:bufLen]
 	}
 
 	if ok := mem.WriteString(buf, dst); !ok {
@@ -1925,6 +2070,16 @@ func pathRenameFn(_ context.Context, mod api.Module, params []uint64) sysapi.Err
 		return errno
 	}
 
+	if oldFS != newFS {
+		// Two directories each resolve through themselves; within one mount
+		// both resolve from it.
+		if oldFS, oldPathName, errno = atMountPath(fsc, mod.Memory(), fd, oldPath, oldPathLen); errno != 0 {
+			return errno
+		}
+		if newFS, newPathName, errno = atMountPath(fsc, mod.Memory(), newFD, newPath, newPathLen); errno != 0 {
+			return errno
+		}
+	}
 	if oldFS != newFS { // TODO: handle renames across filesystems
 		return sysapi.ENOSYS
 	}
@@ -1971,12 +2126,12 @@ func pathSymlinkFn(_ context.Context, mod api.Module, params []uint64) sysapi.Er
 		return sysapi.EFAULT
 	}
 
-	_, newPathName, errno := atPath(fsc, mod.Memory(), fd, newPath, newPathLen)
+	newFS, newPathName, errno := atPath(fsc, mod.Memory(), fd, newPath, newPathLen)
 	if errno != 0 {
 		return errno
 	}
 
-	return dir.FS.Symlink(
+	return newFS.Symlink(
 		// Do not join old path since it's only resolved when dereference the link created here.
 		// And the dereference result depends on the opening directory's file descriptor at that point.
 		unsafe.String(&oldPathBuf[0], int(oldPathLen)),

@@ -13,7 +13,7 @@ type Engine interface {
 	Close() (err error)
 
 	// CompileModule implements the same method as documented on wasm.Engine.
-	CompileModule(ctx context.Context, module *Module, listeners []api.FunctionListener, ensureTermination bool) error
+	CompileModule(ctx context.Context, module *Module, listeners []api.FunctionListener) error
 
 	// HasCompiledModule reports whether this engine already holds a compiled
 	// artifact for module (identified by module.ID - see Module.AssignModuleID),
@@ -38,13 +38,13 @@ type Engine interface {
 	// hit, skip CompileModule entirely; only call it on a false result.
 	//
 	// module.ID must already be assigned (via Module.AssignModuleID) before
-	// calling this. listeners and ensureTermination must be the same values
-	// that will be passed to CompileModule for this module.
+	// calling this. listeners must be the same value that will be passed to
+	// CompileModule for this module.
 	//
 	// This exists so wazy.Runtime.CompileModule can skip the expensive
 	// per-function-body validation pass on a cache hit: see the TRUST MODEL
 	// note at that call site.
-	HasCompiledModule(module *Module, listeners []api.FunctionListener, ensureTermination bool) (bool, error)
+	HasCompiledModule(module *Module, listeners []api.FunctionListener) (bool, error)
 
 	// CompiledModuleCount is exported for testing, to track the size of the compilation cache.
 	CompiledModuleCount() uint32

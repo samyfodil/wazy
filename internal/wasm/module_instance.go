@@ -2,7 +2,6 @@ package wasm
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/samyfodil/wazy/api"
@@ -12,101 +11,9 @@ import (
 // FailIfClosed returns a sys.ExitError if CloseWithExitCode was called.
 func (m *ModuleInstance) FailIfClosed() (err error) {
 	if closed := m.Closed.Load(); closed != 0 {
-		switch closed & exitCodeFlagMask {
-		case exitCodeFlagResourceClosed:
-		case exitCodeFlagResourceNotClosed:
-			// This happens when this module is closed asynchronously in CloseModuleOnCanceledOrTimeout,
-			// and the closure of resources have been deferred here.
-			_ = m.closeDeferredResources(context.Background())
-		}
 		return sys.NewExitError(uint32(closed >> 32)) // Unpack the high order bits as the exit code.
 	}
 	return nil
-}
-
-// CloseModuleOnCanceledOrTimeout take a context `ctx`, which might be a Cancel or Timeout context,
-// and spawns the Goroutine to check the context is canceled ot deadline exceeded. If it reaches
-// one of the conditions, it sets the appropriate exit code.
-//
-// Callers of this function must invoke the returned context.CancelFunc to release the spawned Goroutine.
-func (m *ModuleInstance) CloseModuleOnCanceledOrTimeout(ctx context.Context) context.CancelFunc {
-	if ctx.Done() == nil {
-		// A context that can never be canceled (context.Background/TODO, or any
-		// value/without-cancel wrapper of one) would leave the watcher below
-		// blocked on cancelChan alone, so it can only ever observe the caller
-		// closing it. Skipping it entirely is observationally identical, and
-		// saves a goroutine, a channel and a closure on every top-level call
-		// made under WithCloseOnContextDone.
-		return func() {}
-	}
-	// Creating an empty channel in this case is a bit more efficient than
-	// creating a context.Context and canceling it with the same effect. We
-	// really just need to be notified when to stop listening to the users
-	// context. Closing the channel will unblock the select in the goroutine
-	// causing it to return an stop listening to ctx.Done().
-	cancelChan := make(chan struct{})
-	go m.closeModuleOnCanceledOrTimeout(ctx, cancelChan)
-	return func() { close(cancelChan) }
-}
-
-// closeModuleOnCanceledOrTimeout is extracted from CloseModuleOnCanceledOrTimeout for testing.
-func (m *ModuleInstance) closeModuleOnCanceledOrTimeout(ctx context.Context, cancelChan <-chan struct{}) {
-	select {
-	case <-ctx.Done():
-		select {
-		case <-cancelChan:
-			// In some cases by the time this goroutine is scheduled, the caller
-			// has already closed both the context and the cancelChan. In this
-			// case go will randomize which branch of the outer select to enter
-			// and we don't want to close the module.
-		default:
-			m.closeOnCtxDone(ctx, cancelChan)
-		}
-	case <-cancelChan:
-	}
-}
-
-// closeOnCtxDone is the watcher's close. It is the same logic as
-// CloseWithCtxErr except it calls closeWithExitCodeWithoutClosingResource, so
-// that the call still running releases the resources in FailIfClosed rather
-// than pulling them out from under it.
-//
-// The call may already be past that FailIfClosed: it can leave between the
-// watcher seeing cancelChan open and the close below. The close also removed
-// the module from the store, so Runtime.Close would not find it either. So
-// look at cancelChan again once Closed is set: the call closes cancelChan
-// before its final FailIfClosed, so either that load sees the close, or this
-// receive sees cancelChan closed and the release falls to the watcher. Both
-// can happen; closeDeferredResources lets exactly one of them release.
-func (m *ModuleInstance) closeOnCtxDone(ctx context.Context, cancelChan <-chan struct{}) {
-	switch {
-	case errors.Is(ctx.Err(), context.Canceled):
-		// TODO: figure out how to report error here.
-		_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeContextCanceled)
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		// TODO: figure out how to report error here.
-		_ = m.closeWithExitCodeWithoutClosingResource(sys.ExitCodeDeadlineExceeded)
-	}
-	select {
-	case <-cancelChan:
-		_ = m.closeDeferredResources(context.Background())
-	default:
-	}
-}
-
-// CloseWithCtxErr closes the module with an exit code based on the type of
-// error reported by the context.
-//
-// If the context's error is unknown or nil, the module does not close.
-func (m *ModuleInstance) CloseWithCtxErr(ctx context.Context) {
-	switch {
-	case errors.Is(ctx.Err(), context.Canceled):
-		// TODO: figure out how to report error here.
-		_ = m.CloseWithExitCode(ctx, sys.ExitCodeContextCanceled)
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		// TODO: figure out how to report error here.
-		_ = m.CloseWithExitCode(ctx, sys.ExitCodeDeadlineExceeded)
-	}
 }
 
 // Name implements the same method as documented on api.Module
@@ -127,11 +34,7 @@ func (m *ModuleInstance) Close(ctx context.Context) (err error) {
 // CloseWithExitCode implements the same method as documented on api.Module.
 func (m *ModuleInstance) CloseWithExitCode(ctx context.Context, exitCode uint32) (err error) {
 	if !m.setExitCode(exitCode, exitCodeFlagResourceClosed) {
-		// Not an error to have already closed. But if that close was the
-		// asynchronous one and nothing has released the resources since --
-		// say the context was done after the last FailIfClosed of the call it
-		// watched -- this is the last chance to release them.
-		return m.closeDeferredResources(ctx)
+		return nil // not an error to have already closed
 	}
 	_ = m.s.deleteModule(m)
 	return m.ensureResourcesClosed(ctx)
@@ -142,57 +45,22 @@ func (m *ModuleInstance) IsClosed() bool {
 	return m.Closed.Load() != 0
 }
 
-func (m *ModuleInstance) closeWithExitCodeWithoutClosingResource(exitCode uint32) (err error) {
-	if !m.setExitCode(exitCode, exitCodeFlagResourceNotClosed) {
-		return nil // not an error to have already closed
-	}
-	_ = m.s.deleteModule(m)
-	return nil
-}
-
 // closeWithExitCode is the same as CloseWithExitCode besides this doesn't delete it from Store.moduleList.
 func (m *ModuleInstance) closeWithExitCode(ctx context.Context, exitCode uint32) (err error) {
 	if !m.setExitCode(exitCode, exitCodeFlagResourceClosed) {
-		return m.closeDeferredResources(ctx) // see CloseWithExitCode
+		return nil // not an error to have already closed
 	}
 	return m.ensureResourcesClosed(ctx)
 }
 
 type exitCodeFlag = uint64
 
-const exitCodeFlagMask = 0xff
-
-const (
-	// exitCodeFlagResourceClosed indicates that the module was closed and resources were already closed.
-	exitCodeFlagResourceClosed = 1 << iota
-	// exitCodeFlagResourceNotClosed indicates that the module was closed while resources are not closed yet.
-	exitCodeFlagResourceNotClosed
-)
+// exitCodeFlagResourceClosed indicates that the module was closed and resources were already closed.
+const exitCodeFlagResourceClosed = 1
 
 func (m *ModuleInstance) setExitCode(exitCode uint32, flag exitCodeFlag) bool {
 	closed := flag | uint64(exitCode)<<32 // Store exitCode as high-order bits.
 	return m.Closed.CompareAndSwap(0, closed)
-}
-
-// closeDeferredResources releases the resources of a module closed by
-// closeWithExitCodeWithoutClosingResource, at most once however many callers
-// race to do it, and does nothing otherwise.
-//
-// It flips the flag FIRST and releases only if it won the CAS.
-// ensureResourcesClosed is not idempotent -- its importer branch does
-// mem.importers--, so running it twice under-counts the live importers of a
-// shared memory. Once the count reaches zero early, the next importer's close
-// pools the buffer while another module is still pointing at it, and two
-// modules end up sharing one array.
-func (m *ModuleInstance) closeDeferredResources(ctx context.Context) error {
-	closed := m.Closed.Load()
-	if closed&exitCodeFlagMask != exitCodeFlagResourceNotClosed {
-		return nil
-	}
-	if !m.Closed.CompareAndSwap(closed, closed&^uint64(exitCodeFlagResourceNotClosed)|exitCodeFlagResourceClosed) {
-		return nil
-	}
-	return m.ensureResourcesClosed(ctx)
 }
 
 // ensureResourcesClosed ensures that resources assigned to ModuleInstance is released.
@@ -342,8 +210,8 @@ func (m *ModuleInstance) Memory() api.Memory {
 
 // ExportedMemory implements the same method as documented on api.Module.
 func (m *ModuleInstance) ExportedMemory(name string) api.Memory {
-	exp, err := m.getExport(name, ExternTypeMemory)
-	if err != nil {
+	exp := m.export(name, ExternTypeMemory)
+	if exp == nil {
 		return nil
 	}
 	return m.Memories[exp.Index]
@@ -363,8 +231,8 @@ func (m *ModuleInstance) ExportedMemoryDefinitions() map[string]api.MemoryDefini
 
 // ExportedFunction implements the same method as documented on api.Module.
 func (m *ModuleInstance) ExportedFunction(name string) api.Function {
-	exp, err := m.getExport(name, ExternTypeFunc)
-	if err != nil {
+	exp := m.export(name, ExternTypeFunc)
+	if exp == nil {
 		return nil
 	}
 	return m.Engine.NewFunction(exp.Index)
@@ -389,8 +257,8 @@ func (m *ModuleInstance) GlobalVal(idx Index) uint64 {
 
 // ExportedGlobal implements the same method as documented on api.Module.
 func (m *ModuleInstance) ExportedGlobal(name string) api.Global {
-	exp, err := m.getExport(name, ExternTypeGlobal)
-	if err != nil {
+	exp := m.export(name, ExternTypeGlobal)
+	if exp == nil {
 		return nil
 	}
 	g := m.Globals[exp.Index]

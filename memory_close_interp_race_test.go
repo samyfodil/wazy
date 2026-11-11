@@ -80,9 +80,9 @@ var spinHostModule = []byte{
 
 // closeWhileGuestReadsMemory runs "spin" -- which is inside a memory access
 // essentially all of the time -- and closes the module out from under it, the
-// way WithCloseOnContextDone does from its watchdog goroutine. The engine reads
-// mem.Buffer directly on that path, so anything the close writes to the memory
-// races it. Only meaningful under -race.
+// way a watchdog does from a goroutine of its own. The engine reads mem.Buffer
+// directly on that path, so anything the close writes to the memory races it.
+// Only meaningful under -race.
 func closeWhileGuestReadsMemory(t *testing.T, cfg RuntimeConfig) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -93,6 +93,7 @@ func closeWhileGuestReadsMemory(t *testing.T, cfg RuntimeConfig) {
 
 	mod, err := r.Instantiate(ctx, spinModule)
 	require.NoError(t, err)
+	defer closeOnDone(ctx, mod)()
 
 	spin := mod.ExportedFunction("spin")
 	require.NotNil(t, spin)
@@ -112,13 +113,18 @@ func closeWhileGuestReadsMemory(t *testing.T, cfg RuntimeConfig) {
 	wg.Wait()
 }
 
+// closeOnDone closes mod, on a goroutine of its own, once ctx is done: a
+// watchdog's kill. It returns the function that unregisters it.
+func closeOnDone(ctx context.Context, mod api.Module) func() bool {
+	return context.AfterFunc(ctx, func() { _ = mod.Close(context.Background()) })
+}
+
 func TestGuestMemoryReadDuringCloseIsRaceFree_Interpreter(t *testing.T) {
-	closeWhileGuestReadsMemory(t, NewRuntimeConfigInterpreter().WithCloseOnContextDone(true))
+	closeWhileGuestReadsMemory(t, NewRuntimeConfigInterpreter())
 }
 
 func TestGuestMemoryReadDuringCloseIsRaceFree_Compiler(t *testing.T) {
-	cfg := NewRuntimeConfig().WithCloseOnContextDone(true)
-	closeWhileGuestReadsMemory(t, cfg)
+	closeWhileGuestReadsMemory(t, NewRuntimeConfig())
 }
 
 // The shape go-pdfium's Kill() actually produces: the interrupted call is
@@ -130,8 +136,8 @@ func TestHostMemoryReadDuringCloseIsRaceFree(t *testing.T) {
 		name string
 		cfg  RuntimeConfig
 	}{
-		{"compiler", NewRuntimeConfig().WithCloseOnContextDone(true)},
-		{"interpreter", NewRuntimeConfigInterpreter().WithCloseOnContextDone(true)},
+		{"compiler", NewRuntimeConfig()},
+		{"interpreter", NewRuntimeConfigInterpreter()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -156,6 +162,7 @@ func TestHostMemoryReadDuringCloseIsRaceFree(t *testing.T) {
 
 			mod, err := r.Instantiate(ctx, spinHostModule)
 			require.NoError(t, err)
+			defer closeOnDone(ctx, mod)()
 
 			spin := mod.ExportedFunction("spin")
 			require.NotNil(t, spin)

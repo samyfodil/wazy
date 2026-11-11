@@ -11,14 +11,6 @@ import (
 
 const _UTIME_OMIT = unix.UTIME_OMIT
 
-func utimens(path string, atim, mtim int64) sys.Errno {
-	var times [2]syscall.Timespec
-	if !timesToTimespecs(atim, mtim, &times) {
-		return 0
-	}
-	return sys.UnwrapOSError(syscall.UtimesNano(path, times[:]))
-}
-
 // On linux, implement futimens via utimensat with the NUL path.
 func futimens(fd uintptr, atim, mtim int64) sys.Errno {
 	var times [2]syscall.Timespec
@@ -35,4 +27,15 @@ func utimensat(dirfd int, strPtr uintptr, times *[2]syscall.Timespec, flags int)
 		err = e1
 	}
 	return
+}
+
+// utimensatNoFollow sets the times of name in the directory dirfd, a symlink's
+// own rather than what it points to.
+func utimensatNoFollow(dirfd int, name string, times *[2]syscall.Timespec) sys.Errno {
+	p, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return sys.EINVAL
+	}
+	const atSymlinkNofollow = 0x100
+	return sys.UnwrapOSError(utimensat(dirfd, uintptr(unsafe.Pointer(p)), times, atSymlinkNofollow))
 }

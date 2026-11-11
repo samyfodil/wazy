@@ -11,6 +11,8 @@ func newMachine() backend.Machine {
 	panic("unsupported architecture")
 }
 
+func inlinedCallAt(uintptr) bool { return false }
+
 // unwindStack is a function to unwind the stack, and appends return addresses to `returnAddresses` slice.
 // The implementation must be aligned with the ABI/Calling convention.
 func unwindStack(sp, fp, top uintptr, returnAddresses []uintptr) []uintptr {

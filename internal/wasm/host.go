@@ -12,6 +12,17 @@ type HostFuncExporter interface {
 	ExportHostFunc(*HostFunc)
 }
 
+// HostTagExporter is HostFuncExporter for tags.
+type HostTagExporter interface {
+	ExportHostTag(HostTag)
+}
+
+// HostTag is an exception-handling tag a host module defines and exports, for NewHostModule.
+type HostTag struct {
+	ExportName string
+	ParamTypes []ValueType
+}
+
 // HostFunc is a function with an inlined type, used for NewHostModule.
 // Any corresponding FunctionType will be reused or added to the Module.
 type HostFunc struct {
@@ -49,6 +60,7 @@ func NewHostModule(
 	moduleName string,
 	exportNames []string,
 	nameToHostFunc map[string]*HostFunc,
+	tags []HostTag,
 	enabledFeatures api.CoreFeatures,
 ) (m *Module, err error) {
 	if moduleName != "" {
@@ -57,10 +69,18 @@ func NewHostModule(
 		return nil, errors.New("a module name must not be empty")
 	}
 
-	if exportCount := uint32(len(nameToHostFunc)); exportCount > 0 {
+	// Exports points into ExportSection, so its capacity must hold every export before the first is added.
+	if exportCount := len(nameToHostFunc) + len(tags); exportCount > 0 {
 		m.ExportSection = make([]Export, 0, exportCount)
 		m.Exports = make(map[string]*Export, exportCount)
+	}
+	if len(nameToHostFunc) > 0 {
 		if err = addFuncs(m, exportNames, nameToHostFunc, enabledFeatures); err != nil {
+			return
+		}
+	}
+	if len(tags) > 0 {
+		if err = addTags(m, moduleName, tags, enabledFeatures); err != nil {
 			return
 		}
 	}
@@ -75,7 +95,7 @@ func NewHostModule(
 	// compilation of host modules is not costly as it's merely small trampolines vs the real-world native Wasm binary.
 	// TODO: refactor engines so that we can properly cache compiled machine codes for host modules.
 	m.AssignModuleID([]byte(fmt.Sprintf("@@@@@@@@%p", m)), // @@@@@@@@ = any 8 bytes different from Wasm header.
-		nil, false)
+		nil)
 	return
 }
 
@@ -142,6 +162,27 @@ func addFuncs(
 			m.NameSection.ResultNames = append(m.NameSection.ResultNames, resultNames)
 		}
 		idx++
+	}
+	return nil
+}
+
+func addTags(m *Module, moduleName string, tags []HostTag, enabledFeatures api.CoreFeatures) error {
+	if err := enabledFeatures.RequireEnabled(api.CoreFeatureExceptionHandling); err != nil {
+		return fmt.Errorf("tag[%s.%s] invalid as %v", moduleName, tags[0].ExportName, err)
+	}
+	m.TagSection = make([]Tag, 0, len(tags))
+	for i := range tags {
+		tag := &tags[i]
+		if _, ok := m.Exports[tag.ExportName]; ok {
+			return fmt.Errorf("tag[%s.%s] export name is already used", moduleName, tag.ExportName)
+		}
+		typeIdx, err := m.maybeAddType(tag.ParamTypes, nil, enabledFeatures)
+		if err != nil {
+			return fmt.Errorf("tag[%s.%s] %v", moduleName, tag.ExportName, err)
+		}
+		m.TagSection = append(m.TagSection, Tag{Type: typeIdx})
+		m.ExportSection = append(m.ExportSection, Export{Type: ExternTypeTag, Name: tag.ExportName, Index: Index(i)})
+		m.Exports[tag.ExportName] = &m.ExportSection[len(m.ExportSection)-1]
 	}
 	return nil
 }

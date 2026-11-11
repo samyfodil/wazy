@@ -39,9 +39,8 @@ func TestMachine_setupPrologue(t *testing.T) {
 			spillSlotSize: 16,
 			exp: `
 	stp x30, xzr, [sp, #-0x10]!
-	sub sp, sp, #0x10
 	orr x27, xzr, #0x10
-	str x27, [sp, #-0x10]!
+	str x27, [sp, #-0x20]!
 	udf
 `,
 		},
@@ -140,9 +139,8 @@ func TestMachine_setupPrologue_ehContext(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, `
 	stp x30, xzr, [sp, #-0x10]!
-	sub sp, sp, #0x10
 	orr x27, xzr, #0x10
-	str x27, [sp, #-0x10]!
+	str x27, [sp, #-0x20]!
 	str x0, [sp, #0x10]
 	str x1, [sp, #0x18]
 	udf
@@ -167,8 +165,7 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		},
 		{
 			exp: `
-	add sp, sp, #0x10
-	add sp, sp, #0x50
+	add sp, sp, #0x60
 	ldr x30, [sp], #0x10
 	ret
 `,
@@ -177,8 +174,7 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		},
 		{
 			exp: `
-	add sp, sp, #0x10
-	add sp, sp, #0x50
+	add sp, sp, #0x60
 	ldr x30, [sp], #0x10
 	add sp, sp, #0x20
 	ret
@@ -210,8 +206,7 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		},
 		{
 			exp: `
-	add sp, sp, #0x10
-	add sp, sp, #0xa0
+	add sp, sp, #0xb0
 	ldp q18, q27, [sp]
 	ldp x18, x25, [sp, #0x20]
 	add sp, sp, #0x30
@@ -223,8 +218,7 @@ func TestMachine_postRegAlloc(t *testing.T) {
 		},
 		{
 			exp: `
-	add sp, sp, #0x10
-	add sp, sp, #0xa0
+	add sp, sp, #0xb0
 	ldp q18, q27, [sp]
 	ldp x18, x25, [sp, #0x20]
 	add sp, sp, #0x30
@@ -268,7 +262,7 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 		{
 			requiredStackSize: 0xfff_0,
 			exp: `
-	movz x27, #0xfff0, lsl 0
+	movz x27, #0xfef0, lsl 0
 	sub x27, sp, x27
 	ldr x11, [x0, #0x28]
 	subs xzr, x27, x11
@@ -282,9 +276,8 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 		{
 			requiredStackSize: 0x10,
 			exp: `
-	sub x27, sp, #0x10
 	ldr x11, [x0, #0x28]
-	subs xzr, x27, x11
+	subs xzr, sp, x11
 	b.ge #0x14
 	orr x27, xzr, #0x10
 	str x27, [x0, #0x40]

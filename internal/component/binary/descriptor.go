@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // TypeDesc represents a full component type descriptor, capturing the complete
@@ -355,7 +356,7 @@ func readLabelValtypeVecDesc(buf []byte, off int) ([]struct {
 	Type TypeRef
 }, int, error,
 ) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return nil, off, err
 	}
@@ -382,7 +383,7 @@ func readLabelValtypeVecDesc(buf []byte, off int) ([]struct {
 
 // readLabelVecDesc reads a vec(label) and returns the slice of names.
 func readLabelVecDesc(buf []byte, off int) ([]string, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return nil, off, err
 	}
@@ -401,7 +402,7 @@ func readLabelVecDesc(buf []byte, off int) ([]string, int, error) {
 
 // readValtypeVecDesc reads a vec(valtype) and returns the slice of TypeRefs.
 func readValtypeVecDesc(buf []byte, off int) ([]TypeRef, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return nil, off, err
 	}
@@ -468,7 +469,7 @@ func readVariantCaseDesc(buf []byte, off int) (VariantCase, int, error) {
 
 // readVariantDesc reads a variant type: vec(case).
 func readVariantDesc(buf []byte, off int) (VariantDesc, int, error) {
-	count, n, err := leb128.LoadUint32(buf[off:])
+	count, n, err := leb128.LoadVecSize(buf[off:])
 	if err != nil {
 		return VariantDesc{}, off, err
 	}
@@ -698,7 +699,7 @@ func coreValtypeName(b byte) (string, error) {
 // N aliases -- and for a `sub` bound, an abstract resource, nil.
 func addLocalType(localTypes *[]TypeDesc, outer *map[uint32]OuterAlias, idx uint32, hasIdx bool) {
 	var t TypeDesc
-	if hasIdx && int(idx) < len(*localTypes) {
+	if hasIdx && !u32.OutOfRange(idx, len(*localTypes)) {
 		t = (*localTypes)[idx]
 		if outer != nil {
 			if o, ok := (*outer)[idx]; ok {

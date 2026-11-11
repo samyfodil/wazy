@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -400,38 +401,67 @@ func TestMachine_lowerFpuToInt(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		nontrapping bool
+		islands     bool
 		expectedAsm string
 	}{
 		{
 			name:        "trapping",
 			nontrapping: false,
 			expectedAsm: `
-msr fpsr, xzr
-fcvtzu w1, s2
-mrs x1? fpsr
-mov x2?, x15
-mov x3?, d2
-subs xzr, x1?, #0x1
-b.ne L2
-fcmp w3?, w3?
-mov x4?, x2?
+fcmp s2, s2
+mov x1?, x15
 b.vc L1
-movz x5?, #0xc, lsl 0
-str w5?, [x4?]
-mov x6?, sp
-str x6?, [x4?, #0x38]
-adr x7?, #0x0
-str x7?, [x4?, #0x30]
-exit_sequence x4?
+movz x2?, #0xc, lsl 0
+str w2?, [x1?]
+mov x3?, sp
+str x3?, [x1?, #0x38]
+adr x4?, #0x0
+str x4?, [x1?, #0x30]
+exit_sequence x1?
 L1:
-movz x8?, #0xb, lsl 0
-str w8?, [x2?]
-mov x9?, sp
-str x9?, [x2?, #0x38]
-adr x10?, #0x0
-str x10?, [x2?, #0x30]
-exit_sequence x2?
+fmov s5?, #-1
+fcmp s2, s5?
+mov x6?, x15
+b.gt L2
+movz x7?, #0xb, lsl 0
+str w7?, [x6?]
+mov x8?, sp
+str x8?, [x6?, #0x38]
+adr x9?, #0x0
+str x9?, [x6?, #0x30]
+exit_sequence x6?
 L2:
+movz w11?, #0x4f80, lsl 16
+fmov s10?, w11?
+fcmp s2, s10?
+mov x12?, x15
+b.lt L3
+movz x13?, #0xb, lsl 0
+str w13?, [x12?]
+mov x14?, sp
+str x14?, [x12?, #0x38]
+adr x15?, #0x0
+str x15?, [x12?, #0x30]
+exit_sequence x12?
+L3:
+fcvtzu w1, s2
+`,
+		},
+		{
+			name:        "trapping through the shared islands",
+			nontrapping: false,
+			islands:     true,
+			expectedAsm: `
+fcmp s2, s2
+b.vs L1
+fmov s1?, #-1
+fcmp s2, s1?
+b.le L2
+movz w3?, #0x4f80, lsl 16
+fmov s2?, w3?
+fcmp s2, s2?
+b.ge L2
+fcvtzu w1, s2
 `,
 		},
 		{
@@ -446,7 +476,11 @@ fcvtzu w1, s2
 			mc, _, m := newSetupWithMockContext()
 			m.maxSSABlockID, m.nextLabel = 1, 1
 			mc.typeOf = map[regalloc.VRegID]ssa.Type{v2VReg.ID(): ssa.TypeI64, x15VReg.ID(): ssa.TypeI64}
-			m.lowerFpuToInt(x1VReg, operandNR(v2VReg), x15VReg, false, false, false, tc.nontrapping)
+			ctx := x15VReg
+			if tc.islands {
+				ctx = regalloc.VRegInvalid
+			}
+			m.lowerFpuToInt(x1VReg, operandNR(v2VReg), ctx, false, false, false, tc.nontrapping)
 			require.Equal(t, tc.expectedAsm, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 
 			m.FlushPendingInstructions()
@@ -740,29 +774,25 @@ func TestMachine_lowerShuffle(t *testing.T) {
 			name:  "lanes 0..15",
 			lanes: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
 			expectedAsm: `
-mov v29.16b, x2.16b
-mov v30.16b, x15.16b
 ldr q1?, L0 ;; pooled const 0706050403020100 0f0e0d0c0b0a0908
-tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
+tbl x1.16b, { x2.16b }, v1?.16b
 `,
 			// The high-entropy shuffle mask is loaded from the literal pool via a
 			// single ldr-literal (no branch-over-literal); the 16 mask bytes sit
 			// in the pool appended after the body (C8 part 2b).
-			expectedBytes: "5d1ca24efe1daf4e4000009ca123004e000102030405060708090a0b0c0d0e0f",
+			expectedBytes: "4000009c4100004e000102030405060708090a0b0c0d0e0f",
 		},
 		{
 			name:  "lanes 0101...",
 			lanes: []uint64{0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1},
 			expectedAsm: `
-mov v29.16b, x2.16b
-mov v30.16b, x15.16b
 orr x2?, xzr, #0x100010001000100
-ins v1?.d[0], x2?
+fmov d1?, x2?
 orr x3?, xzr, #0x100010001000100
 ins v1?.d[1], x3?
-tbl x1.16b, { v29.16b, v30.16b }, v1?.16b
+tbl x1.16b, { x2.16b }, v1?.16b
 `,
-			expectedBytes: "5d1ca24efe1daf4ee08308b2001c084ee08308b2001c184ea123004e",
+			expectedBytes: "e08308b20000679ee08308b2001c184e4100004e",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -884,7 +914,7 @@ func TestMachine_lowerFcopysign(t *testing.T) {
 			_64bit: false,
 			exp: `
 movz w1?, #0x8000, lsl 16
-ins v2?.s[0], w1?
+fmov s2?, w1?
 mov v6?.8b, v3?.8b
 bit v6?.8b, v4?.8b, v2?.8b
 mov v5?.8b, v6?.8b
@@ -894,7 +924,7 @@ mov v5?.8b, v6?.8b
 			_64bit: true,
 			exp: `
 movz x1?, #0x8000, lsl 48
-ins v2?.d[0], x1?
+fmov d2?, x1?
 mov v6?.8b, v3?.8b
 bit v6?.8b, v4?.8b, v2?.8b
 mov v5?.8b, v6?.8b
@@ -1650,5 +1680,41 @@ stlrb w2?, x1?
 			m.lowerAtomicStoreImpl(rn, rt, tc.size)
 			require.Equal(t, tc.exp, "\n"+formatEmittedInstructionsInCurrentBlock(m)+"\n")
 		})
+	}
+}
+
+// Test_fpuToIntBounds checks each conversion's bounds against Go's own: the float just inside a bound
+// truncates into the integer's range, and the bound itself, where it is excluded, does not.
+func Test_fpuToIntBounds(t *testing.T) {
+	inRange := func(v float64, signed, dst64 bool) bool {
+		v = math.Trunc(v)
+		switch {
+		case signed && dst64:
+			return v >= math.MinInt64 && v < math.Ldexp(1, 63)
+		case signed:
+			return v >= math.MinInt32 && v <= math.MaxInt32
+		case dst64:
+			return v >= 0 && v < math.Ldexp(1, 64)
+		}
+		return v >= 0 && v <= math.MaxUint32
+	}
+	for _, signed := range []bool{false, true} {
+		for _, src64 := range []bool{false, true} {
+			for _, dst64 := range []bool{false, true} {
+				lo, loInclusive, hi := fpuToIntBounds(signed, src64, dst64)
+				up, down := func(v float64) float64 { return math.Nextafter(v, math.Inf(1)) }, func(v float64) float64 { return math.Nextafter(v, math.Inf(-1)) }
+				if !src64 {
+					up = func(v float64) float64 { return float64(math.Nextafter32(float32(v), float32(math.Inf(1)))) }
+					down = func(v float64) float64 { return float64(math.Nextafter32(float32(v), float32(math.Inf(-1)))) }
+					require.Equal(t, lo, float64(float32(lo)))
+					require.Equal(t, hi, float64(float32(hi)))
+				}
+				require.Equal(t, loInclusive, inRange(lo, signed, dst64), "%v %v %v", signed, src64, dst64)
+				require.True(t, inRange(up(lo), signed, dst64))
+				require.False(t, inRange(down(lo), signed, dst64))
+				require.False(t, inRange(hi, signed, dst64))
+				require.True(t, inRange(down(hi), signed, dst64))
+			}
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // This file wires the MVP async builtins (task.return, context.get/set,
@@ -204,7 +205,9 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // callback-lift implicit thread is a genuine Thread that can itself call a
 // blocking wait builtin and suspend, so this is legal from callback code
 // too, not just from a would-be sync/stackful task), write its (p1,p2) at
-// ptr/ptr+4, and return the event code.
+// ptr/ptr+4, and return the event code. The event goes to memMod, the
+// canon's memory, rather than the calling module's: that may be a trampoline
+// with no memory of its own (see canonMemoryAndRealloc).
 //
 // (Phase 3, docs/component-model-async-phase3-design.md §2.3): a pending
 // cancellation does NOT wake this built-in and is not reported by it.
@@ -216,7 +219,7 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // sibling non-blocking built-ins ("neither may report the pending
 // cancellation ... which must survive until the task returns to its event
 // loop").
-func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module) hostFuncDef {
 	// mayBlockSync: this canon IS the reference's mid-core-call blocking site
 	// (WaitableSet.wait via Thread.wait_until), so a callback task of this
 	// instance needs a segment goroutine to park on -- otherwise reaching it
@@ -228,6 +231,9 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 	// the subtask.cancel whose trap the suite asserts.
 	in.syncTaskNeeded, in.mayBlockSync = true, true
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		if memMod != nil {
+			mod = memMod
+		}
 		requireMayLeave(in, "waitable-set.wait")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
@@ -285,9 +291,12 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 // instead of driving the scheduler. WaitableSet.poll reports NONE or the
 // pending event and never consults a cancellation, the same as wait:
 // returned immediately, before even checking the set.
-func waitableSetPollHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+func waitableSetPollHostFunc(in *Instance, canon binary.Canon, memMod api.Module) hostFuncDef {
 	in.syncTaskNeeded = true
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		if memMod != nil {
+			mod = memMod
+		}
 		requireMayLeave(in, "waitable-set.poll")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
@@ -536,13 +545,14 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 	}
 
 	var resultType binary.TypeDesc
+	var resultNest *asyncNest
 	var flatKinds []string
 	if len(resultRefs) == 1 {
 		rt, err := resolveTypeRef(&resultRefs[0], resolve)
 		if err != nil {
 			return hostFuncDef{}, fmt.Errorf("component/instance: task.return: resolve result type: %w", err)
 		}
-		resultType = rt
+		resultType, resultNest = rt, newAsyncNest(rt, resolve)
 		if flatKinds, err = abi.Flatten(rt, resolve); err != nil {
 			return hostFuncDef{}, fmt.Errorf("component/instance: task.return: flatten result type: %w", err)
 		}
@@ -618,6 +628,15 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 			}
 		}
 
+		if resultType != nil {
+			// The caller gets the result as lifted: the host, or a guest
+			// caller's onResolve, which lowers it into its own table.
+			v, err := in.takeAsyncResult(resultType, result[0], resultNest, "task.return")
+			if err != nil {
+				panic(err)
+			}
+			result[0] = v
+		}
 		if err := t.returnValues(result); err != nil {
 			panic(fmt.Errorf("component/instance: %w", err))
 		}
@@ -653,7 +672,7 @@ func contextGetHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 	slot := canon.Slot
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		t := requireActiveTask(in, "context.get")
-		if int(slot) >= len(t.ctxStorage) { // assert(i < len(thread.storage))
+		if u32.OutOfRange(slot, len(t.ctxStorage)) { // assert(i < len(thread.storage))
 			panic(fmt.Errorf("component/instance: context.get: slot %d out of range (storage has %d slot(s))", slot, len(t.ctxStorage)))
 		}
 		stack[0] = t.ctxStorage[slot]
@@ -673,7 +692,7 @@ func contextSetHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 	slot := canon.Slot
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		t := requireActiveTask(in, "context.set")
-		if int(slot) >= len(t.ctxStorage) { // assert(i < len(thread.storage))
+		if u32.OutOfRange(slot, len(t.ctxStorage)) { // assert(i < len(thread.storage))
 			panic(fmt.Errorf("component/instance: context.set: slot %d out of range (storage has %d slot(s))", slot, len(t.ctxStorage)))
 		}
 		t.ctxStorage[slot] = stack[0]

@@ -140,6 +140,23 @@ type RuntimeConfig interface {
 	// WithMemoryCapacityFromMax(true) takes precedence over this setting.
 	WithMemoryCapacityReservePages(memoryCapacityReservePages uint32) RuntimeConfig
 
+	// WithTableLimitElements overrides the maximum entries allowed per table. The
+	// default is 10,000,000, the limit browsers apply, which holds a table to
+	// 80MB of host memory. A table lives outside every linear memory, so
+	// WithMemoryLimitPages does not bound it, and without this limit a single
+	// table.grow could ask for 2^32-1 entries.
+	//
+	// A module declaring a table larger than this, or tables whose declared
+	// sizes add up to more, fails to instantiate. table.grow past it returns -1,
+	// as it does past a table's declared maximum.
+	//
+	// This example limits every table to 65536 entries:
+	//	rConfig = wazy.NewRuntimeConfig().WithTableLimitElements(65536)
+	//
+	// Setting a value larger than this platform can allocate panics: that is
+	// 2^32-2 where int is 64 bits wide, and less where it is 32.
+	WithTableLimitElements(tableLimitElements uint32) RuntimeConfig
+
 	// WithDebugInfoEnabled toggles DWARF based stack traces in the face of
 	// runtime errors. Defaults to true.
 	//
@@ -180,14 +197,16 @@ type RuntimeConfig interface {
 	//
 	// Below defines the shared cache across multiple instances of Runtime:
 	//
+	//	ctx := context.Background()
+	//
 	//	// Creates the new Cache and the runtime configuration with it.
 	//	cache := wazy.NewCompilationCache()
-	//	defer cache.Close()
-	//	config := wazy.NewRuntimeConfig().WithCompilationCache(c)
+	//	defer cache.Close(ctx)
+	//	config := wazy.NewRuntimeConfig().WithCompilationCache(cache)
 	//
 	//	// Creates two runtimes while sharing compilation caches.
-	//	foo := wazy.NewRuntimeWithConfig(context.Background(), config)
-	// 	bar := wazy.NewRuntimeWithConfig(context.Background(), config)
+	//	foo := wazy.NewRuntimeWithConfig(ctx, config)
+	//	bar := wazy.NewRuntimeWithConfig(ctx, config)
 	//
 	// # Cache Key
 	//
@@ -208,36 +227,6 @@ type RuntimeConfig interface {
 	//	c, err := r.CompileModule(ctx, wasm)
 	//	customSections := c.CustomSections()
 	WithCustomSections(bool) RuntimeConfig
-
-	// WithCloseOnContextDone ensures the executions of functions to be terminated under one of the following circumstances:
-	//
-	// 	- context.Context passed to the Call method of api.Function is canceled during execution. (i.e. ctx by context.WithCancel)
-	// 	- context.Context passed to the Call method of api.Function reaches timeout during execution. (i.e. ctx by context.WithTimeout or context.WithDeadline)
-	// 	- Close or CloseWithExitCode of api.Module is explicitly called during execution.
-	//
-	// This is especially useful when one wants to run untrusted Wasm binaries since otherwise, any invocation of
-	// api.Function can potentially block the corresponding Goroutine forever. Moreover, it might block the
-	// entire underlying OS thread which runs the api.Function call. See "Why it's safe to execute runtime-generated
-	// machine codes against async Goroutine preemption" section in RATIONALE.md for detail.
-	//
-	// Upon the termination of the function executions, api.Module is closed.
-	//
-	// Note that this comes with a bit of extra cost when enabled. The reason is that internally this forces
-	// interpreter and compiler runtimes to insert the periodical checks on the conditions above. For that reason,
-	// this is disabled by default.
-	//
-	// In the compiler the check is a decrement of a reserved register and a predicted-not-taken branch at every
-	// function entry and every loop back-edge. When the counter runs out the guest returns to Go, which checks
-	// whether the module has been closed and yields its P so the cancellation watchdog can run -- which is what
-	// makes the option work at all, since compiled code is otherwise not preemptible. The shape that pays most
-	// is a near-empty compute kernel, which has no body to dilute the per-back-edge check against. See
-	// docs/performance.md for measured numbers.
-	//
-	// See examples in context_done_example_test.go for the end-to-end demonstrations.
-	//
-	// When the invocations of api.Function are closed due to this, sys.ExitError is raised to the callers and
-	// the api.Module from which the functions are derived is made closed.
-	WithCloseOnContextDone(bool) RuntimeConfig
 }
 
 // NewRuntimeConfig returns a RuntimeConfig using the compiler if it is supported in this environment,
@@ -259,12 +248,12 @@ type runtimeConfig struct {
 	memory64LimitSet           bool
 	memoryCapacityFromMax      bool
 	memoryCapacityReservePages uint32
+	tableLimitElements         uint32
 	engineKind                 engineKind
 	dwarfDisabled              bool // negative as defaults to enabled
 	newEngine                  newEngine
 	cache                      CompilationCache
 	storeCustomSections        bool
-	ensureTermination          bool
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
@@ -273,6 +262,7 @@ var engineLessConfig = &runtimeConfig{
 	memoryLimitPages:      wasm.MemoryLimitPages,
 	memory64LimitPages:    uint64(wasm.MemoryLimitPages),
 	memoryCapacityFromMax: false,
+	tableLimitElements:    wasm.TableLimitElements,
 	dwarfDisabled:         false,
 }
 
@@ -334,13 +324,6 @@ func (c *runtimeConfig) WithCoreFeatures(features api.CoreFeatures) RuntimeConfi
 	return ret
 }
 
-// WithCloseOnContextDone implements RuntimeConfig.WithCloseOnContextDone
-func (c *runtimeConfig) WithCloseOnContextDone(ensure bool) RuntimeConfig {
-	ret := c.clone()
-	ret.ensureTermination = ensure
-	return ret
-}
-
 // WithMemoryLimitPages implements RuntimeConfig.WithMemoryLimitPages
 func (c *runtimeConfig) WithMemoryLimitPages(memoryLimitPages uint32) RuntimeConfig {
 	ret := c.clone()
@@ -389,6 +372,17 @@ func (c *runtimeConfig) WithMemoryCapacityFromMax(memoryCapacityFromMax bool) Ru
 func (c *runtimeConfig) WithMemoryCapacityReservePages(memoryCapacityReservePages uint32) RuntimeConfig {
 	ret := c.clone()
 	ret.memoryCapacityReservePages = memoryCapacityReservePages
+	return ret
+}
+
+// WithTableLimitElements implements RuntimeConfig.WithTableLimitElements.
+func (c *runtimeConfig) WithTableLimitElements(tableLimitElements uint32) RuntimeConfig {
+	ret := c.clone()
+	// This panics instead of returning an error as it is unlikely.
+	if uint64(tableLimitElements) > wasm.MaxTableLimitElements {
+		panic(fmt.Errorf("tableLimitElements invalid: %d > %d", tableLimitElements, wasm.MaxTableLimitElements))
+	}
+	ret.tableLimitElements = tableLimitElements
 	return ret
 }
 
@@ -497,6 +491,12 @@ func (c *compiledModule) ImportedFunctions() []api.FunctionDefinition {
 // ExportedFunctions implements CompiledModule.ExportedFunctions
 func (c *compiledModule) ExportedFunctions() map[string]api.FunctionDefinition {
 	return c.module.ExportedFunctions()
+}
+
+// WasmModule returns the decoded module, for packages in this tree that need more of it than CompiledModule
+// exposes. Nothing outside the tree can name *wasm.Module, so nothing there can call it.
+func (c *compiledModule) WasmModule() *wasm.Module {
+	return c.module
 }
 
 // ImportedMemories implements CompiledModule.ImportedMemories

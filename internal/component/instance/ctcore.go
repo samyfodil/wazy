@@ -7,6 +7,7 @@ import (
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/binary"
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/internal/wasm"
 	wasmbinary "github.com/samyfodil/wazy/internal/wasm/binary"
 )
@@ -100,7 +101,7 @@ func ctModuleOfDefinition(bin []byte) (*ctModule, error) {
 		return nil, err
 	}
 	fn := func(idx wasm.Index) *ctCoreFunc {
-		if int(idx) >= len(m.TypeSection) || m.TypeSection[idx].CompositeKind != wasm.CompositeKindFunc {
+		if u32.OutOfRange(idx, len(m.TypeSection)) || m.TypeSection[idx].CompositeKind != wasm.CompositeKindFunc {
 			return nil
 		}
 		ft := &m.TypeSection[idx]
@@ -215,7 +216,7 @@ func ctModuleOfType(s ctCoreScope, mt *binary.CoreModuleType) (*ctModule, error)
 			var t ctCoreType
 			switch d.AliasCount {
 			case 0:
-				if int(d.AliasIndex) >= len(types) {
+				if u32.OutOfRange(d.AliasIndex, len(types)) {
 					err = fmt.Errorf("unknown type %d: type index out of bounds", d.AliasIndex)
 				} else {
 					t = types[d.AliasIndex]
@@ -253,7 +254,7 @@ func ctCoreExternOf(d binary.CoreExternType, types []ctCoreType) (ctCoreExtern, 
 	r := &ctBytes{b: d.Bytes}
 	switch d.Kind {
 	case 0x00, 0x04: // func, tag
-		if int(d.TypeIndex) >= len(types) || types[d.TypeIndex].fn == nil {
+		if u32.OutOfRange(d.TypeIndex, len(types)) || types[d.TypeIndex].fn == nil {
 			return x, fmt.Errorf("type index %d is not a function type", d.TypeIndex)
 		}
 		x.fn = types[d.TypeIndex].fn

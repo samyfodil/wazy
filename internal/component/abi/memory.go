@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	bintype "github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // Realloc is the guest memory allocator used when lowering strings/lists into
@@ -498,7 +499,7 @@ func loadVariant(mem []byte, ptr uint32, desc bintype.VariantDesc, resolve Resol
 	}
 	caseIdx := discVal.(uint32)
 
-	if int(caseIdx) >= len(desc.Cases) {
+	if u32.OutOfRange(caseIdx, len(desc.Cases)) {
 		return nil, fmt.Errorf("loadVariant: case index %d out of range [0,%d)", caseIdx, len(desc.Cases))
 	}
 
@@ -593,7 +594,7 @@ func loadEnum(mem []byte, ptr uint32, desc bintype.EnumDesc) (Value, error) {
 	}
 
 	idx := caseIdx.(uint32)
-	if int(idx) >= len(desc.Cases) {
+	if u32.OutOfRange(idx, len(desc.Cases)) {
 		return nil, fmt.Errorf("loadEnum: case index %d out of range [0,%d)", idx, len(desc.Cases))
 	}
 
@@ -624,7 +625,11 @@ func loadOption(mem []byte, ptr uint32, elemType bintype.TypeDesc, resolve Resol
 		return nil, nil
 	case 1:
 		// Some
-		return loadValue(mem, offset, elemType, resolve)
+		x, err := loadValue(mem, offset, elemType, resolve)
+		if _, nested := elemType.(bintype.OptionDesc); nested && err == nil {
+			return Some{x}, nil
+		}
+		return x, err
 	default:
 		return nil, fmt.Errorf("loadOption: invalid discriminant %d", discIdx)
 	}
@@ -1170,7 +1175,7 @@ func storeVariant(mem []byte, ptr uint32, v Value, desc bintype.VariantDesc, ali
 		return mem, fmt.Errorf("storeVariant: expected VariantValue, got %T", v)
 	}
 
-	if int(vv.Disc) >= len(desc.Cases) {
+	if u32.OutOfRange(vv.Disc, len(desc.Cases)) {
 		return mem, fmt.Errorf("storeVariant: case index %d out of range [0,%d)", vv.Disc, len(desc.Cases))
 	}
 
@@ -1276,7 +1281,7 @@ func storeEnum(mem []byte, ptr uint32, v Value, desc bintype.EnumDesc) error {
 		return fmt.Errorf("storeEnum: expected uint32, got %T", v)
 	}
 
-	if int(caseIdx) >= len(desc.Cases) {
+	if u32.OutOfRange(caseIdx, len(desc.Cases)) {
 		return fmt.Errorf("storeEnum: case index %d out of range [0,%d)", caseIdx, len(desc.Cases))
 	}
 
@@ -1299,13 +1304,10 @@ func storeOption(mem []byte, ptr uint32, v Value, elemType bintype.TypeDesc, ali
 	var discIdx uint32
 	var payload Value
 
-	if v == nil {
-		// None
-		discIdx = 0
-	} else {
-		// Some
-		discIdx = 1
-		payload = v
+	if s, ok := v.(Some); ok {
+		discIdx, payload = 1, s.Value
+	} else if v != nil {
+		discIdx, payload = 1, v
 	}
 
 	// Store discriminant (u8)

@@ -10,7 +10,7 @@ import (
 )
 
 func decodeTypeSection(enabledFeatures api.CoreFeatures, buf []byte, offset int, sectionSize uint32) ([]wasm.FunctionType, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}
@@ -18,10 +18,8 @@ func decodeTypeSection(enabledFeatures api.CoreFeatures, buf []byte, offset int,
 
 	// vtArena batches the Params/Results slices of every function type in this section into a few chunks.
 	var vtArena valueTypeArena
-	// Size from the section's own count, clamped to what this section's bytes could possibly encode (the
-	// shortest type entry is 2 bytes), so an inflated count can't drive a huge allocation. Both the count and
-	// the size come from the untrusted module, hence the clamp against the bytes actually present too.
-	result := make([]wasm.FunctionType, 0, min(uint64(vs), uint64(arenaSize(sectionSize, len(buf)-offset))/2))
+	// The shortest type entry is 2 bytes, so the section's own size bounds the count more tightly still.
+	result := make([]wasm.FunctionType, 0, min(vs, sectionSize/2))
 	for i := uint32(0); i < vs; i++ {
 		// Peek at the leading byte to check for rec group (0x4e, GC proposal).
 		b, o, err := readByte(buf, offset)
@@ -119,7 +117,7 @@ func decodeImportSection(
 	funcCount, globalCount, memoryCount, tableCount, tagCount wasm.Index,
 	newOffset int, err error,
 ) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		err = fmt.Errorf("get size of vector: %w", err)
 		return nil, nil, 0, 0, 0, 0, 0, offset, err
@@ -179,7 +177,7 @@ func decodeImportSection(
 }
 
 func decodeFunctionSection(buf []byte, offset int) ([]uint32, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}
@@ -198,9 +196,9 @@ func decodeFunctionSection(buf []byte, offset int) ([]uint32, int, error) {
 }
 
 func decodeTableSection(buf []byte, offset int, enabledFeatures api.CoreFeatures) ([]wasm.Table, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
-		return nil, offset, fmt.Errorf("error reading size")
+		return nil, offset, fmt.Errorf("error reading size: %w", err)
 	}
 	offset += int(n)
 	if vs > 1 {
@@ -302,7 +300,7 @@ func decodeMemorySection(
 }
 
 func decodeGlobalSection(buf []byte, offset int, enabledFeatures api.CoreFeatures) ([]wasm.Global, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}
@@ -320,7 +318,7 @@ func decodeGlobalSection(buf []byte, offset int, enabledFeatures api.CoreFeature
 }
 
 func decodeExportSection(buf []byte, offset int, arena *stringArena) ([]wasm.Export, map[string]*wasm.Export, int, error) {
-	vs, n, sizeErr := leb128.LoadUint32(buf[offset:])
+	vs, n, sizeErr := leb128.LoadVecSize(buf[offset:])
 	if sizeErr != nil {
 		return nil, nil, offset, fmt.Errorf("get size of vector: %v", sizeErr)
 	}
@@ -354,7 +352,7 @@ func decodeStartSection(buf []byte, offset int) (*wasm.Index, int, error) {
 }
 
 func decodeElementSection(buf []byte, offset int, enabledFeatures api.CoreFeatures) ([]wasm.ElementSegment, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}
@@ -371,9 +369,11 @@ func decodeElementSection(buf []byte, offset int, enabledFeatures api.CoreFeatur
 	return result, offset, nil
 }
 
-func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatures api.CoreFeatures) ([]wasm.Code, int, error) {
+// decodeCodeSection decodes the code section. branchHints is the branch hint section, if one came before it;
+// importFunctionCount is how many function indices the imports take, before the first body.
+func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatures api.CoreFeatures, importFunctionCount uint32, branchHints []funcBranchHints) ([]wasm.Code, int, error) {
 	codeSectionStart := offset
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}
@@ -392,7 +392,16 @@ func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatur
 	// (see decodeCode) allocates at most once per section rather than re-deriving groups per function.
 	var locals []localsGroup
 	for i := uint32(0); i < vs; i++ {
-		offset, arenaOff, err = decodeCode(buf, offset, codeSectionStart, arena, arenaOff, &localTypes, &locals, enabledFeatures, &result[i])
+		// Both run in increasing function index order, so one pass pairs them.
+		var hints []wasm.BranchHint
+		funcIndex := uint64(importFunctionCount) + uint64(i)
+		for len(branchHints) > 0 && uint64(branchHints[0].funcIndex) < funcIndex {
+			branchHints = branchHints[1:]
+		}
+		if len(branchHints) > 0 && uint64(branchHints[0].funcIndex) == funcIndex {
+			hints = branchHints[0].hints
+		}
+		offset, arenaOff, err = decodeCode(buf, offset, codeSectionStart, arena, arenaOff, &localTypes, &locals, enabledFeatures, hints, &result[i])
 		if err != nil {
 			return nil, offset, fmt.Errorf("read %d-th code segment: %v", i, err)
 		}
@@ -401,7 +410,7 @@ func decodeCodeSection(buf []byte, offset int, sectionSize uint32, enabledFeatur
 }
 
 func decodeDataSection(buf []byte, offset int, sectionSize uint32, enabledFeatures api.CoreFeatures) ([]wasm.DataSegment, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}
@@ -422,7 +431,7 @@ func decodeDataSection(buf []byte, offset int, sectionSize uint32, enabledFeatur
 }
 
 func decodeTagSection(buf []byte, offset int) ([]wasm.Tag, int, error) {
-	vs, n, err := leb128.LoadUint32(buf[offset:])
+	vs, n, err := leb128.LoadVecSize(buf[offset:])
 	if err != nil {
 		return nil, offset, fmt.Errorf("get size of vector: %w", err)
 	}

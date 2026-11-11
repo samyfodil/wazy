@@ -73,6 +73,19 @@ func (r *ReadFS) Utimens(path string, atim, mtim int64) sys.Errno {
 // compile-time check to ensure readFile implements api.File.
 var _ sys.File = (*readFile)(nil)
 
+// DirFS implements DirHandle, read-only like the directory itself.
+func (r *readFile) DirFS() (sys.FS, sys.Errno) {
+	h, ok := r.File.(DirHandle)
+	if !ok {
+		return nil, sys.ENOSYS
+	}
+	fs, errno := h.DirFS()
+	if errno != 0 {
+		return nil, errno
+	}
+	return &ReadFS{FS: fs}, 0
+}
+
 type readFile struct {
 	sys.File
 }

@@ -37,6 +37,97 @@ world app {
 That is [`examples/custom-wit`](../../examples/custom-wit/), walked through end to end: it covers
 resources, a `borrow`, a `variant` and a `result<list<string>, variant>`.
 
+## Generating the bindings
+
+`wazy-bindgen` reads the world and writes the Go for it: a type for each record, variant, enum,
+flags and resource, a Go interface for each import, and a typed wrapper for the exports.
+
+```go
+//go:generate go run github.com/samyfodil/wazy/cmd/wazy-bindgen -wit store.wit -world app -package store -o bindings.go
+```
+
+A host running a component it did not build need not have its WIT: `-wasm` reads it from the compiled
+component instead (`wit.FromComponent`, the WIT `wasm-tools component wit` prints), whose world is
+`root`:
+
+```sh
+wazy-bindgen -wasm plugin.wasm -package plugin -o plugin.go
+```
+
+Two components that import the same interface can share its bindings, and the code written
+against them. `-out` writes a tree of packages instead of one file: one per imported interface, at
+`<namespace>/<package>/<interface>` (with the version, when there is one), and one for the world.
+An interface's package holds nothing that depends on the world, so every component generated into the
+same tree uses the same one:
+
+```sh
+wazy-bindgen -wasm a.wasm -package a -out bindings
+wazy-bindgen -wasm b.wasm -package b -out bindings
+```
+
+`-with` uses such a package from elsewhere, in either form, for an interface someone else publishes
+bindings of: `-with wasi:http/types=example.com/wasihttp/wasi/http/v0.2.0/types`. Only imported
+interfaces are shared; an exported one is the component's own, and stays in its world's package.
+
+The host then implements the import in Go types, and calls the exports the same way:
+
+```go
+type kv struct{ buckets map[store.Bucket]map[string][]byte }
+
+func (s *kv) NewBucket(ctx context.Context, name string) (store.Bucket, error)        { ... }
+func (s *kv) BucketPut(ctx context.Context, b store.Bucket, key string, v []byte) error { ... }
+func (s *kv) BucketGet(ctx context.Context, b store.Bucket, key string) (*[]byte, error) { ... }
+func (s *kv) DropBucket(ctx context.Context, b store.Bucket) error                      { ... }
+
+func (s *kv) ListKeys(ctx context.Context, b store.Bucket) (witgo.Result[[]string, store.Error], error) {
+	m, ok := s.buckets[b]
+	if !ok {
+		return witgo.Err[[]string](store.ErrorNoSuchBucket()), nil
+	}
+	// ...
+	return witgo.Ok[[]string, store.Error](keys), nil
+}
+
+app, err := store.Instantiate(ctx, r, wasm, store.Imports{Kv: &kv{}})
+out, err := app.Run(ctx) // a string
+```
+
+An `option<T>` is a `*T`, a `result<T, E>` a `witgo.Result[T, E]`, a tuple a `witgo.Tuple2`
+and so on (a longer one, a struct of the bindings' own), a `list<u8>` a `[]byte`. A variant is a
+struct whose `Case` says which case it holds, with a constructor and an accessor for each.
+
+A resource the host implements is a `uint32` type of its own, the rep the host hands back from its
+constructor and gets back as `self`; its `Drop` method runs when the guest drops the last handle. A
+resource the component implements is a Go type holding its handle, with a method for each of its
+methods and a `Drop` the host calls when done with it.
+
+An async import's method takes a `witgo.Async[T]` and may return before the call does: `ret.Return(v)`
+completes it, then or later. An async export has two methods: `Fetch` calls it and waits, and
+`FetchAsync` returns a `witgo.Pending[T]` once the call first waits, for a host that completes the
+imports it is waiting on from another goroutine; `Await` gives the result.
+
+A `stream<T>` is a `*witgo.StreamReader[T]` and a `future<T>` a `*witgo.FutureReader[T]`, whichever
+way they cross. The host makes one with the world's `NewStreamT` or `NewFutureT` method, keeping the
+writer and passing the reader, or reads one the guest passed. Reads and writes complete through a
+callback, which runs on the instance's scheduler and may read, write or close in turn:
+
+```go
+w, r, err := app.NewStreamU8()
+w.WriteAll(data, func(int, component.CopyResult) { w.Close() })
+n, err := app.API().SumBytes(ctx, r)
+```
+
+An export may return before it has finished writing a stream it returned: its call returns at
+`task.return`, and the host's reads drive the rest. An `error-context` is a `*component.ErrorContext`.
+All three may sit anywhere in a value: a record field, a list, a `result` arm.
+
+WASI imports are left out (`-skip wasi:` by default), since `imports/wasip2` implements them: pass
+`wasip2.WithWASI(...)` to `Instantiate` after the imports. A stream or future whose elements hold a
+resource handle, a stream, a future or an error context is not supported by the engine yet;
+`wazy-bindgen` says so and names the function rather than guessing.
+
+The rest of this page is what those bindings do, by hand, with the `component` API underneath.
+
 ## Implementing the host half
 
 `list-keys` returns `result<list<string>, error>` — both arms are composites, so neither can be

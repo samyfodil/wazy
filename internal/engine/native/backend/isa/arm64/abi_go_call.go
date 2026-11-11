@@ -166,15 +166,6 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 	// After the call, we need to restore the callee saved registers.
 	cur = m.restoreRegistersInExecutionContext(cur, calleeSavedRegistersSorted)
 
-	if exitCode == nativeapi.ExitCodeCheckModuleExitCode {
-		// This is the one exit that is reached because the fuel ran out, so it is the
-		// one that refills it -- overwriting the exhausted value the restore above
-		// just put back. Every other exit wants that value preserved exactly:
-		// refilling on a host call would let a guest that calls one inside a loop
-		// spend forever without ever reaching a check.
-		cur = m.lowerConstantI64AndInsert(cur, fuelVReg, nativeapi.TerminationFuel)
-	}
-
 	// Get the pointer to the arg[0]/ret[0]: We need to skip `frame_size + sliceSize`.
 	if len(abi.Rets) > 0 {
 		cur = m.addsAddOrSubStackPointer(cur, arg0ret0AddrReg, frameInfoSize, true)
@@ -240,6 +231,116 @@ func (m *machine) CompileGoFunctionTrampoline(exitCode nativeapi.ExitCode, sig *
 
 	m.encode(m.rootInstr)
 	return m.compiler.Buf()
+}
+
+// yieldFrameVRegs are the registers the yield trampoline keeps in its own frame:
+// those a call clobbers but lr, which the caller keeps in the execution context
+// (see yield). The yieldFrameInts integer ones take 8 bytes each from the bottom of
+// the frame, and the vectors 16 each from yieldFrameVecs.
+var yieldFrameVRegs = []regalloc.VReg{
+	x0VReg, x1VReg, x2VReg, x3VReg, x4VReg, x5VReg, x6VReg, x7VReg, x8VReg,
+	x9VReg, x10VReg, x11VReg, x12VReg, x13VReg, x14VReg, x15VReg, x16VReg, x17VReg, x29VReg,
+	v0VReg, v1VReg, v2VReg, v3VReg, v4VReg, v5VReg, v6VReg, v7VReg, v8VReg,
+	v9VReg, v10VReg, v11VReg, v12VReg, v13VReg, v14VReg, v15VReg, v16VReg, v17VReg,
+}
+
+const (
+	yieldFrameInts = 19
+	yieldFrameVecs = (yieldFrameInts*8 + 15) &^ 15
+	yieldFrameSize = yieldFrameVecs + 18*16
+)
+
+// CompileYieldTrampoline implements backend.Machine. It is entered from a yield
+// instruction, with the execution context in tmp, the return address in lr and
+// lr's own value in yieldSavedLR, and any other register may hold a live value.
+//
+// Its frame is a Go-call trampoline's, so unwinding walks it like any other, but
+// one whose frame_size is the yieldFrameSize bytes that hold yieldFrameVRegs.
+// Below the caller it takes those, the 16 bytes of the return address and
+// size_of_arg_ret, and 16 of frame_size and slice size: 480 in all, within the
+// margin every call site keeps (see backend.StackBoundsCheckMarginBytes). It
+// returns through tmp, since lr goes back to its own value.
+func (m *machine) CompileYieldTrampoline() []byte {
+	cur := m.allocateInstr()
+	cur.asNop0()
+	m.rootInstr = cur
+
+	stp := m.allocateInstr()
+	stp.asStorePair64(lrVReg, xzrVReg, addressModePreOrPostIndex(m, spVReg, -16, true))
+	cur = linkInstr(cur, stp)
+	cur = m.addsAddOrSubStackPointer(cur, spVReg, yieldFrameSize, false)
+	cur = m.saveOrRestoreYieldFrame(cur, true)
+	cur = linkInstr(cur, m.allocateInstr().asMove64(x0VReg, tmpRegVReg))
+	cur = m.saveRegistersInExecutionContext(cur, calleeSavedRegistersSorted)
+	cur = m.lowerConstantI64AndInsert(cur, tmpRegVReg, yieldFrameSize)
+	stp = m.allocateInstr()
+	stp.asStorePair64(tmpRegVReg, xzrVReg, addressModePreOrPostIndex(m, spVReg, -16, true))
+	cur = linkInstr(cur, stp)
+
+	cur = m.setExitCode(cur, x0VReg, nativeapi.ExitCodeCheckModuleExitCode)
+	cur = m.saveCurrentStackPointer(cur, x0VReg)
+	cur = m.storeReturnAddressAndExit(cur)
+
+	// Go comes back with the execution context in x0, whose own value is restored last.
+	cur = m.restoreRegistersInExecutionContext(cur, calleeSavedRegistersSorted)
+	cur = m.addsAddOrSubStackPointer(cur, spVReg, 16, true)
+	ldr := m.allocateInstr()
+	ldr.asULoad(tmpRegVReg, m.yieldAmode(spVReg, yieldFrameSize), 64)
+	cur = linkInstr(cur, ldr)
+	ldr = m.allocateInstr()
+	ldr.asULoad(lrVReg, m.yieldAmode(x0VReg, nativeapi.ExecutionContextOffsetYieldSavedLR.I64()), 64)
+	cur = linkInstr(cur, ldr)
+	cur = m.saveOrRestoreYieldFrame(cur, false)
+	cur = m.addsAddOrSubStackPointer(cur, spVReg, yieldFrameSize+16, true)
+
+	br := m.allocateInstr()
+	br.asTailCallIndirect(tmpRegVReg, nil)
+	linkInstr(cur, br)
+
+	m.encode(m.rootInstr)
+	return m.compiler.Buf()
+}
+
+// saveOrRestoreYieldFrame saves or restores yieldFrameVRegs, restoring x0 last.
+func (m *machine) saveOrRestoreYieldFrame(cur *instruction, save bool) *instruction {
+	slot := func(i int) int64 {
+		if i < yieldFrameInts {
+			return int64(i) * 8
+		}
+		return yieldFrameVecs + int64(i-yieldFrameInts)*16
+	}
+	for i := range yieldFrameVRegs {
+		if !save && i == 0 {
+			continue
+		}
+		cur = m.saveOrRestoreYieldRegister(cur, yieldFrameVRegs[i], slot(i), save)
+	}
+	if !save {
+		cur = m.saveOrRestoreYieldRegister(cur, x0VReg, 0, false)
+	}
+	return cur
+}
+
+func (m *machine) saveOrRestoreYieldRegister(cur *instruction, v regalloc.VReg, offset int64, save bool) *instruction {
+	mode := m.yieldAmode(spVReg, offset)
+	instr := m.allocateInstr()
+	switch {
+	case v.RegType() == regalloc.RegTypeInt && save:
+		instr.asStore(operandNR(v), mode, 64)
+	case v.RegType() == regalloc.RegTypeInt:
+		instr.asULoad(v, mode, 64)
+	case save:
+		instr.asStore(operandNR(v), mode, 128)
+	default:
+		instr.asFpuLoad(v, mode, 128)
+	}
+	return linkInstr(cur, instr)
+}
+
+func (m *machine) yieldAmode(base regalloc.VReg, offset int64) *addressMode {
+	mode := m.amodePool.Allocate()
+	*mode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: base, imm: offset}
+	return mode
 }
 
 // registerSaveRestoreSlot describes one step of saveRegistersInExecutionContext /

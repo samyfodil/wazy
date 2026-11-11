@@ -84,11 +84,12 @@ func (ac *AsyncCall) Resolve(results []abi.Value) {
 	if ac.resolved {
 		panic(fmt.Errorf("component/instance: async import: Resolve called twice"))
 	}
-	if !ac.inCall.Load() && !ac.in.sched.pumping {
+	if !ac.inCall.Load() && !ac.in.sched.pumping && ac.in.inHostCall == 0 {
 		// Structural single-threadedness guard, no goroutine-ID hacks: the
 		// only legal Resolve call sites are inside the import call itself,
-		// or inside a scheduler thunk -- both provably on the driving
-		// goroutine.
+		// inside a scheduler thunk, or inside another host call (an import,
+		// or a stream/future completion callback) -- all provably on the
+		// driving goroutine.
 		panic(fmt.Errorf("component/instance: async import: Resolve called outside the instance scheduler; external completion requires CallAsync (not yet implemented)"))
 	}
 	ac.resolved = true
@@ -132,7 +133,7 @@ func (ac *AsyncCall) ResolveCancelled() {
 	if ac.resolved {
 		panic(fmt.Errorf("component/instance: async import: Resolve/ResolveCancelled called twice"))
 	}
-	if !ac.inCall.Load() && !ac.in.sched.pumping {
+	if !ac.inCall.Load() && !ac.in.sched.pumping && ac.in.inHostCall == 0 {
 		panic(fmt.Errorf("component/instance: async import: ResolveCancelled called outside the instance scheduler; external completion requires CallAsync (not yet implemented)"))
 	}
 	if !ac.st.cancellationRequested {
@@ -196,6 +197,7 @@ type asyncResolveCfg struct {
 	resultType      binary.TypeDesc
 	resultStore     abi.StoreStep
 	resultUsesMem   bool
+	resultNest      *asyncNest
 	resources       *handleTable
 	reallocOverride api.Function
 }
@@ -226,6 +228,9 @@ func (st *subtask) applyResolve(vals []abi.Value) error {
 		return fmt.Errorf("async import %q %q: result requires linear memory (string/list), but the calling module has none", cfg.iface, cfg.funcName)
 	}
 	resultVal, herr := allocHandleResult(cfg.resources, cfg.resultType, vals[0])
+	if herr == nil && cfg.resultNest != nil {
+		resultVal, herr = cfg.resultNest.lower(cfg.resources, resultVal)
+	}
 	if herr != nil {
 		return fmt.Errorf("async import %q %q: result: %w", cfg.iface, cfg.funcName, herr)
 	}
@@ -268,6 +273,15 @@ type AsyncHostFunc func(ctx context.Context, args []abi.Value, call *AsyncCall) 
 // WithImport-registered fn (or a sync-lowered import to a
 // WithAsyncImport-registered fn) fails loud at bind time -- see graph.go's
 // computeCanonHostFunc.
+// WithAsyncImportCustom is WithAsyncImport with a caller-built FuncDesc and
+// Resolver, as WithImportCustom is WithImport's: the only form that can
+// express a nested composite.
+func WithAsyncImportCustom(iface, name string, fn AsyncHostFunc, fd binary.FuncDesc, resolve abi.Resolver) Option {
+	return func(c *config) {
+		c.imports[mkImportKey(iface, name)] = &hostImport{asyncFn: fn, customFD: &fd, customResolve: resolve}
+	}
+}
+
 func WithAsyncImport(iface, name string, fn AsyncHostFunc, params, results []binary.TypeDesc) Option {
 	return func(c *config) {
 		c.imports[mkImportKey(iface, name)] = &hostImport{asyncFn: fn, params: params, results: results}
@@ -355,7 +369,7 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	// see asyncResolveCfg's doc and subtask.applyResolve (this file).
 	cfg := &asyncResolveCfg{
 		iface: iface, funcName: funcName,
-		resultCount: resultCount, resultType: resultType, resultStore: resultPlan.store, resultUsesMem: resultUsesMem,
+		resultCount: resultCount, resultType: resultType, resultStore: resultPlan.store, resultUsesMem: resultUsesMem, resultNest: resultPlan.nest,
 		resources: resources, reallocOverride: reallocOverride,
 	}
 
@@ -567,7 +581,10 @@ func liftAsyncHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc bin
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
+		if err == nil && pp.nest != nil {
+			v, err = pp.nest.lift(in, resources, v)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -616,7 +633,10 @@ func liftAsyncHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.R
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
+		if err == nil && pp.nest != nil {
+			v, err = pp.nest.lift(in, resources, v)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}

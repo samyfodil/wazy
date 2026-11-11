@@ -20,6 +20,7 @@ WebAssembly runtime for Go.
 - `experimental/` — opt-in, unstable API.
 - `imports/wasi_snapshot_preview1/` — WASI preview1 host module.
 - `component/` — the public Component Model API (`Instantiate`, host imports, value shapes).
+- `component/wit/` — WIT parsing; `component/bindgen/` + `cmd/wazy-bindgen` generate Go bindings for a world, against the `component/witgo` runtime types.
 - `internal/component/` — the component implementation: `binary/` decoding, `abi/` canonical lift/lower, `instance/` graph instantiation and resources.
 - `imports/wasip2/` — WASI 0.2 host implementation, written against the public `component` API.
 - `internal/engine/native/` — the optimizing compiler (amd64 + arm64 JIT).
@@ -85,9 +86,8 @@ Use the Makefile; it encodes the real invocations.
   `GOARCH=arm64 CGO_ENABLED=0 go test ./internal/engine/native/...` (needs qemu-user).
 - **wasip1 FS semantics:** the stdlib suite
   (`internal/integration_test/stdlibs/bench_test.go`) runs Go's own stdlib tests
-  compiled to wasip1. A few fail on inherited sysfs limitations (path-based
-  resolution) and are listed in `skip`. Add to that list, with a comment, when a
-  failure is a known wasip1 gap — not a regression.
+  compiled to wasip1, all of them but two on Windows that ask for what a Windows
+  host cannot do. A new failure there is a regression to fix, not an entry to add.
 
 ## Commits & PRs
 

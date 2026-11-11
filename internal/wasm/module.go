@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/internal/wasmdebug"
 )
 
@@ -29,6 +30,27 @@ type Module struct {
 	FunctionMayThrow []bool
 	// mayThrow collects FunctionMayThrow's inputs while the functions are validated.
 	mayThrow *mayThrowBuilder
+
+	// FunctionCallEffects is indexed by local function index and holds what a call to the function may
+	// change that its caller has cached, so the native compiler reloads only that after the call. See
+	// callEffectsBuilder.
+	FunctionCallEffects []CallEffects
+	// callEffects collects FunctionCallEffects' inputs while the functions are validated.
+	callEffects *callEffectsBuilder
+
+	// FunctionNeedsEntryCheck is indexed by local function index and true for a function the native
+	// compiler checks for preemption on entry. See entryCheckBuilder.
+	FunctionNeedsEntryCheck []bool
+	// FunctionCallWork is indexed by local function index and holds how much wasm code, in bytes, a call
+	// to the function runs at most, when that is sure to be short, and zero otherwise. See
+	// entryCheckBuilder.
+	FunctionCallWork []uint32
+	// ForeignFuncRefs is true when another module's function may reach this module's indirect calls,
+	// which then check for preemption first, as calls to imports do. See Module.foreignFuncRefs.
+	ForeignFuncRefs bool
+	// entryChecks collects FunctionNeedsEntryCheck's and FunctionCallWork's inputs while the functions
+	// are validated.
+	entryChecks *entryCheckBuilder
 
 	// TypeSection contains the unique FunctionType of functions imported or defined in this module.
 	//
@@ -224,7 +246,7 @@ const (
 
 // AssignModuleID calculates a sha256 checksum on `wasm` and other args, and set Module.ID to the result.
 // See the doc on Module.ID on what it's used for.
-func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener, withEnsureTermination bool) {
+func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener) {
 	h := sha256.New()
 	h.Write(wasm)
 	// Use the pre-allocated space backed by m.ID below.
@@ -235,9 +257,6 @@ func (m *Module) AssignModuleID(wasm []byte, listeners []api.FunctionListener, w
 		m.ID[4] = boolToByte(l != nil)
 		h.Write(m.ID[:5])
 	}
-	// Write the flag of ensureTermination to the checksum.
-	m.ID[0] = boolToByte(withEnsureTermination)
-	h.Write(m.ID[:1])
 	// Get checksum by passing the slice underlying m.ID.
 	h.Sum(m.ID[:0])
 }
@@ -496,12 +515,11 @@ func (m *Module) validateGlobals(globals []GlobalType, numFuncts, maxGlobals uin
 	}
 
 	// Up to 2.0 a global's initializer could only name an imported global; from 3.0 it may name any global
-	// declared before it. wazy gates that on extended-const, which is where the rest of the same relaxation
-	// lives. See resolveConstExprGlobalType.
-	extended := enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst)
+	// declared before it. See resolveConstExprGlobalType.
+	defined := readsDefinedGlobals(enabledFeatures)
 	for i := range m.GlobalSection {
 		visible := globals[:m.ImportGlobalCount]
-		if extended {
+		if defined {
 			visible = globals[:m.ImportGlobalCount+Index(i)]
 		}
 		g := &m.GlobalSection[i]
@@ -542,6 +560,11 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 	if enabledFeatures.IsEnabled(api.CoreFeatureExceptionHandling) {
 		m.mayThrow = &mayThrowBuilder{direct: make([]bool, len(functions)), imports: m.ImportFunctionCount}
 	}
+	m.FunctionNeedsEntryCheck, m.FunctionCallWork = nil, nil
+	m.FunctionCallEffects = nil
+	m.callEffects = newCallEffectsBuilder(m, uint32(len(functions)-len(m.FunctionSection)))
+	m.ForeignFuncRefs = m.foreignFuncRefs(declaredFuncIndexes, functions, globals, tags)
+	m.entryChecks = newEntryCheckBuilder(m, uint32(len(functions)-len(m.FunctionSection)))
 	for idx, typeIndex := range m.FunctionSection {
 		if typeIndex >= typeCount {
 			return fmt.Errorf("invalid %s: type section index %d out of range", m.funcDesc(SectionIDFunction, Index(idx)), typeIndex)
@@ -549,13 +572,18 @@ func (m *Module) validateFunctions(enabledFeatures api.CoreFeatures, functions [
 		c := &m.CodeSection[idx]
 		if c.GoFunc != nil {
 			m.mayThrow.throws(Index(idx))
+			m.callEffects.mark(Index(idx), callEffectsAll)
 			continue
 		}
 		if err = m.validateFunction(vs, enabledFeatures, Index(idx), functions, globals, memories, tables, tags, declaredFuncIndexes, br); err != nil {
-			m.mayThrow = nil
+			m.mayThrow, m.entryChecks, m.callEffects = nil, nil, nil
 			return fmt.Errorf("invalid %s: %w", m.funcDesc(SectionIDFunction, Index(idx)), err)
 		}
 	}
+	m.FunctionNeedsEntryCheck, m.FunctionCallWork = m.entryChecks.solve(declaredFuncIndexes)
+	m.entryChecks = nil
+	m.FunctionCallEffects = m.callEffects.solve()
+	m.callEffects = nil
 	if m.mayThrow != nil {
 		m.FunctionMayThrow = m.mayThrow.solve()
 		m.mayThrow = nil
@@ -693,7 +721,11 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 
 	// Constant expression can only reference imported globals.
 	// https://github.com/WebAssembly/spec/blob/5900d839f38641989a9d8df2df4aee0513365d39/test/core/data.wast#L84-L91
-	importedGlobals := globals[:m.ImportGlobalCount]
+	// An offset may name any global from 3.0 on, not just an imported one; see validateGlobals.
+	visible := globals[:m.ImportGlobalCount]
+	if readsDefinedGlobals(enabledFeatures) {
+		visible = globals
+	}
 	for i := range m.DataSection {
 		d := &m.DataSection[i]
 		if !d.IsPassive() {
@@ -702,11 +734,6 @@ func (m *Module) validateMemory(memories []Memory, globals []GlobalType, enabled
 			}
 			// An active data segment's offset is given in the index type of the
 			// memory it initializes: i64 for a 64-bit memory.
-			// An offset may name any global from 3.0 on, not just an imported one; see validateGlobals.
-			visible := importedGlobals
-			if enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
-				visible = globals
-			}
 			if err := m.validateConstExpression(visible, 0, &d.OffsetExpression, memories[d.MemoryIndex].IndexType()); err != nil {
 				return fmt.Errorf("calculate offset: %w", err)
 			}
@@ -723,7 +750,7 @@ func (m *Module) validateImports(enabledFeatures api.CoreFeatures) error {
 		}
 		switch imp.Type {
 		case ExternTypeFunc:
-			if indexOutOfRange(imp.DescFunc, len(m.TypeSection)) {
+			if u32.OutOfRange(imp.DescFunc, len(m.TypeSection)) {
 				return fmt.Errorf("invalid import[%q.%q] function: type index out of range", imp.Module, imp.Name)
 			}
 		case ExternTypeGlobal:
@@ -734,7 +761,7 @@ func (m *Module) validateImports(enabledFeatures api.CoreFeatures) error {
 				return fmt.Errorf("invalid import[%q.%q] global: %w", imp.Module, imp.Name, err)
 			}
 		case ExternTypeTag:
-			if indexOutOfRange(imp.DescTag, len(m.TypeSection)) {
+			if u32.OutOfRange(imp.DescTag, len(m.TypeSection)) {
 				return fmt.Errorf("invalid import[%q.%q] tag: type index out of range", imp.Module, imp.Name)
 			}
 			if len(m.TypeSection[imp.DescTag].Results) > 0 {
@@ -788,6 +815,9 @@ func (m *Module) validateConstExpression(globals []GlobalType, numFuncs uint32, 
 		func(globalIndex Index) (ValueType, uint64, uint64, error) {
 			if uint32(len(globals)) <= globalIndex {
 				return 0, 0, 0, fmt.Errorf("global index out of range")
+			}
+			if globals[globalIndex].Mutable {
+				return 0, 0, 0, errMutableConstExprGlobal(globalIndex)
 			}
 			return globals[globalIndex].ValType, 0, 0, nil
 		},
@@ -852,6 +882,16 @@ func (m *ModuleInstance) buildGlobals(module *Module, funcRefResolver func(funcI
 	}
 }
 
+// readsDefinedGlobals reports whether a constant expression may read a module-defined global. Up to 2.0
+// it may read only an imported one; 3.0 lifted that as part of GC, not extended-const.
+func readsDefinedGlobals(enabledFeatures api.CoreFeatures) bool {
+	return enabledFeatures.IsEnabled(api.CoreFeatureGC)
+}
+
+func errMutableConstExprGlobal(idx Index) error {
+	return fmt.Errorf("constant expression required: global.get %d of a mutable global", idx)
+}
+
 func (m *Module) resolveConstExprGlobalType(enabledFeatures api.CoreFeatures, sectionID SectionID, sectionIdx Index, idx Index) (ValueType, error) {
 	if idx < m.ImportGlobalCount {
 		// Imports are not exclusively globals. This is the current global index in the loop.
@@ -862,6 +902,9 @@ func (m *Module) resolveConstExprGlobalType(enabledFeatures api.CoreFeatures, se
 				continue
 			}
 			if idx == cur {
+				if imp.DescGlobal.Mutable {
+					return 0, errMutableConstExprGlobal(idx)
+				}
 				return imp.DescGlobal.ValType, nil
 			}
 			cur++
@@ -871,27 +914,26 @@ func (m *Module) resolveConstExprGlobalType(enabledFeatures api.CoreFeatures, se
 		return 0, fmt.Errorf("index %d not found in imported globals", idx)
 	}
 
-	// NOTE: in the <= 2.0 spec, global.get in a constant expression can only refer to imported globals.
-	// In version 3.0, this restriction is removed, and all globals prior to the current one are allowed.
-	// To avoid implementing too many flags, this relaxation is gated behind the CoreFeaturesExtendedConst flag,
-	// which includes other related extensions in constant expressions.
-	if !enabledFeatures.IsEnabled(api.CoreFeatureExtendedConst) {
+	if !readsDefinedGlobals(enabledFeatures) {
 		return 0, fmt.Errorf("%s[%d] (global.get %d): out of range of imported globals", SectionIDName(sectionID), sectionIdx, idx)
 	}
 
-	idx -= uint32(m.ImportGlobalCount)
+	defined := idx - m.ImportGlobalCount
 
-	// Check that the given global has been initialized.
-	if sectionIdx == Index(SectionIDGlobal) && idx >= sectionIdx {
+	// A global's initializer sees only the globals declared before it.
+	if sectionID == SectionIDGlobal && defined >= sectionIdx {
 		return 0, fmt.Errorf("%s[%d] global %d out of range of initialized globals", SectionIDName(sectionID), sectionIdx, idx)
 	}
 
-	// Bounds check:
-	if idx >= uint32(len(m.GlobalSection)) {
+	if defined >= uint32(len(m.GlobalSection)) {
 		return 0, fmt.Errorf("%s[%d] (global.get %d): out of range of initialized globals", SectionIDName(sectionID), sectionIdx, idx)
 	}
 
-	return m.GlobalSection[idx].Type.ValType, nil
+	g := &m.GlobalSection[defined].Type
+	if g.Mutable {
+		return 0, errMutableConstExprGlobal(idx)
+	}
+	return g.ValType, nil
 }
 
 func paramNames(localNames IndirectNameMap, funcIdx uint32, paramLen int) []string {
@@ -964,19 +1006,6 @@ func (m *ModuleInstance) buildMemory(module *Module, allocator api.MemoryAllocat
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#binary-index
 type Index = uint32
-
-// indexOutOfRange reports whether an index read out of a module falls outside a
-// slice of the given length.
-//
-// Use it in preference to "int(index) >= len(s)". An int is 32 bits wide on
-// GOARCH=386, arm and wasm, where int(index) of anything above math.MaxInt32 is
-// negative -- so the naive form accepts the index and the very next line panics.
-// Every index here is LEB128-decoded straight from the module body, so a
-// malformed module reaches it. Widening both sides to uint64 is exact on every
-// platform, and inlines away.
-func indexOutOfRange(index uint32, length int) bool {
-	return uint64(index) >= uint64(length)
-}
 
 // FunctionType is a possibly empty function signature.
 //
@@ -1354,6 +1383,20 @@ type Code struct {
 	// BodyOffsetInCodeSection is the offset of the beginning of the body in the code section.
 	// This is used for DWARF based stack trace where a program counter represents an offset in code section.
 	BodyOffsetInCodeSection uint64
+
+	// BranchHints are what the module's branch hint section says about this function's if and br_if
+	// instructions, in increasing Offset order.
+	BranchHints []BranchHint
+}
+
+// BranchHint is an entry of the branch hint section, metadata.code.branch_hint: the if or br_if at Offset in
+// Code.Body is likely to branch, or likely not to. Producers that know their hot paths emit it, and it shapes
+// only where code is placed, never what it does.
+//
+// See https://github.com/WebAssembly/branch-hinting/blob/main/proposals/branch-hinting/Overview.md
+type BranchHint struct {
+	Offset uint32
+	Likely bool
 }
 
 type DataSegment struct {

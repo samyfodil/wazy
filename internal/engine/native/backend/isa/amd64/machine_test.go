@@ -303,6 +303,30 @@ L2:
 `, m.Format())
 }
 
+// A yield, keeping 32 bytes below the frame, leaves a function that makes no call
+// a leaf, whose stack check can go; in one with the reserved context slot, it
+// reloads the execution context from there.
+func TestMachine_lowerYield(t *testing.T) {
+	ctx, b, m := newSetupWithMockContext()
+	p := b.CurrentBlock().AddParam(b, ssa.TypeI64)
+	ctx.vRegMap[p] = raxVReg
+	m.insert(m.allocateNop()) // as a block opens with its label
+	m.lowerYield(b.AllocateInstruction().AsYield(p).Insert(b))
+	m.FlushPendingInstructions()
+	m.rootInstr = m.perBlockHead
+	require.Equal(t, `
+	yield *88(%rax)
+`, m.Format())
+	require.Equal(t, int64(0), m.maxRequiredStackSizeForCalls)
+	require.True(t, m.canSkipStackBoundsCheck())
+
+	m.reloadYieldContexts()
+	require.Equal(t, `
+	movq (%rsp), %r1?
+	yield *88(%r1?)
+`, m.Format())
+}
+
 func Test_machine_lowerAluRmiROp(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

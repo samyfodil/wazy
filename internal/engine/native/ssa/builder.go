@@ -2,6 +2,7 @@ package ssa
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,6 +28,11 @@ type Builder interface {
 
 	// EntryBlock returns the entry BasicBlock of the currently-compiled function.
 	EntryBlock() BasicBlock
+
+	// MarkUnlikelyEdge records that blk rarely branches to succ, as a branch hint says, so the block layout
+	// can move what only such edges reach out of the hot path's way. A wrong mark costs speed, never
+	// correctness.
+	MarkUnlikelyEdge(blk, succ BasicBlock)
 
 	// SetCurrentBlock sets the instruction insertion target to the BasicBlock `b`.
 	SetCurrentBlock(b BasicBlock)
@@ -57,6 +63,10 @@ type Builder interface {
 	// FindValueInLinearPath tries to find the latest definition of the given Variable in the linear path to the current BasicBlock.
 	// If it cannot find the definition, or it's not sealed yet, it returns ValueInvalid.
 	FindValueInLinearPath(variable Variable) Value
+
+	// MoveToCurrentBlock takes instr, a pure instruction of the block from, out of it and appends it to the
+	// current block.
+	MoveToCurrentBlock(instr *Instruction, from BasicBlock)
 
 	// Seal declares that we've known all the predecessors to this block and were added via AddPred.
 	// After calling this, AddPred will be forbidden.
@@ -106,11 +116,24 @@ type Builder interface {
 	// This is available after RunPasses is run.
 	BlockIteratorReversePostOrderNext() BasicBlock
 
+	// BlockIteratorPostOrderBegin returns the first BasicBlock in a depth-first post-order from the entry, which the
+	// reverse of the layout order above is not sure to be. See builder.computePostOrder. This is available after
+	// RunPasses is run.
+	BlockIteratorPostOrderBegin() BasicBlock
+
+	// BlockIteratorPostOrderNext returns the next BasicBlock in that post-order.
+	BlockIteratorPostOrderNext() BasicBlock
+
 	// ReturnBlock returns the BasicBlock which is used to return from the function.
 	ReturnBlock() BasicBlock
 
 	// InsertUndefined inserts an undefined instruction at the current position.
 	InsertUndefined()
+
+	// AddVecProgram records p for an OpcodeVecMap and returns its number; VecProgram returns it back.
+	// Programs last until the next Init.
+	AddVecProgram(p *VecProgram) int
+	VecProgram(n int) *VecProgram
 
 	// SetCurrentSourceOffset sets the current source offset. The incoming instruction will be annotated with this offset.
 	SetCurrentSourceOffset(line SourceOffset)
@@ -135,6 +158,29 @@ type Builder interface {
 
 	// InstructionOfValue returns the Instruction that produces the given Value or nil if the Value is not produced by any Instruction.
 	InstructionOfValue(v Value) *Instruction
+
+	// FindLoopCounter returns the counter of the loop headed by header, entered from preheader. See
+	// LoopCounter.
+	FindLoopCounter(header, preheader BasicBlock) (LoopCounter, bool)
+
+	// TripBound returns at most how many times the loop counted by lc runs its body, if that is known.
+	TripBound(lc LoopCounter) (uint64, bool)
+
+	// StripMine makes the loop counted by lc check for preemption once every chunk iterations, if it can.
+	// See builder.StripMine.
+	StripMine(header, preheader, body BasicBlock, lc LoopCounter, chunk uint64, yield func(target BasicBlock, args Values)) bool
+
+	// MaskedCheckOnEntry reports whether a check testing the bits mask of the counter of lc runs in full
+	// on entry to its loop. See builder.MaskedCheckOnEntry.
+	MaskedCheckOnEntry(lc LoopCounter, mask uint64) bool
+
+	// ReturnToHeader makes the slow path of a loop's check return to its header rather than go on into
+	// the body. See builder.ReturnToHeader.
+	ReturnToHeader(slow, header BasicBlock)
+
+	// CheckOnEntry makes a loop check for preemption once each time it is entered, if it can. See
+	// builder.CheckOnEntry.
+	CheckOnEntry(header, preheader BasicBlock, yield func(target BasicBlock, args Values)) bool
 }
 
 // NewBuilder returns a new Builder implementation.
@@ -163,8 +209,18 @@ type builder struct {
 	currentBB                     *basicBlock
 	returnBlk                     *basicBlock
 
+	// unlikelyEdges is whether MarkUnlikelyEdge marked any edge of the current function. The rest are scratch
+	// for the layout that then follows. See moveColdBlocksLast.
+	unlikelyEdges bool
+	layoutSeen    []bool
+	layoutStack   []layoutFrame
+	blkStack3     []*basicBlock
+
 	// nextValueID is used by builder.AllocateValue.
 	nextValueID ValueID
+	// cloneMark, cloneStamp and cloneBlockStamp are passCloneSharedComparesOpt's scratch.
+	cloneMark                   []cloneMark
+	cloneStamp, cloneBlockStamp int32
 	// nextVariable is used by builder.AllocateVariable.
 	nextVariable Variable
 
@@ -178,6 +234,19 @@ type builder struct {
 	// anything, indexed by Variable, holding the last definition of that Variable there.
 	varDefs []Value
 
+	// loopTestScratch, loopBodyScratch and loopAvoidScratch are reused by loopTests.
+	loopTestScratch                   []loopTest
+	loopBodyScratch, loopAvoidScratch []*basicBlock
+
+	// boundsMoves is passMergeBoundsChecksOpt's scratch.
+	boundsMoves []*Instruction
+	// imuls counts the multiplications the function was built with. See passLinearFormOpt.
+	imuls int
+	// linearMark, linearStamp, linearBlockStamp and linearTerms are passLinearFormOpt's.
+	linearMark                    []linearMark
+	linearStamp, linearBlockStamp int32
+	linearTerms                   []linearTerm
+
 	// dominators stores the immediate dominator of each BasicBlock.
 	// The index is blockID of the BasicBlock.
 	dominators []*basicBlock
@@ -189,17 +258,28 @@ type builder struct {
 	loopNestingForestRoots []BasicBlock
 
 	// The followings are used for optimization passes/deterministic compilation.
-	licmLoops                 []*basicBlock
-	licmDefs                  []*basicBlock
-	instStack                 []*Instruction
-	blkStack                  []*basicBlock
-	blkStack2                 []*basicBlock
+	vecPrograms  []*VecProgram
+	licmLoops    []*basicBlock
+	licmDefs     []*basicBlock
+	licmClobbers []bool
+	instStack    []*Instruction
+	blkStack     []*basicBlock
+	blkStack2    []*basicBlock
+	// predIndex is passLayoutBlocks' index of long predecessor lists; see predInfoOf.
+	predIndex                 map[*basicBlock]map[*basicBlock]int
 	redundantParams           []redundantParam
 	dominatedMemoryBounds     []dominatedMemoryBound
 	dominatedMemoryBoundHeads []int
 
 	// blockIterCur is used to implement blockIteratorBegin and blockIteratorNext.
 	blockIterCur int
+
+	// postOrder, postOrderIter, postOrderSeen and dfsStack implement BlockIteratorPostOrderBegin and
+	// BlockIteratorPostOrderNext: see computePostOrder.
+	postOrder     []*basicBlock
+	postOrderIter int
+	postOrderSeen []bool
+	dfsStack      []dfsFrame
 
 	// donePreBlockLayoutPasses is true if all the passes before LayoutBlocks are called.
 	donePreBlockLayoutPasses bool
@@ -275,8 +355,20 @@ func (b *builder) ReturnBlock() BasicBlock {
 }
 
 // Init implements Builder.Reset.
+// AddVecProgram implements Builder.AddVecProgram.
+func (b *builder) AddVecProgram(p *VecProgram) int {
+	b.vecPrograms = append(b.vecPrograms, p)
+	return len(b.vecPrograms) - 1
+}
+
+// VecProgram implements Builder.VecProgram.
+func (b *builder) VecProgram(n int) *VecProgram { return b.vecPrograms[n] }
+
 func (b *builder) Init(s *Signature) {
+	clear(b.vecPrograms)
+	b.vecPrograms = b.vecPrograms[:0]
 	b.nextVariable = 0
+	b.imuls = 0
 	b.currentSignature = s
 	b.zeros = [typeEnd]Value{ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid}
 	resetBasicBlock(b.returnBlk)
@@ -286,6 +378,7 @@ func (b *builder) Init(s *Signature) {
 	b.varLengthBasicBlockPool.Reset()
 	b.donePreBlockLayoutPasses = false
 	b.doneBlockLayout = false
+	b.unlikelyEdges = false
 	b.donePostBlockLayoutPasses = false
 	if nativeapi.SSALoggingEnabled {
 		// sig.used only feeds Signature-printing in Format() (via usedSignatures), which is
@@ -392,9 +485,19 @@ func (b *builder) Idom(blk BasicBlock) BasicBlock {
 	return b.dominators[blk.ID()]
 }
 
+// MoveToCurrentBlock implements Builder.MoveToCurrentBlock.
+func (b *builder) MoveToCurrentBlock(instr *Instruction, from BasicBlock) {
+	from.(*basicBlock).removeInstruction(instr)
+	instr.prev, instr.next = nil, nil
+	b.currentBB.insertInstruction(b, instr)
+}
+
 // InsertInstruction implements Builder.InsertInstruction.
 func (b *builder) InsertInstruction(instr *Instruction) {
 	b.currentBB.insertInstruction(b, instr)
+	if instr.opcode == OpcodeImul {
+		b.imuls++
+	}
 
 	if l := b.currentSourceOffset; l.Valid() {
 		// Emit the source offset info only when the instruction has side effect because
@@ -615,8 +718,11 @@ func (b *builder) findValue(typ Type, variable Variable, blk *basicBlock) Value 
 // Seal implements Builder.Seal.
 func (b *builder) Seal(raw BasicBlock) {
 	blk := raw.(*basicBlock)
-	if len(blk.preds) == 1 {
+	switch len(blk.preds) {
+	case 1:
 		blk.singlePred = blk.preds[0].blk
+	case 2:
+		blk.singlePred = yieldJoin(blk.preds[0].blk, blk.preds[1].blk)
 	}
 	blk.sealed = true
 
@@ -633,6 +739,24 @@ func (b *builder) Seal(raw BasicBlock) {
 			pred.branch.addArgumentBranchInst(b, predValue)
 		}
 	}
+}
+
+// yieldJoin returns p when q is the slow path of a preemption check in p, or q when
+// p is that of one in q, and nil otherwise: a block that opens with OpcodeYield,
+// defines no variable and is reached from the other alone. A block those two join
+// at sees every variable as the check's block left it, so it can look through to
+// that block as to a single predecessor, rather than define each it reads anew.
+func yieldJoin(p, q *basicBlock) *basicBlock {
+	slowOf := func(slow, check *basicBlock) bool {
+		return slow.sealed && slow.singlePred == check && slow.varDefsLen == 0 && slow.yields()
+	}
+	switch {
+	case slowOf(q, p):
+		return p
+	case slowOf(p, q):
+		return q
+	}
+	return nil
 }
 
 // Format implements Builder.Format.
@@ -734,6 +858,70 @@ func (b *builder) blockIteratorReversePostOrderNext() *basicBlock {
 		b.blockIterCur++
 		return ret
 	}
+}
+
+// BlockIteratorPostOrderBegin implements Builder.BlockIteratorPostOrderBegin.
+func (b *builder) BlockIteratorPostOrderBegin() BasicBlock {
+	b.computePostOrder()
+	b.postOrderIter = 0
+	return b.BlockIteratorPostOrderNext()
+}
+
+// BlockIteratorPostOrderNext implements Builder.BlockIteratorPostOrderNext.
+func (b *builder) BlockIteratorPostOrderNext() BasicBlock {
+	if b.postOrderIter >= len(b.postOrder) {
+		return nil
+	}
+	ret := b.postOrder[b.postOrderIter]
+	b.postOrderIter++
+	return ret
+}
+
+// dfsFrame is a block on computePostOrder's stack, and the index of the next
+// successor to look at.
+type dfsFrame struct {
+	blk  *basicBlock
+	next int
+}
+
+// computePostOrder lists the blocks in a depth-first post-order from the entry
+// block. Register allocation's liveness needs that order, in which an edge to a
+// block not yet listed is a loop's back edge. The layout order is not one: its
+// search marks a block when it is pushed rather than when it is reached, and sorts
+// the slow paths of preemption checks last (see sortBlocks), so the edge from one
+// of those to the block it rejoins comes after that block. A function with no
+// such slow path takes the layout order reversed.
+func (b *builder) computePostOrder() {
+	order := b.postOrder[:0]
+	if !slices.ContainsFunc(b.reversePostOrderedBasicBlocks, (*basicBlock).yields) {
+		for i := len(b.reversePostOrderedBasicBlocks) - 1; i >= 0; i-- {
+			order = append(order, b.reversePostOrderedBasicBlocks[i])
+		}
+		b.postOrder = order
+		return
+	}
+	seen := slices.Grow(b.postOrderSeen[:0], b.basicBlocksPool.Allocated())[:b.basicBlocksPool.Allocated()]
+	clear(seen)
+	stack := b.dfsStack[:0]
+	entry := b.entryBlk()
+	seen[entry.id] = true
+	stack = append(stack, dfsFrame{blk: entry})
+	for len(stack) > 0 {
+		top := &stack[len(stack)-1]
+		if top.next == len(top.blk.success) {
+			order = append(order, top.blk)
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		succ := top.blk.success[top.next]
+		top.next++
+		if succ.ReturnBlock() || succ.invalid || seen[succ.id] {
+			continue
+		}
+		seen[succ.id] = true
+		stack = append(stack, dfsFrame{blk: succ})
+	}
+	b.postOrder, b.dfsStack, b.postOrderSeen = order, stack, seen
 }
 
 // ValuesInfo implements Builder.ValuesInfo.
@@ -841,4 +1029,10 @@ func (b *builder) InstructionOfValue(v Value) *Instruction {
 		return nil
 	}
 	return b.instructionsPool.View(instrID - 1)
+}
+
+// MarkUnlikelyEdge implements Builder.MarkUnlikelyEdge.
+func (b *builder) MarkUnlikelyEdge(blk, succ BasicBlock) {
+	blk.(*basicBlock).unlikelySucc = succ.(*basicBlock)
+	b.unlikelyEdges = true
 }

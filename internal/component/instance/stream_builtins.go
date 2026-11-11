@@ -161,6 +161,25 @@ func resolveStreamOrFutureElem(comp *binary.Component, resolve abi.Resolver, isF
 	if err != nil {
 		return nil, 0, 0, false, fmt.Errorf("type %d: %w", typeIdx, err)
 	}
+	// abi.Resolver reports an unresolvable index as nil, which reads as "not found"; keep the
+	// decoder's reason for the first one so a failure below says why.
+	var unresolved error
+	resolve = func(inner abi.Resolver) abi.Resolver {
+		return func(idx uint32) binary.TypeDesc {
+			t := inner(idx)
+			if t == nil && unresolved == nil {
+				if _, err := comp.ResolveType(idx); err != nil {
+					unresolved = err
+				}
+			}
+			return t
+		}
+	}(resolve)
+	defer func() {
+		if err != nil && unresolved != nil {
+			err = fmt.Errorf("%w: %w", err, unresolved)
+		}
+	}()
 	var ref *binary.TypeRef
 	if isFuture {
 		fd, ok := td.(binary.FutureDesc)
@@ -357,7 +376,7 @@ func requireStreamEnd(in *Instance, name string, i uint32, side endSide, elemDes
 	if se.side != side {
 		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a %s stream end", name, i, sideName(side)))
 	}
-	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
+	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, se.shared.elemResolve, in, elemDesc, in.resolve) {
 		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: stream element type mismatch", name, i))
 	}
 	return se
@@ -376,7 +395,7 @@ func requireFutureEnd(in *Instance, name string, i uint32, side endSide, elemDes
 	if fe.side != side {
 		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a %s future end", name, i, sideName(side)))
 	}
-	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
+	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, fe.shared.elemResolve, in, elemDesc, in.resolve) {
 		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: future element type mismatch", name, i))
 	}
 	return fe
@@ -398,7 +417,7 @@ func wrapSchedErr(name string, err error) error {
 func streamNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uint32, numeric bool) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "stream.new")
-		shared := &sharedStream{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in}
+		shared := &sharedStream{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in, elemResolve: in.resolve}
 		re := &streamEnd{side: sideReadable, state: copyIdle, shared: shared}
 		we := &streamEnd{side: sideWritable, state: copyIdle, shared: shared}
 		ri := in.resources.addEntry(re)
@@ -415,7 +434,7 @@ func streamNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 func futureNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uint32, numeric bool) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "future.new")
-		shared := &sharedFuture{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in}
+		shared := &sharedFuture{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in, elemResolve: in.resolve}
 		re := &futureEnd{side: sideReadable, state: copyIdle, shared: shared}
 		we := &futureEnd{side: sideWritable, state: copyIdle, shared: shared}
 		ri := in.resources.addEntry(re)

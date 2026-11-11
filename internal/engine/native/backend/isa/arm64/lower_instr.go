@@ -9,6 +9,7 @@ package arm64
 import (
 	"fmt"
 	"math"
+	"math/bits"
 
 	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
@@ -43,6 +44,17 @@ func (m *machine) lowerBrTable(i *ssa.Instruction) {
 	index, targetBlockIDs := i.BrTableData()
 	targetBlockCount := len(targetBlockIDs.View())
 	indexOperand := m.getOperand_NR(m.compiler.ValueDefinition(index), extModeNone)
+
+	if targetBlockCount-1 <= 0xfff {
+		// The sequence loads the target's offset over the index, so it takes a copy, which the index
+		// is often not live past to need.
+		copied := m.compiler.AllocateVReg(ssa.TypeI32)
+		m.InsertMove(copied, indexOperand.nr(), ssa.TypeI32)
+		brSequence := m.allocateInstr()
+		brSequence.asBoundedBrTableSequence(copied, m.addJmpTableTarget(targetBlockIDs), targetBlockCount)
+		m.insert(brSequence)
+		return
+	}
 
 	// Firstly, we have to do the bounds check of the index, and
 	// set it to the default target (sitting at the end of the list) if it's out of bounds.
@@ -83,26 +95,79 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	cvalDef := m.compiler.ValueDefinition(cval)
 
 	switch {
-	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeFuelDec):
-		// 		subs fuel, fuel, #1
-		// 		b.le <slow>              ;; or b.gt, for a Brz
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodePreemptRequested):
+		// 		ldr tmp, [preempt]
+		// 		tbnz tmp, #63, <slow>    ;; or tbz, for a Brz
 		//
-		// SUBS already sets the flags the branch needs, so the decrement and the
-		// test are the same instruction: the whole termination check is these two.
-		// Signed LE rather than EQ so that a counter driven below zero -- which a
-		// re-entry restoring an already-exhausted value can do -- keeps taking the
-		// slow path instead of wrapping around for another 2^64 ticks.
-		subs := m.allocateInstr()
-		subs.asALU(aluOpSubS, fuelVReg, operandNR(fuelVReg), operandImm12(1, 0), true)
-		m.insert(subs)
-		cc := le
+		// or, masked,
+		// 		tst counter, #mask
+		// 		b.eq <island>            ;; see emitPreemptIslands
+		// 	back:
+		//
+		// The preempt register holds the address of g.stackguard0 (see
+		// ssa.OpcodePreemptRequested). A stack bound is a user address, with the
+		// top bit clear, and every value the runtime stores there instead --
+		// StackPreempt, and the stackFork and poison values a check might also
+		// see -- has it set: one that is not a preemption request makes the code
+		// yield for nothing, which is harmless. A masked check reads the word only
+		// when the counter's masked bits are zero, and an elided one not at all.
+		counter, mask, elided := cvalDef.Instr.PreemptCheckData()
+		brz := b.Opcode() == ssa.OpcodeBrz
+		if elided {
+			if brz {
+				br := m.allocateInstr()
+				br.asBr(target)
+				m.insert(br)
+			}
+			cvalDef.Instr.MarkLowered()
+			break
+		}
+		if counter.Valid() {
+			if brz {
+				panic("BUG: a masked preemption check is only ever consumed by Brnz")
+			}
+			// The full check is out of line, so the loop falls through a branch
+			// that is almost never taken: a taken jump around an inline check would
+			// cost every iteration more than the check itself.
+			tst := m.allocateInstr()
+			tst.asALUBitmaskImm(aluOpAnds, xzrVReg, m.compiler.VRegOf(counter), mask, counter.Type().Bits() == 64)
+			m.insert(tst)
+			island := m.nextLabel
+			m.nextLabel++
+			cbr := m.allocateInstr()
+			cbr.asCondBr(eq.asCond(), island, false /* ignored */)
+			m.insert(cbr)
+			back, backLabel := m.allocateBrTarget()
+			m.insert(back)
+			m.preemptIslands = append(m.preemptIslands, preemptIsland{l: island, slow: target, back: backLabel, test: tst, backInstr: back})
+			cvalDef.Instr.MarkLowered()
+			break
+		}
+		tmp := m.compiler.AllocateVReg(ssa.TypeI64)
+		amode := m.amodePool.Allocate()
+		*amode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: preemptVReg}
+		load := m.allocateInstr()
+		load.asULoad(tmp, amode, 64)
+		m.insert(load)
+		cbr := m.allocateInstr()
+		cbr.asCondBr(registerAsSignBitCond(tmp, !brz), target, true)
+		m.insert(cbr)
+		cvalDef.Instr.MarkLowered()
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeBor) && m.lowerTwoIcmpsToFlag(cvalDef.Instr, false, b.Opcode() == ssa.OpcodeBrz, target),
+		m.compiler.MatchInstr(cvalDef, ssa.OpcodeBand) && m.lowerTwoIcmpsToFlag(cvalDef.Instr, true, b.Opcode() == ssa.OpcodeBrz, target):
+		cvalDef.Instr.MarkLowered()
+	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeBand):
+		// A branch on x & y itself tests it with tst, an ands to the zero register, rather than taking a
+		// register for the and to test with cbnz.
+		m.lowerBitwiseAluOp(cvalDef.Instr, aluOpAnds, true)
+		cvalDef.Instr.MarkLowered()
+		cc := ne
 		if b.Opcode() == ssa.OpcodeBrz {
-			cc = gt
+			cc = eq
 		}
 		cbr := m.allocateInstr()
 		cbr.asCondBr(cc.asCond(), target, false /* ignored */)
 		m.insert(cbr)
-		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
 		cvalInstr := cvalDef.Instr
 		x, y, c := cvalInstr.IcmpData()
@@ -111,7 +176,7 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 			cc = cc.invert()
 		}
 
-		if !m.tryLowerBandToFlag(x, y) {
+		if !m.tryLowerBandToFlag(x, y, c) {
 			m.lowerIcmpToFlag(x, y, signed)
 		}
 		cbr := m.allocateInstr()
@@ -144,19 +209,126 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	}
 }
 
-func (m *machine) tryLowerBandToFlag(x, y ssa.Value) (ok bool) {
-	xx := m.compiler.ValueDefinition(x)
-	yy := m.compiler.ValueDefinition(y)
-	if xx.IsFromInstr() && xx.Instr.Constant() && xx.Instr.ConstantVal() == 0 {
-		if m.compiler.MatchInstr(yy, ssa.OpcodeBand) {
-			bandInstr := yy.Instr
-			m.lowerBitwiseAluOp(bandInstr, aluOpAnds, true)
-			ok = true
-			bandInstr.MarkLowered()
-			return
+// lowerTwoIcmpsToFlag branches to target where twoIcmpsToFlag's condition holds, or, for a brz, where it
+// does not. It reports false, emitting nothing, where twoIcmpsToFlag does.
+func (m *machine) lowerTwoIcmpsToFlag(op *ssa.Instruction, and, brz bool, target label) bool {
+	cc, ok := m.twoIcmpsToFlag(op, and)
+	if !ok {
+		return false
+	}
+	if brz {
+		cc = cc.invert()
+	}
+	cbr := m.allocateInstr()
+	cbr.asCondBr(cc.asCond(), target, false /* ignored */)
+	m.insert(cbr)
+	return true
+}
+
+// twoIcmpsToFlag sets the flags so that the condition it returns holds where either of the comparisons
+// op or-s does, or, where and, both of those it and-s: the first sets them, and a conditional compare
+// sets them by the second where the first does not hold (holds, for and), and otherwise to flags that
+// satisfy the second's condition (fail it). It reports false, emitting nothing, where op is not of two
+// comparisons of same-width registers, or of a register with a constant up to 31, that are its only
+// uses. The first may be a test of an and with zero.
+func (m *machine) twoIcmpsToFlag(op *ssa.Instruction, and bool) (condFlag, bool) {
+	a, b := op.Arg2()
+	ad, bd := m.compiler.ValueDefinition(a), m.compiler.ValueDefinition(b)
+	if !m.compiler.MatchInstr(ad, ssa.OpcodeIcmp) || !m.compiler.MatchInstr(bd, ssa.OpcodeIcmp) {
+		return 0, false
+	}
+	ax, ay, ac := ad.Instr.IcmpData()
+	bx, by, bc := bd.Instr.IcmpData()
+	if bx.Type() != by.Type() || ax.Type() != ay.Type() {
+		return 0, false
+	}
+	byDef := m.compiler.ValueDefinition(by)
+	imm, isImm := uint64(0), false
+	if byDef.IsFromInstr() && byDef.Instr.Opcode() == ssa.OpcodeIconst {
+		k := byDef.Instr.ConstantVal()
+		if bx.Type() == ssa.TypeI32 {
+			k = uint64(uint32(k))
+		}
+		imm, isImm = k, k <= 31
+	}
+	cc1, cc2 := condFlagFromSSAIntegerCmpCond(ac), condFlagFromSSAIntegerCmpCond(bc)
+	if !m.tryLowerBandToFlag(ax, ay, ac) {
+		m.lowerIcmpToFlag(ax, ay, ac.Signed())
+	}
+	when, otherwise := cc1.invert(), satisfyingFlags(cc2)
+	if and {
+		when, otherwise = cc1, satisfyingFlags(cc2.invert())
+	}
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(bx), extModeNone)
+	ccmp := m.allocateInstr()
+	if isImm {
+		ccmp.asCCmpImm(rn, imm, when, otherwise, bx.Type().Bits() == 64)
+		byDef.Instr.MarkLowered()
+	} else {
+		ccmp.asCCmpReg(rn, m.getOperand_NR(byDef, extModeNone), when, otherwise, bx.Type().Bits() == 64)
+	}
+	m.insert(ccmp)
+	ad.Instr.MarkLowered()
+	bd.Instr.MarkLowered()
+	return cc2, true
+}
+
+// satisfyingFlags returns NZCV flags under which c holds.
+func satisfyingFlags(c condFlag) byte {
+	for nzcv := byte(0); nzcv < 16; nzcv++ {
+		n, z, cf, v := nzcv&8 != 0, nzcv&4 != 0, nzcv&2 != 0, nzcv&1 != 0
+		var holds bool
+		switch c {
+		case eq:
+			holds = z
+		case ne:
+			holds = !z
+		case hs:
+			holds = cf
+		case lo:
+			holds = !cf
+		case mi:
+			holds = n
+		case pl:
+			holds = !n
+		case vs:
+			holds = v
+		case vc:
+			holds = !v
+		case hi:
+			holds = cf && !z
+		case ls:
+			holds = !cf || z
+		case ge:
+			holds = n == v
+		case lt:
+			holds = n != v
+		case gt:
+			holds = !z && n == v
+		case le:
+			holds = z || n != v
+		}
+		if holds {
+			return nzcv
 		}
 	}
+	panic("BUG: no flags satisfy " + c.String())
+}
 
+// tryLowerBandToFlag sets the flags for comparing x, an and, with y, zero, under c, with an ands of
+// the and's operands. It reports false, emitting nothing, for any other comparison: one of zero with an
+// and, whose condition the flags would answer for the operands the other way round, and an unsigned one,
+// as ands clears the carry a comparison with zero sets.
+func (m *machine) tryLowerBandToFlag(x, y ssa.Value, c ssa.IntegerCmpCond) (ok bool) {
+	xx := m.compiler.ValueDefinition(x)
+	yy := m.compiler.ValueDefinition(y)
+	switch c {
+	case ssa.IntegerCmpCondEqual, ssa.IntegerCmpCondNotEqual,
+		ssa.IntegerCmpCondSignedLessThan, ssa.IntegerCmpCondSignedGreaterThanOrEqual,
+		ssa.IntegerCmpCondSignedGreaterThan, ssa.IntegerCmpCondSignedLessThanOrEqual:
+	default:
+		return false
+	}
 	if yy.IsFromInstr() && yy.Instr.Constant() && yy.Instr.ConstantVal() == 0 {
 		if m.compiler.MatchInstr(xx, ssa.OpcodeBand) {
 			bandInstr := xx.Instr
@@ -179,19 +351,25 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
-	case ssa.OpcodeFuelDec:
+	case ssa.OpcodePreemptRequested:
 		// The frontend only ever emits this immediately before the branch that
 		// consumes it, so LowerConditionalBranch above has already folded it in and
 		// marked it lowered. Reaching here means something moved it away from its
-		// branch, which would leave the decrement without its test.
-		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
+		// branch, which would leave the check without its test.
+		panic("BUG: " + op.String() + " must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
 	case ssa.OpcodeIadd, ssa.OpcodeIsub:
 		m.lowerSubOrAdd(instr, op == ssa.OpcodeIadd)
 	case ssa.OpcodeFadd, ssa.OpcodeFsub, ssa.OpcodeFmul, ssa.OpcodeFdiv, ssa.OpcodeFmax, ssa.OpcodeFmin:
 		m.lowerFpuBinOp(instr)
-	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.
+	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const:
+		// A constant is computed where it is used, but one LICM pinned is an ordinary value.
+		if !instr.Constant() {
+			vr := m.compiler.VRegOf(instr.Return())
+			m.InsertLoadConstantBlockArg(instr, vr)
+			m.remat[vr.ID()] = instr.ConstantVal()
+		}
 	case ssa.OpcodeExitWithCode:
 		execCtx, code := instr.ExitWithCodeData()
 		m.lowerExitWithCode(m.compiler.VRegOf(execCtx), code)
@@ -203,7 +381,7 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 			// specific site.
 			m.lowerExitIfTrueWithCode(m.compiler.VRegOf(execCtx), c, code)
 		} else {
-			m.lowerExitIfTrueWithCodeShared(m.compiler.VRegOf(execCtx), c, code)
+			m.lowerExitIfTrueWithCodeShared(c, code)
 		}
 	case ssa.OpcodeStore, ssa.OpcodeIstore8, ssa.OpcodeIstore16, ssa.OpcodeIstore32:
 		m.lowerStore(instr)
@@ -221,6 +399,18 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerExtLoad(op, ptr, offset, ret)
 	case ssa.OpcodeCall, ssa.OpcodeCallIndirect:
 		m.lowerCall(instr)
+	case ssa.OpcodeVecMap:
+		m.lowerVecMap(instr)
+	case ssa.OpcodeYield:
+		// Below this frame the trampoline takes what a call passing nothing on the
+		// stack does, which the margin every call site keeps covers (see
+		// backend.StackBoundsCheckMarginBytes).
+		if m.maxRequiredStackSizeForCalls < 16 {
+			m.maxRequiredStackSizeForCalls = 16 // return address frame.
+		}
+		y := m.allocateInstr()
+		y.asYield(m.compiler.VRegOf(instr.Arg()))
+		m.insert(y)
 	case ssa.OpcodeIcmp:
 		m.lowerIcmp(instr)
 	case ssa.OpcodeVIcmp:
@@ -275,6 +465,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		x, y := instr.Arg2()
 		result := instr.Return()
 		m.lowerImul(x, y, result)
+	case ssa.OpcodeUmulhi:
+		m.lowerUmulhi(instr)
 	case ssa.OpcodeUndefined:
 		undef := m.allocateInstr()
 		undef.asUDF()
@@ -308,6 +500,9 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 		rd := m.compiler.VRegOf(result)
 		ctxVReg := m.compiler.VRegOf(ctx)
+		if !instr.SourceOffset().Valid() {
+			ctxVReg = regalloc.VRegInvalid // Trap through the shared islands.
+		}
 		m.lowerFpuToInt(rd, rn, ctxVReg, true, x.Type() == ssa.TypeF64,
 			result.Type().Bits() == 64, op == ssa.OpcodeFcvtToSintSat)
 	case ssa.OpcodeFcvtToUint, ssa.OpcodeFcvtToUintSat:
@@ -316,6 +511,9 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 		rd := m.compiler.VRegOf(result)
 		ctxVReg := m.compiler.VRegOf(ctx)
+		if !instr.SourceOffset().Valid() {
+			ctxVReg = regalloc.VRegInvalid // Trap through the shared islands.
+		}
 		m.lowerFpuToInt(rd, rn, ctxVReg, false, x.Type() == ssa.TypeF64,
 			result.Type().Bits() == 64, op == ssa.OpcodeFcvtToUintSat)
 	case ssa.OpcodeFcvtFromSint:
@@ -389,6 +587,9 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 		rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 		rd := m.compiler.VRegOf(instr.Return())
+		if !instr.SourceOffset().Valid() {
+			ctxVReg = regalloc.VRegInvalid // Trap through the shared islands.
+		}
 		m.lowerIDiv(ctxVReg, rd, rn, rm, x.Type() == ssa.TypeI64, op == ssa.OpcodeSdiv)
 	case ssa.OpcodeSrem, ssa.OpcodeUrem:
 		x, y, ctx := instr.Arg3()
@@ -396,6 +597,9 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 		rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 		rd := m.compiler.VRegOf(instr.Return())
+		if !instr.SourceOffset().Valid() {
+			ctxVReg = regalloc.VRegInvalid // Trap through the shared islands.
+		}
 		m.lowerIRem(ctxVReg, rd, rn.nr(), rm, x.Type() == ssa.TypeI64, op == ssa.OpcodeSrem)
 	case ssa.OpcodeVconst:
 		result := m.compiler.VRegOf(instr.Return())
@@ -456,6 +660,15 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		rd := m.compiler.VRegOf(instr.Return())
 		arr := ssaLaneToArrangement(lane)
 		m.lowerVhighBits(rm, rd, arr)
+	case ssa.OpcodeVIaddReduce:
+		rn := m.getOperand_NR(m.compiler.ValueDefinition(instr.Arg()), extModeNone)
+		sum := m.compiler.AllocateVReg(ssa.TypeV128)
+		addv := m.allocateInstr()
+		addv.asVecLanes(vecOpAddv, sum, rn, vecArrangement4S)
+		m.insert(addv)
+		mov := m.allocateInstr()
+		mov.asMovFromVec(m.compiler.VRegOf(instr.Return()), operandNR(sum), vecArrangementS, vecIndex(0), false)
+		m.insert(mov)
 	case ssa.OpcodeVIadd:
 		x, y, lane := instr.Arg2WithLane()
 		arr := ssaLaneToArrangement(lane)
@@ -549,8 +762,12 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		x, y, lane := instr.Arg2WithLane()
 		arr := ssaLaneToArrangement(lane)
 		rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
-		rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 		rd := m.compiler.VRegOf(instr.Return())
+		if def := m.compiler.ValueDefinition(y); def.IsFromInstr() && def.Instr.Constant() {
+			m.lowerVShiftImm(op, rd, rn, def.Instr.ConstantVal(), arr)
+			break
+		}
+		rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 		m.lowerVShift(op, rd, rn, rm, arr)
 	case ssa.OpcodeVSqrt:
 		m.lowerVecMisc(vecOpFsqrt, instr)
@@ -841,6 +1058,41 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 }
 
 func (m *machine) lowerShuffle(rd regalloc.VReg, rn, rm operand, lane1, lane2 uint64) {
+	var lanes [16]byte
+	for i := 0; i < 8; i++ {
+		lanes[i], lanes[8+i] = byte(lane1>>(i*8)), byte(lane2>>(i*8))
+	}
+	// Sixteen bytes in a row of rn followed by rm, a window sliding over the two, is one ext.
+	window := true
+	for i, l := range lanes {
+		window = window && l == lanes[0]+byte(i)
+	}
+	if window && lanes[0] > 0 && lanes[0] < 16 {
+		ext := m.allocateInstr()
+		ext.asVecExtract(rd, rn, rm, vecArrangement16B, uint32(lanes[0]))
+		m.insert(ext)
+		return
+	}
+	// Every lane from one of the two is a tbl of that one alone.
+	fromRn, fromRm := true, true
+	for _, l := range lanes {
+		fromRn, fromRm = fromRn && l < 16, fromRm && l >= 16
+	}
+	if fromRn || fromRm {
+		src := rn
+		if fromRm {
+			src = rm
+			lane1 -= 0x1010101010101010
+			lane2 -= 0x1010101010101010
+		}
+		tmp := operandNR(m.compiler.AllocateVReg(ssa.TypeV128))
+		m.lowerFpuConst128(tmp.nr(), lane1, lane2)
+		tbl1 := m.allocateInstr()
+		tbl1.asVecTbl(1, rd, src, tmp, vecArrangement16B)
+		m.insert(tbl1)
+		return
+	}
+
 	// `tbl2` requires 2 consecutive registers, so we arbitrarily pick v29, v30.
 	vReg, wReg := v29VReg, v30VReg
 
@@ -865,6 +1117,35 @@ func (m *machine) lowerShuffle(rd regalloc.VReg, rn, rm operand, lane1, lane2 ui
 	tbl2 := m.allocateInstr()
 	tbl2.asVecTbl(2, rd, operandNR(vReg), tmp, vecArrangement16B)
 	m.insert(tbl2)
+}
+
+// lowerVShiftImm shifts by a constant amount, an immediate: shl, ushr or sshr, or a copy for a shift by
+// zero once taken modulo the lane width.
+func (m *machine) lowerVShiftImm(op ssa.Opcode, rd regalloc.VReg, rn operand, amount uint64, arr vecArrangement) {
+	var bits uint64
+	switch arr {
+	case vecArrangement16B:
+		bits = 8
+	case vecArrangement8H:
+		bits = 16
+	case vecArrangement4S:
+		bits = 32
+	default:
+		bits = 64
+	}
+	k := byte(amount & (bits - 1))
+	i := m.allocateInstr()
+	switch {
+	case k == 0:
+		i.asVecRRR(vecOpOrr, rd, rn, rn, vecArrangement16B)
+	case op == ssa.OpcodeVIshl:
+		i.asVecShiftImm(vecOpShl, rd, rn, operandShiftImm(k), arr)
+	case op == ssa.OpcodeVSshr:
+		i.asVecShiftImm(vecOpSshr, rd, rn, operandShiftImm(k), arr)
+	default:
+		i.asVecShiftImm(vecOpUshr, rd, rn, operandShiftImm(k), arr)
+	}
+	m.insert(i)
 }
 
 func (m *machine) lowerVShift(op ssa.Opcode, rd regalloc.VReg, rn, rm operand, arr vecArrangement) {
@@ -1279,14 +1560,17 @@ func (m *machine) lowerIRem(execCtxVReg regalloc.VReg, rd, rn regalloc.VReg, rm 
 	}
 	m.insert(div)
 
-	// Copy rd to a temp register to keep it after the exit sequence.
-	tmpReg := m.copyToTmp(rd)
+	// Copy rd to a temp register to keep it after an inline exit sequence.
+	quotient := rd
+	if execCtxVReg.Valid() {
+		quotient = m.copyToTmp(rd)
+	}
 
 	// Check if rm is zero:
 	m.exitIfNot(execCtxVReg, registerAsRegNotZeroCond(rm.nr()), _64bit, nativeapi.ExitCodeIntegerDivisionByZero)
 
 	msub := m.allocateInstr()
-	msub.asALURRRR(aluOpMSub, rd, operandNR(tmpReg), rm, rn, _64bit)
+	msub.asALURRRR(aluOpMSub, rd, operandNR(quotient), rm, rn, _64bit)
 	m.insert(msub)
 }
 
@@ -1322,8 +1606,15 @@ func (m *machine) lowerIDiv(execCtxVReg, rd regalloc.VReg, rn, rm operand, _64bi
 
 // exitIfNot emits a conditional branch to exit if the condition is not met.
 // If `c` (cond type) is a register, `cond64bit` must be chosen to indicate whether the register is 32-bit or 64-bit.
-// Otherwise, `cond64bit` is ignored.
+// Otherwise, `cond64bit` is ignored. With no execution context, it branches to the function's shared trap
+// island for code, which reloads the context itself.
 func (m *machine) exitIfNot(execCtxVReg regalloc.VReg, c cond, cond64bit bool, code nativeapi.ExitCode) {
+	if !execCtxVReg.Valid() {
+		cbr := m.allocateInstr()
+		cbr.asCondBr(invertTrapCond(c), m.getOrCreateTrapIsland(code), cond64bit)
+		m.insert(cbr)
+		return
+	}
 	execCtxTmp := m.copyToTmp(execCtxVReg)
 
 	cbr := m.allocateInstr()
@@ -1361,10 +1652,10 @@ func (m *machine) lowerFcopysignImpl(rd regalloc.VReg, rn, rm operand, tmpI, tmp
 	setMSB := m.allocateInstr()
 	if _64bit {
 		m.lowerConstantI64(tmpI, math.MinInt64)
-		setMSB.asMovToVec(tmpF, operandNR(tmpI), vecArrangementD, vecIndex(0))
+		setMSB.asFpuMovFromInt(tmpF, operandNR(tmpI), true)
 	} else {
 		m.lowerConstantI32(tmpI, math.MinInt32)
-		setMSB.asMovToVec(tmpF, operandNR(tmpI), vecArrangementS, vecIndex(0))
+		setMSB.asFpuMovFromInt(tmpF, operandNR(tmpI), false)
 	}
 	m.insert(setMSB)
 
@@ -1393,13 +1684,7 @@ func (m *machine) lowerBitcast(instr *ssa.Instruction) {
 	switch {
 	case srcInt && !dstInt: // Int to Float:
 		mov := m.allocateInstr()
-		var arr vecArrangement
-		if srcType.Bits() == 64 {
-			arr = vecArrangementD
-		} else {
-			arr = vecArrangementS
-		}
-		mov.asMovToVec(rd, rn, arr, vecIndex(0))
+		mov.asFpuMovFromInt(rd, rn, srcType.Bits() == 64)
 		m.insert(mov)
 	case !srcInt && dstInt: // Float to Int:
 		mov := m.allocateInstr()
@@ -1447,53 +1732,59 @@ func (m *machine) lowerFpuUniOp(op fpuUniOp, in, out ssa.Value) {
 
 func (m *machine) lowerFpuToInt(rd regalloc.VReg, rn operand, ctx regalloc.VReg, signed, src64bit, dst64bit, nonTrapping bool) {
 	if !nonTrapping {
-		// First of all, we have to clear the FPU flags.
-		flagClear := m.allocateInstr()
-		flagClear.asMovToFPSR(xzrVReg)
-		m.insert(flagClear)
+		// A NaN traps as an invalid conversion, and a value whose truncation the integer cannot hold as an
+		// overflow. Comparisons tell both, where reading the FPSR after the conversion would wait for every
+		// float instruction before it.
+		fcmp := func(y operand) {
+			c := m.allocateInstr()
+			c.asFpuCmp(rn, y, src64bit)
+			m.insert(c)
+		}
+		fcmp(rn)
+		m.exitIfNot(ctx, vc.asCond(), false, nativeapi.ExitCodeInvalidConversionToInteger)
+		lo, loInclusive, hi := fpuToIntBounds(signed, src64bit, dst64bit)
+		for _, b := range [2]struct {
+			v    float64
+			cond condFlag
+		}{{lo, gt}, {hi, lt}} {
+			if b.cond == gt && loInclusive {
+				b.cond = ge
+			}
+			var bound regalloc.VReg
+			if src64bit {
+				bound = m.compiler.AllocateVReg(ssa.TypeF64)
+				m.lowerFpuConst64(bound, math.Float64bits(b.v))
+			} else {
+				bound = m.compiler.AllocateVReg(ssa.TypeF32)
+				m.lowerFpuConst32(bound, uint64(math.Float32bits(float32(b.v))))
+			}
+			fcmp(operandNR(bound))
+			m.exitIfNot(ctx, b.cond.asCond(), false, nativeapi.ExitCodeIntegerOverflow)
+		}
 	}
 
-	// Then, do the conversion which doesn't trap inherently.
 	cvt := m.allocateInstr()
 	cvt.asFpuToInt(rd, rn, signed, src64bit, dst64bit)
 	m.insert(cvt)
+}
 
-	if !nonTrapping {
-		tmpReg := m.compiler.AllocateVReg(ssa.TypeI64)
-
-		// After the conversion, check the FPU flags.
-		getFlag := m.allocateInstr()
-		getFlag.asMovFromFPSR(tmpReg)
-		m.insert(getFlag)
-
-		execCtx := m.copyToTmp(ctx)
-		_rn := operandNR(m.copyToTmp(rn.nr()))
-
-		// Check if the conversion was undefined by comparing the status with 1.
-		// See https://developer.arm.com/documentation/ddi0595/2020-12/AArch64-Registers/FPSR--Floating-point-Status-Register
-		alu := m.allocateInstr()
-		alu.asALU(aluOpSubS, xzrVReg, operandNR(tmpReg), operandImm12(1, 0), true)
-		m.insert(alu)
-
-		// If it is not undefined, we can return the result.
-		ok := m.allocateInstr()
-		m.insert(ok)
-
-		// Otherwise, we have to choose the status depending on it is overflow or NaN conversion.
-
-		// Comparing itself to check if it is a NaN.
-		fpuCmp := m.allocateInstr()
-		fpuCmp.asFpuCmp(_rn, _rn, src64bit)
-		m.insert(fpuCmp)
-		// If the VC flag is not set (== VS flag is set), it is a NaN.
-		m.exitIfNot(execCtx, vc.asCond(), false, nativeapi.ExitCodeInvalidConversionToInteger)
-		// Otherwise, it is an overflow.
-		m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerOverflow)
-
-		// Conditional branch target is after exit.
-		l := m.insertBrTargetLabel()
-		ok.asCondBr(ne.asCond(), l, false /* ignored */)
+// fpuToIntBounds returns the floats a value converted to an integer must lie between: above lo, or at lo
+// where loInclusive, and below hi. Each is the end of the range the integer holds where a float of the
+// source's width is that end, and otherwise the nearest such float outside it, so that every value
+// whose truncation the integer holds passes.
+func fpuToIntBounds(signed, src64bit, dst64bit bool) (lo float64, loInclusive bool, hi float64) {
+	bits := 32
+	if dst64bit {
+		bits = 64
 	}
+	if !signed {
+		return -1, false, math.Ldexp(1, bits)
+	}
+	hi = math.Ldexp(1, bits-1)
+	if bits == 32 && src64bit {
+		return -hi - 1, false, hi
+	}
+	return -hi, true, hi
 }
 
 func (m *machine) lowerIntToFpu(rd regalloc.VReg, rn operand, signed, src64bit, dst64bit bool) {
@@ -1548,6 +1839,15 @@ func (m *machine) lowerSubOrAdd(si *ssa.Instruction, add bool) {
 		return
 	}
 
+	// 0 - y is neg: sub rd, zr, y, where register 31 is the zero register only in the shifted form.
+	if !add && xDef.IsFromInstr() && xDef.Instr.Constant() && xDef.Instr.ConstantVal() == 0 {
+		xDef.Instr.MarkLowered()
+		alu := m.allocateInstr()
+		alu.asALU(aluOpSub, m.compiler.VRegOf(si.Return()), operandNR(xzrVReg), m.getOperand_SR_NR(yDef, extModeNone), x.Type().Bits() == 64)
+		m.insert(alu)
+		return
+	}
+
 	rn := m.getOperand_NR(xDef, extModeNone)
 	rm, yNegated := m.getOperand_MaybeNegatedImm12_ER_SR_NR(yDef, extModeNone)
 
@@ -1577,19 +1877,82 @@ func (m *machine) tryLowerMulAccumulate(si *ssa.Instruction, mulDef, accDef back
 		return false
 	}
 	a, b := mulDef.Instr.Arg2()
-	rn := m.getOperand_NR(m.compiler.ValueDefinition(a), extModeNone)
-	rm := m.getOperand_NR(m.compiler.ValueDefinition(b), extModeNone)
-	ra := m.getOperand_NR(accDef, extModeNone)
-	mulDef.Instr.MarkLowered()
-
 	op := aluOpMSub
 	if add {
 		op = aluOpMAdd
 	}
+	var rn, rm operand
+	if wn, wm, signed, ok := m.widenedFactors(a, b); ok {
+		rn, rm = wn, wm
+		switch {
+		case signed && add:
+			op = aluOpSMAddL
+		case signed:
+			op = aluOpSMSubL
+		case add:
+			op = aluOpUMAddL
+		default:
+			op = aluOpUMSubL
+		}
+	} else {
+		rn = m.getOperand_NR(m.compiler.ValueDefinition(a), extModeNone)
+		rm = m.getOperand_NR(m.compiler.ValueDefinition(b), extModeNone)
+	}
+	ra := m.getOperand_NR(accDef, extModeNone)
+	mulDef.Instr.MarkLowered()
+
 	mla := m.allocateInstr()
 	mla.asALURRRR(op, m.compiler.VRegOf(si.Return()), rn, rm, ra.nr(), si.Return().Type().Bits() == 64)
 	m.insert(mla)
 	return true
+}
+
+// widenedFactors returns, for a 64-bit multiplication of x and y, the 32-bit values whose product it is
+// where both are extended from 32 bits the same way, only for it, or one is so and the other a constant
+// that fits 32 bits so extended: smull and umull multiply those and extend themselves. signed is which
+// way. It reports false, lowering nothing, otherwise.
+func (m *machine) widenedFactors(x, y ssa.Value) (rn, rm operand, signed, ok bool) {
+	if x.Type() != ssa.TypeI64 {
+		return
+	}
+	xd, yd := m.compiler.ValueDefinition(x), m.compiler.ValueDefinition(y)
+	// extendOf reports whether d is a 32 to 64-bit extend for this multiplication alone, and which way.
+	extendOf := func(d backend.SSAValueDefinition) (signed, ok bool) {
+		if m.compiler.MatchInstr(d, ssa.OpcodeSExtend) || m.compiler.MatchInstr(d, ssa.OpcodeUExtend) {
+			if from, _, s := d.Instr.ExtendData(); from == 32 {
+				return s, true
+			}
+		}
+		return false, false
+	}
+	xs, xok := extendOf(xd)
+	if !xok {
+		xd, yd = yd, xd
+		if xs, xok = extendOf(xd); !xok {
+			return
+		}
+	}
+	src := func(d backend.SSAValueDefinition) operand {
+		d.Instr.MarkLowered()
+		return m.getOperand_NR(m.compiler.ValueDefinition(d.Instr.Arg()), extModeNone)
+	}
+	if ys, yok := extendOf(yd); yok {
+		if ys != xs {
+			return
+		}
+		return src(xd), src(yd), xs, true
+	}
+	if !m.compiler.MatchInstr(yd, ssa.OpcodeIconst) {
+		return
+	}
+	k := yd.Instr.ConstantVal()
+	if xs && int64(k) != int64(int32(k)) || !xs && k>>32 != 0 {
+		return
+	}
+	yd.Instr.MarkLowered()
+	kr := m.compiler.AllocateVReg(ssa.TypeI32)
+	m.lowerConstantI32(kr, int32(k))
+	return src(xd), operandNR(kr), xs, true
 }
 
 // InsertMove implements backend.Machine.
@@ -1775,6 +2138,9 @@ func (m *machine) lowerVfpuFromInt(rd regalloc.VReg, rn operand, arr vecArrangem
 
 func (m *machine) lowerShifts(si *ssa.Instruction, ext extMode, aluOp aluOp) {
 	x, amount := si.Arg2()
+	if (aluOp == aluOpAsr || aluOp == aluOpLsr) && m.lowerLowBitfield(si, aluOp == aluOpAsr) {
+		return
+	}
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), ext)
 	rm := m.getOperand_ShiftImm_NR(m.compiler.ValueDefinition(amount), ext, x.Type().Bits())
 	rd := m.compiler.VRegOf(si.Return())
@@ -1799,6 +2165,24 @@ func (m *machine) lowerBitwiseAluOp(si *ssa.Instruction, op aluOp, ignoreResult 
 
 	_64 := x.Type().Bits() == 64
 	alu := m.allocateInstr()
+	// x ^ ~0 is ~x: orn rd, zr, x.
+	if op == aluOpEor && allOnes(yDef, _64) {
+		yDef.Instr.MarkLowered()
+		alu.asALU(aluOpOrn, rd, operandNR(xzrVReg), rn, _64)
+		m.insert(alu)
+		return
+	}
+	// An operand that is ~z, used only here, is z under the instruction that inverts it itself.
+	if notOp, ok := map[aluOp]aluOp{aluOpAnd: aluOpBic, aluOpAnds: aluOpBics, aluOpOrr: aluOpOrn, aluOpEor: aluOpEon}[op]; ok {
+		if z, ok := m.notOf(yDef, _64); ok {
+			alu.asALU(notOp, rd, rn, m.getOperand_NR(m.compiler.ValueDefinition(z), extModeNone), _64)
+			m.insert(alu)
+			return
+		}
+	}
+	if op == aluOpAnd && m.lowerBitfieldExtract(xDef, yDef, rd, _64) {
+		return
+	}
 	if instr := yDef.Instr; instr != nil && instr.Constant() {
 		c := instr.ConstantVal()
 		if isBitMaskImmediate(c, _64) {
@@ -1809,9 +2193,135 @@ func (m *machine) lowerBitwiseAluOp(si *ssa.Instruction, op aluOp, ignoreResult 
 		}
 	}
 
+	// The operations are commutative: a shift as the first operand folds as well as the second.
+	if isConstShift(m, xDef) && !isConstShift(m, yDef) {
+		rn = m.getOperand_NR(yDef, extModeNone)
+		yDef = xDef
+	}
 	rm := m.getOperand_SR_NR(yDef, extModeNone)
 	alu.asALU(op, rd, rn, rm, _64)
 	m.insert(alu)
+}
+
+// lowerLowBitfield lowers si, a right shift by a constant k of a left shift by k used only here, as the
+// extract of the low width-k bits, sign- or zero-extended: sxtb, sxth or sxtw where they fit. It reports
+// false, emitting nothing, otherwise.
+func (m *machine) lowerLowBitfield(si *ssa.Instruction, signed bool) bool {
+	x, amount := si.Arg2()
+	width := uint64(x.Type().Bits())
+	xDef, aDef := m.compiler.ValueDefinition(x), m.compiler.ValueDefinition(amount)
+	if !aDef.IsFromInstr() || !aDef.Instr.Constant() || !m.compiler.MatchInstr(xDef, ssa.OpcodeIshl) {
+		return false
+	}
+	k := aDef.Instr.ConstantVal() & (width - 1)
+	target, inner := xDef.Instr.Arg2()
+	iDef := m.compiler.ValueDefinition(inner)
+	if k == 0 || !iDef.IsFromInstr() || !iDef.Instr.Constant() || iDef.Instr.ConstantVal()&(width-1) != k {
+		return false
+	}
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(target), extModeNone)
+	xDef.Instr.MarkLowered()
+	for _, c := range [2]backend.SSAValueDefinition{aDef, iDef} {
+		if m.compiler.MatchInstr(c, ssa.OpcodeIconst) {
+			c.Instr.MarkLowered()
+		}
+	}
+	op := aluOpUbfx
+	if signed {
+		op = aluOpSbfx
+	}
+	bfx := m.allocateInstr()
+	bfx.asALUShift(op, m.compiler.VRegOf(si.Return()), rn, operandBitfield(0, byte(width-k)), width == 64)
+	m.insert(bfx)
+	return true
+}
+
+// isConstShift reports whether def is a shift by a constant that getOperand_SR_NR folds.
+func isConstShift(m *machine, def backend.SSAValueDefinition) bool {
+	if !m.compiler.MatchInstr(def, ssa.OpcodeIshl) && !m.compiler.MatchInstr(def, ssa.OpcodeUshr) && !m.compiler.MatchInstr(def, ssa.OpcodeSshr) {
+		return false
+	}
+	_, amount := def.Instr.Arg2()
+	a := m.compiler.ValueDefinition(amount)
+	return a.IsFromInstr() && a.Instr.Constant()
+}
+
+// lowerBitfieldExtract lowers the and of x and y into rd as a ubfx where one is a logical right shift by
+// a constant k, used only here, and the other a constant of the n lowest bits set: the field of n bits
+// from bit k on, or of what is left above k. It reports false, emitting nothing, otherwise.
+func (m *machine) lowerBitfieldExtract(x, y backend.SSAValueDefinition, rd regalloc.VReg, _64 bool) bool {
+	if !m.compiler.MatchInstr(y, ssa.OpcodeIconst) {
+		x, y = y, x
+	}
+	if !m.compiler.MatchInstr(y, ssa.OpcodeIconst) || !m.compiler.MatchInstr(x, ssa.OpcodeUshr) {
+		return false
+	}
+	width := uint64(32)
+	if _64 {
+		width = 64
+	}
+	mask := y.Instr.ConstantVal()
+	if !_64 {
+		mask = uint64(uint32(mask))
+	}
+	n := uint64(bits.TrailingZeros64(^mask))
+	if mask == 0 || mask&(mask+1) != 0 {
+		return false
+	}
+	target, amount := x.Instr.Arg2()
+	a := m.compiler.ValueDefinition(amount)
+	if !a.IsFromInstr() || !a.Instr.Constant() {
+		return false
+	}
+	k := a.Instr.ConstantVal() & (width - 1)
+	if k == 0 {
+		return false
+	}
+	// The shift leaves width-k bits: a mask of more keeps them all.
+	n = min(n, width-k)
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(target), extModeNone)
+	x.Instr.MarkLowered()
+	a.Instr.MarkLowered()
+	y.Instr.MarkLowered()
+	ubfx := m.allocateInstr()
+	ubfx.asALUShift(aluOpUbfx, rd, rn, operandBitfield(byte(k), byte(n)), _64)
+	m.insert(ubfx)
+	return true
+}
+
+// allOnes reports whether def is the constant with every bit of its width set.
+func allOnes(def backend.SSAValueDefinition, _64 bool) bool {
+	if !def.IsFromInstr() || !def.Instr.Constant() {
+		return false
+	}
+	c := def.Instr.ConstantVal()
+	if !_64 {
+		return uint32(c) == ^uint32(0)
+	}
+	return c == ^uint64(0)
+}
+
+// notOf returns z where def is ~z, a not or an xor with all ones, that nothing else uses, and marks it
+// lowered.
+func (m *machine) notOf(def backend.SSAValueDefinition, _64 bool) (ssa.Value, bool) {
+	switch {
+	case m.compiler.MatchInstr(def, ssa.OpcodeBnot):
+		def.Instr.MarkLowered()
+		return def.Instr.Arg(), true
+	case m.compiler.MatchInstr(def, ssa.OpcodeBxor):
+		a, b := def.Instr.Arg2()
+		if bd := m.compiler.ValueDefinition(b); allOnes(bd, _64) {
+			def.Instr.MarkLowered()
+			bd.Instr.MarkLowered()
+			return a, true
+		}
+		if ad := m.compiler.ValueDefinition(a); allOnes(ad, _64) {
+			def.Instr.MarkLowered()
+			ad.Instr.MarkLowered()
+			return b, true
+		}
+	}
+	return ssa.ValueInvalid, false
 }
 
 // lowerBitwiseNot lowers `rd = ^rn` for OpcodeBnot.
@@ -1888,9 +2398,11 @@ func zeroExtends32(instr *ssa.Instruction) bool {
 	switch instr.Opcode() {
 	case
 		ssa.OpcodeIadd, ssa.OpcodeIsub, ssa.OpcodeLoad,
-		ssa.OpcodeBand, ssa.OpcodeBor, ssa.OpcodeBnot,
+		ssa.OpcodeBand, ssa.OpcodeBor, ssa.OpcodeBxor, ssa.OpcodeBnot,
 		ssa.OpcodeIshl, ssa.OpcodeUshr, ssa.OpcodeSshr,
 		ssa.OpcodeRotl, ssa.OpcodeRotr,
+		ssa.OpcodeImul, ssa.OpcodeUdiv, ssa.OpcodeSdiv, ssa.OpcodeUrem, ssa.OpcodeSrem,
+		ssa.OpcodeClz, ssa.OpcodeCtz, ssa.OpcodeSelect,
 		ssa.OpcodeUload8, ssa.OpcodeUload16, ssa.OpcodeUload32:
 		return true
 	default:
@@ -1915,10 +2427,87 @@ func (m *machine) aliasZeroExtended32(blk ssa.BasicBlock) {
 		if from, _ := cur.ExtendFromToBits(); from != 32 {
 			continue
 		}
-		if arg := cur.Arg(); zeroExtends32(builder.InstructionOfValue(arg)) {
+		arg := cur.Arg()
+		def := builder.InstructionOfValue(arg)
+		if zeroExtends32(def) || def == nil && m.zeroExtendedParam(builder, arg) {
 			m.compiler.AliasVReg(cur.Return(), arg)
 		}
 	}
+}
+
+// zeroExtendedParam reports whether v, a block parameter, is zero-extended where it is: every edge into
+// its block passes a value that zeroExtends32, an i32 constant, which is built with a W write, or a
+// parameter that is so too. Copies between parameters keep all 64 bits, so a cycle of them is
+// zero-extended where everything coming into it is. The entry block's parameters, the function's, are
+// not known to be.
+func (m *machine) zeroExtendedParam(builder ssa.Builder, v ssa.Value) bool {
+	if v.Type() != ssa.TypeI32 {
+		return false
+	}
+	m.zextVisiting = m.zextVisiting[:0]
+	return m.zeroExtendedParamIn(builder, v)
+}
+
+func (m *machine) zeroExtendedParamIn(builder ssa.Builder, v ssa.Value) bool {
+	for _, p := range m.zextVisiting {
+		if p == v {
+			return true
+		}
+	}
+	blk := m.paramBlockOf(v)
+	if blk == nil || blk.EntryBlock() || len(m.zextVisiting) == zeroExtendedParamDepth {
+		return false
+	}
+	idx := -1
+	for i := range blk.Params() {
+		if blk.Param(i) == v {
+			idx = i
+		}
+	}
+	m.zextVisiting = append(m.zextVisiting, v)
+	for i := range blk.Preds() {
+		found := false
+		for br := blk.Pred(i).Tail(); br != nil; br = br.Prev() {
+			op := br.Opcode()
+			if op != ssa.OpcodeJump && op != ssa.OpcodeBrz && op != ssa.OpcodeBrnz {
+				break
+			}
+			_, args, target := br.BranchData()
+			if target != blk.ID() {
+				continue
+			}
+			if idx < 0 || idx >= len(args) {
+				return false
+			}
+			found = true
+			a := args[idx]
+			def := builder.InstructionOfValue(a)
+			switch {
+			case def == nil:
+				if !m.zeroExtendedParamIn(builder, a) {
+					return false
+				}
+			case zeroExtends32(def), def.Opcode() == ssa.OpcodeIconst:
+			default:
+				return false
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// zeroExtendedParamDepth is how many parameters deep zeroExtendedParam looks.
+const zeroExtendedParamDepth = 8
+
+// paramBlockOf returns the block v is a parameter of, or nil.
+func (m *machine) paramBlockOf(v ssa.Value) ssa.BasicBlock {
+	if id := int(v.ID()); id < len(m.paramBlocks) {
+		return m.paramBlocks[id]
+	}
+	return nil
 }
 
 func (m *machine) lowerExtend(arg, ret ssa.Value, from, to byte, signed bool) {
@@ -1949,13 +2538,30 @@ func (m *machine) lowerFcmp(x, y, result ssa.Value, c ssa.FloatCmpCond) {
 
 func (m *machine) lowerImul(x, y, result ssa.Value) {
 	rd := m.compiler.VRegOf(result)
+	if rn, rm, signed, ok := m.widenedFactors(x, y); ok {
+		op := aluOpUMAddL
+		if signed {
+			op = aluOpSMAddL
+		}
+		mul := m.allocateInstr()
+		mul.asALURRRR(op, rd, rn, rm, xzrVReg, true)
+		m.insert(mul)
+		return
+	}
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 	rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
 
-	// TODO: if this comes before Add/Sub, we could merge it by putting it into the place of xzrVReg.
-
 	mul := m.allocateInstr()
 	mul.asALURRRR(aluOpMAdd, rd, rn, rm, xzrVReg, x.Type().Bits() == 64)
+	m.insert(mul)
+}
+
+func (m *machine) lowerUmulhi(si *ssa.Instruction) {
+	x, y := si.Arg2()
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
+	rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
+	mul := m.allocateInstr()
+	mul.asALURRRR(aluOpUMulH, m.compiler.VRegOf(si.Return()), rn, rm, xzrVReg, true)
 	m.insert(mul)
 }
 
@@ -2001,7 +2607,7 @@ func (m *machine) lowerPopcnt(x, result ssa.Value) {
 	// and the registers may use different names. In our encoding we use the following
 	// instructions:
 	//
-	//    ins v0.d[0], x0     ;; mov from GPR to vec (FMOV above) is encoded as INS
+	//    fmov d0, x0         ;; mov from GPR to vec
 	//    cnt v0.16b, v0.16b  ;; we use vec arrangement 16b
 	//    uaddlv h0, v0.8b    ;; h0 is still v0 with the dest width specifier 'H', implied when src arrangement is 8b
 	//    mov x5, v0.d[0]     ;; finally we mov the result back to a GPR
@@ -2011,9 +2617,9 @@ func (m *machine) lowerPopcnt(x, result ssa.Value) {
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
 
 	rf1 := operandNR(m.compiler.AllocateVReg(ssa.TypeF64))
-	ins := m.allocateInstr()
-	ins.asMovToVec(rf1.nr(), rn, vecArrangementD, vecIndex(0))
-	m.insert(ins)
+	fmov := m.allocateInstr()
+	fmov.asFpuMovFromInt(rf1.nr(), rn, true)
+	m.insert(fmov)
 
 	rf2 := operandNR(m.compiler.AllocateVReg(ssa.TypeF64))
 	cnt := m.allocateInstr()
@@ -2080,6 +2686,11 @@ func (m *machine) lowerExitWithCode(execCtxVReg regalloc.VReg, code nativeapi.Ex
 }
 
 func (m *machine) lowerIcmpToFlag(x, y ssa.Value, signed bool) {
+	m.lowerIcmpToFlagWith(x, y, signed, regalloc.VRegInvalid)
+}
+
+// lowerIcmpToFlagWith is lowerIcmpToFlag with y already in yReg, where that is valid.
+func (m *machine) lowerIcmpToFlagWith(x, y ssa.Value, signed bool, yReg regalloc.VReg) {
 	// subs has a 32 and a 64 bit form only, so the comparison happens at the width of
 	// the wider operand, and the narrower one is extended into it by the operand helpers
 	// below, from extMod. The extension follows `signed`, which is what makes comparing
@@ -2096,6 +2707,27 @@ func (m *machine) lowerIcmpToFlag(x, y ssa.Value, signed bool) {
 	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extMod)
 	yDef := m.compiler.ValueDefinition(y)
 	var rm operand
+	if yReg.Valid() && y.Type() == cmpType {
+		alu := m.allocateInstr()
+		alu.asALU(aluOpSubS, xzrVReg, rn, operandNR(yReg), cmpType.Bits() == 64)
+		m.insert(alu)
+		return
+	}
+	if y.Type() == cmpType && m.compiler.MatchInstr(yDef, ssa.OpcodeIconst) {
+		// A negative constant whose negation fits an immediate: cmn rn, #-y sets the flags cmp rn, y
+		// would, -y being no minimum integer, rather than build the constant in a register.
+		k := int64(yDef.Instr.ConstantVal())
+		if cmpType.Bits() == 32 {
+			k = int64(int32(k))
+		}
+		if imm, ok := asImm12Operand(uint64(-k)); ok && k < 0 {
+			yDef.Instr.MarkLowered()
+			alu := m.allocateInstr()
+			alu.asALU(aluOpAddS, xzrVReg, rn, imm, cmpType.Bits() == 64)
+			m.insert(alu)
+			return
+		}
+	}
 	if y.Type().Bits() == cmpType.Bits() {
 		// Second operand can be in any of Imm12, ER, SR, or NR form supported by the SUBS instructions.
 		rm = m.getOperand_Imm12_ER_SR_NR(yDef, extMod)
@@ -2161,28 +2793,39 @@ func (m *machine) promoteToF64(rn operand) regalloc.VReg {
 // The comparison feeding the trap is folded whenever it is still foldable,
 // which is the shape the frontend emits. It is not always: any pass that moves
 // the comparison into another block, or a second use of it, leaves a condition
-// already materialized as a 0-or-1 value, and cbnz tests that directly.
+// already materialized as a 0-or-1 value, and cbnz tests that directly. An or
+// of two comparisons, as two bounds checks merged make, is a compare and a
+// conditional compare.
 func (m *machine) lowerTrapCond(condDef backend.SSAValueDefinition) cond {
+	if m.compiler.MatchInstr(condDef, ssa.OpcodeBor) {
+		if cc, ok := m.twoIcmpsToFlag(condDef.Instr, false); ok {
+			condDef.Instr.MarkLowered()
+			return cc.asCond()
+		}
+	}
 	if !m.compiler.MatchInstr(condDef, ssa.OpcodeIcmp) {
 		rn := m.getOperand_NR(condDef, extModeNone)
 		return registerAsRegNotZeroCond(rn.nr())
 	}
 	condDef.Instr.MarkLowered()
 	x, y, c := condDef.Instr.IcmpData()
-	if !m.tryLowerBandToFlag(x, y) {
+	if !m.tryLowerBandToFlag(x, y, c) {
 		m.lowerIcmpToFlag(x, y, c.Signed())
 	}
 	return condFlagFromSSAIntegerCmpCond(c).asCond()
 }
 
-// invertTrapCond returns the condition under which the trap is NOT taken, used
-// to branch over an inlined exit sequence.
+// invertTrapCond returns the opposite of c: the condition under which a trap is
+// not taken, to branch over an inlined exit sequence, or a branch to a target out
+// of c's range is not, to branch over a branch that reaches it.
 func invertTrapCond(c cond) cond {
 	switch c.kind() {
 	case condKindRegisterZero:
 		return registerAsRegNotZeroCond(c.register())
 	case condKindRegisterNotZero:
 		return registerAsRegZeroCond(c.register())
+	case condKindRegisterSignBit:
+		return registerAsSignBitCond(c.register(), !c.signBitSet())
 	default:
 		return c.flag().invert().asCond()
 	}
@@ -2210,17 +2853,11 @@ func (m *machine) lowerExitIfTrueWithCode(execCtxVReg regalloc.VReg, cond ssa.Va
 // code, instead of inlining the whole exit sequence at each site. The hot
 // path falls through (the branch is taken only when trapping), and the
 // island is materialized once, after register allocation, by emitTrapIslands.
-func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond ssa.Value, code nativeapi.ExitCode) {
+func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.ExitCode) {
 	condDef := m.compiler.ValueDefinition(cond)
 	trapCond := m.lowerTrapCond(condDef)
 
-	// The island runs after register allocation, so it needs the execution
-	// context in a fixed register: the reserved tmp register, which is never
-	// allocated and holds no live value between lowered sequences.
-	mov := m.allocateInstr()
-	mov.asMove64(tmpRegVReg, execCtxVReg)
-	m.insert(mov)
-
+	// The island reloads the execution context from the slot the prologue fills: see needsCtxSlot.
 	cbr := m.allocateInstr()
 	cbr.asCondBr(trapCond, m.getOrCreateTrapIsland(code), false /* ignored */)
 	m.insert(cbr)
@@ -2228,14 +2865,41 @@ func (m *machine) lowerExitIfTrueWithCodeShared(execCtxVReg regalloc.VReg, cond 
 
 func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 	cvalDef := m.compiler.ValueDefinition(c)
+	shared, sharedReg := ssa.ValueInvalid, regalloc.VRegInvalid
 
 	var cc condFlag
 	switch {
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
 		cvalInstr := cvalDef.Instr
-		x, y, c := cvalInstr.IcmpData()
+		cx, cy, c := cvalInstr.IcmpData()
 		cc = condFlagFromSSAIntegerCmpCond(c)
-		m.lowerIcmpToFlag(x, y, c.Signed())
+		// A clamp selects the constant it compares with: built in a register once, it serves both.
+		sameConst := func(v ssa.Value) bool {
+			if v == cy {
+				return true
+			}
+			dv, dy := m.compiler.ValueDefinition(v), m.compiler.ValueDefinition(cy)
+			return v.Type() == cy.Type() && m.compiler.MatchInstr(dv, ssa.OpcodeIconst) && m.compiler.MatchInstr(dy, ssa.OpcodeIconst) &&
+				dv.Instr.ConstantVal() == dy.Instr.ConstantVal()
+		}
+		if (sameConst(x) || sameConst(y)) && cy.Type() == cx.Type() && m.compiler.MatchInstr(m.compiler.ValueDefinition(cy), ssa.OpcodeIconst) {
+			k := m.compiler.ValueDefinition(cy).Instr.ConstantVal()
+			neg := -int64(k)
+			if cy.Type() == ssa.TypeI32 {
+				neg = -int64(int32(k))
+			}
+			_, imm := asImm12Operand(k)
+			_, cmn := asImm12Operand(uint64(neg))
+			if !imm && !(cmn && neg > 0) {
+				shared, sharedReg = y, m.compiler.AllocateVReg(cy.Type())
+				if sameConst(x) {
+					shared = x
+				}
+				m.insertLoadConstant(k, cy.Type(), sharedReg)
+				m.compiler.ValueDefinition(shared).Instr.MarkLowered()
+			}
+		}
+		m.lowerIcmpToFlagWith(cx, cy, c.Signed(), sharedReg)
 		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeFcmp): // This case we can use the Fpu flag directly.
 		cvalInstr := cvalDef.Instr
@@ -2261,15 +2925,15 @@ func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 		case ssa.TypeF32, ssa.TypeF64:
 			// The condition holds when it is not zero, the same test as above, but the
 			// value is a float in a vector register now. fcmp takes two registers, so the
-			// zero to compare against is materialized first with INS Vd.D[0], XZR, which
-			// zeroes the low 64 bits, covering both the S and the D view of the temporary.
-			//	ins tmp.d[0], xzr
+			// zero to compare against is materialized first with FMOV Dd, XZR, which
+			// zeroes the register, covering both the S and the D view of the temporary.
+			//	fmov tmp, xzr
 			//	fcmp s/d(rn), s/d(tmp)
 			// A NaN condition compares unordered, which leaves Z clear, so it counts as
 			// non-zero and selects x, and -0.0 compares equal to zero and selects y.
 			tmp := m.compiler.AllocateVReg(ssa.TypeF64)
 			zero := m.allocateInstr()
-			zero.asMovToVec(tmp, operandNR(xzrVReg), vecArrangementD, vecIndex(0))
+			zero.asFpuMovFromInt(tmp, operandNR(xzrVReg), true)
 			m.insert(zero)
 
 			cmp := m.allocateInstr()
@@ -2301,8 +2965,18 @@ func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 		cc = ne
 	}
 
-	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone)
-	rm := m.getOperand_NR(m.compiler.ValueDefinition(y), extModeNone)
+	operandOf := func(v ssa.Value) operand {
+		if v == shared {
+			return operandNR(sharedReg)
+		}
+		// An integer zero is the zero register.
+		if def := m.compiler.ValueDefinition(v); v.Type().IsInt() && m.compiler.MatchInstr(def, ssa.OpcodeIconst) && def.Instr.ConstantVal() == 0 {
+			def.Instr.MarkLowered()
+			return operandNR(xzrVReg)
+		}
+		return m.getOperand_NR(m.compiler.ValueDefinition(v), extModeNone)
+	}
+	rn, rm := operandOf(x), operandOf(y)
 
 	rd := m.compiler.VRegOf(result)
 	switch x.Type() {

@@ -19,6 +19,9 @@ const (
 	ExitCodeIntegerDivisionByZero
 	ExitCodeIntegerOverflow
 	ExitCodeInvalidConversionToInteger
+	// ExitCodeCheckModuleExitCode is how a preemption check returns to Go when the runtime asked
+	// the goroutine to stop (see ssa.OpcodePreemptRequested): Go yields there, and unwinds the
+	// call instead of resuming it if the module was closed or the call's context is done.
 	ExitCodeCheckModuleExitCode
 	ExitCodeCallListenerBefore
 	ExitCodeCallListenerAfter
@@ -131,20 +134,3 @@ func ExitCodeCallGoFunctionWithIndex(index int, withListener bool) ExitCode {
 func GoFunctionIndexFromExitCode(exitCode ExitCode) int {
 	return int(exitCode >> 8)
 }
-
-// TerminationFuel is how many fuel ticks a guest gets before compiled code has to
-// return to Go. Under WithCloseOnContextDone a tick is spent at every function
-// entry and every loop back-edge (see ssa.OpcodeFuelDec), and running out exits
-// with ExitCodeCheckModuleExitCode, which does the authoritative closed check,
-// yields the P so the cancellation watchdog can run, and refills the counter.
-//
-// The number sets both the tax on running code and the worst-case cancellation
-// latency, and the two pull in opposite directions. At 8192 the tax is already
-// invisible: a build with the counter raised to 1<<26, so that a whole benchmark
-// runs without ever reaching this exit, measured the same as 8192 on fibonacci,
-// which is the shape that runs out most often (about 330 times per call). What is
-// left is the latency, 8192 back-edges or function entries -- microseconds for the
-// tight loops that are the hard case, and still bounded for loops whose bodies are
-// slow. Powers of two are not required; this one is a round number in the flat
-// part of that trade.
-const TerminationFuel = 8192

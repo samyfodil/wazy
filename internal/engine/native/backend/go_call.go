@@ -108,6 +108,14 @@ import "github.com/samyfodil/wazy/internal/engine/native/ssa"
 // signatures fall back to the full check (still correct, just not elided).
 const StackBoundsCheckMarginBytes = 512
 
+// StackCheckBiasBytes is how far, beyond MARGIN, the stored stack check limit sits above the real
+// bottom of the stack, and what every stack check takes off its required size in return: a check of
+// rsp-(required-BIAS) against limit+BIAS is the very check of rsp-required against limit. What it buys
+// is that a frame requiring no more than BIAS compares the stack pointer itself, so its check has no
+// adjustment to make and undo around the compare. Such a frame checks for BIAS bytes where it needs
+// fewer, which only makes the stack grow a little earlier.
+const StackCheckBiasBytes = 256
+
 // LeafStackCheckHeadroomBytes is slack kept below MARGIN when eliding a leaf
 // function's prologue stack-bounds check (both ISAs). A leaf makes no calls of
 // any kind (so maxRequiredStackSizeForCalls stays 0) and thus its whole frame

@@ -3,6 +3,7 @@ package arm64
 import (
 	"fmt"
 
+	"github.com/samyfodil/wazy/internal/engine/native/backend"
 	"github.com/samyfodil/wazy/internal/engine/native/backend/regalloc"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 )
@@ -11,9 +12,121 @@ import (
 func (m *machine) PostRegAlloc() {
 	m.setupPrologue()
 	m.postRegAlloc()
+	m.expandVecMaps()
 	m.pairSpillAccesses()
 	m.emitTrapIslands()
+	m.emitPreemptIslands()
+	m.threadJumps()
 	m.emitFpConstPool()
+}
+
+// emitPreemptIslands materializes the out-of-line halves of masked preemption
+// checks after the trap islands:
+//
+//	island:
+//		ldr  tmp, [preempt]
+//		cmn  tmp, #1314
+//		b.eq <slow>
+//		cbz  counter, <exit>    ;; see foldZeroExit
+//		b    <back>
+//
+// tmp is the register reserved for exactly this kind of scratch use, so nothing
+// the allocator placed is disturbed.
+func (m *machine) emitPreemptIslands() {
+	if len(m.preemptIslands) == 0 {
+		return
+	}
+	lastPos := m.orderedSSABlockLabelPos[len(m.orderedSSABlockLabelPos)-1]
+	cur := lastPos.end
+	for cur.next != nil {
+		cur = cur.next
+	}
+	for _, pi := range m.preemptIslands {
+		nop := m.allocateInstr()
+		nop.asNop0WithLabel(pi.l)
+		pos := m.labelPositionPool.GetOrAllocate(int(pi.l))
+		pos.begin, pos.end = nop, nop
+		cur = linkInstr(cur, nop)
+
+		amode := m.amodePool.Allocate()
+		*amode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: preemptVReg}
+		load := m.allocateInstr()
+		load.asULoad(tmpRegVReg, amode, 64)
+		cur = linkInstr(cur, load)
+		toSlow := m.allocateInstr()
+		toSlow.asCondBr(registerAsSignBitCond(tmpRegVReg, true), pi.slow, true)
+		cur = linkInstr(cur, toSlow)
+		if test, exit := m.foldZeroExit(pi); exit != nil {
+			if test != nil {
+				cur = linkInstr(cur, test)
+			}
+			cur = linkInstr(cur, exit)
+		}
+		toBack := m.allocateInstr()
+		toBack.asBr(pi.back)
+		cur = linkInstr(cur, toBack)
+	}
+	// Extend the last block over the islands, so that encoding walks them.
+	lastPos.end = cur
+}
+
+// foldZeroExit moves the exit test of a loop that counts down to zero into its
+// preemption island, when it is the first thing after the masked check:
+//
+//		tst  counter, #mask
+//		b.eq <island>
+//	back:
+//		cbz  counter, <exit>      ;; or subs wzr, counter, #0; b.eq <exit>
+//
+// Whenever the counter is zero its masked bits are too, so the island sees every
+// exit, and the loop pays for neither the exit test nor the check. It returns
+// copies of the test for the island, leaving nops in the loop, or nil if the
+// shape is not there.
+func (m *machine) foldZeroExit(pi preemptIsland) (test, branch *instruction) {
+	r := pi.test.rn.nr().RealReg()
+	first := pi.backInstr.next
+	for first != nil && first.kind == nop0 {
+		first = first.next
+	}
+	if first == nil {
+		return nil, nil
+	}
+	switch first.kind {
+	case condBr: // cbz counter, <exit>
+		if c := cond(first.u1); c.kind() != condKindRegisterZero || c.register().RealReg() != r {
+			return nil, nil
+		}
+		branch = m.allocateInstr()
+		*branch = *first
+		branch.prev, branch.next = nil, nil
+		// In place rather than unlinked: it may end its block.
+		first.asNop0WithLabel(labelInvalid)
+		return nil, branch
+	case aluRRImm12: // subs wzr, counter, #0; b.eq <exit>
+		imm, shift := first.rm.imm12()
+		if aluOp(first.u1) != aluOpSubS || first.rd != xzrVReg || first.rn.nr().RealReg() != r || imm != 0 || shift != 0 {
+			return nil, nil
+		}
+		j := first.next
+		if j == nil || j.kind != condBr || cond(j.u1) != eq.asCond() || j.next == nil {
+			return nil, nil
+		}
+		switch k := j.next; k.kind {
+		case cSel, cSet, fpuCSel, cCmpImm:
+			return nil, nil // reads the flags the test set
+		case condBr:
+			if cond(k.u1).kind() == condKindCondFlagSet {
+				return nil, nil
+			}
+		}
+		test, branch = m.allocateInstr(), m.allocateInstr()
+		*test, *branch = *first, *j
+		test.prev, test.next, branch.prev, branch.next = nil, nil, nil, nil
+		first.asNop0WithLabel(labelInvalid)
+		j.asNop0WithLabel(labelInvalid)
+		return test, branch
+	}
+	return nil, nil
 }
 
 // emitFpConstPool materializes the deduplicated FP/SIMD literal pool after the
@@ -79,10 +192,23 @@ func (m *machine) emitTrapIslands() {
 		pos.begin, pos.end = nop, nop
 		cur = linkInstr(cur, nop)
 
+		// Reload the execution context from the reserved ctx slot.
+		execOff, _ := m.EhCtxSlotOffsets()
+		reloadMode := m.amodePool.Allocate()
+		*reloadMode = addressMode{kind: addressModeKindRegUnsignedImm12, rn: spVReg, imm: execOff}
+		reload := m.allocateInstr()
+		reload.asULoad(tmpRegVReg, reloadMode, 64)
+		cur = linkInstr(cur, reload)
+
 		// Set the exit code in the execution context.
 		movz := m.allocateInstr()
-		movz.asMOVZ(x17VReg, uint64(ti.code), 0, true)
+		movz.asMOVZ(x17VReg, uint64(ti.code)&0xffff, 0, true)
 		cur = linkInstr(cur, movz)
+		if hi := uint64(ti.code) >> 16; hi != 0 { // a payload above the code: see ExitCodeMask.
+			movk := m.allocateInstr()
+			movk.asMOVK(x17VReg, hi, 1, true)
+			cur = linkInstr(cur, movk)
+		}
 
 		setExitCode := m.allocateInstr()
 		mode := m.amodePool.Allocate()
@@ -209,13 +335,17 @@ func (m *machine) setupPrologue() {
 		}
 	}
 
+	// The frame size's store below reserves the spill slots too where its pre-index reaches past them.
+	spillByFrameSizeSlot := m.spillSlotSize > 0 && m.spillSlotSize+16 <= 256
 	if size := m.spillSlotSize; size > 0 {
 		// Check if size is 16-byte aligned.
 		if size&0xf != 0 {
 			panic(fmt.Errorf("BUG: spill slot size %d is not 16-byte aligned", size))
 		}
 
-		cur = m.addsAddOrSubStackPointer(cur, spVReg, size, false)
+		if !spillByFrameSizeSlot {
+			cur = m.addsAddOrSubStackPointer(cur, spVReg, size, false)
+		}
 
 		// At this point, the stack looks like:
 		//
@@ -272,7 +402,11 @@ func (m *machine) setupPrologue() {
 	//                                            +-----------------+ <---- SP
 	//            (low address)
 	//
-	cur = m.createFrameSizeSlot(cur, m.frameSize())
+	below := int64(16)
+	if spillByFrameSizeSlot {
+		below += m.spillSlotSize
+	}
+	cur = m.createFrameSizeSlot(cur, m.frameSize(), below)
 
 	// P3.0: for functions with an EH context, store the entry-ABI context
 	// registers (execCtx in x0, moduleCtx in x1) into the reserved fixed
@@ -284,10 +418,13 @@ func (m *machine) setupPrologue() {
 	// saveRequiredRegs), and x1 is saved/restored across that re-entry -- the
 	// same invariant that lets the function body read them after the prologue.
 	// Nothing reads these slots yet (P3.0), so runtime behavior is unchanged.
-	if m.hasEHContext {
+	// A function with trap islands stores the execution context too: they reload it from there.
+	if m.needsCtxSlot() {
 		execOff, modOff := m.EhCtxSlotOffsets()
 		cur = m.storeEhCtxSlot(cur, x0VReg, execOff)
-		cur = m.storeEhCtxSlot(cur, x1VReg, modOff)
+		if m.hasEHContext {
+			cur = m.storeEhCtxSlot(cur, x1VReg, modOff)
+		}
 	}
 
 	linkInstr(cur, prevInitInst)
@@ -327,7 +464,8 @@ func (m *machine) createReturnAddrAndSizeOfArgRetSlot(cur *instruction) *instruc
 	return cur
 }
 
-func (m *machine) createFrameSizeSlot(cur *instruction, s int64) *instruction {
+// createFrameSizeSlot stores the frame size s at below bytes under the stack pointer, which it moves there.
+func (m *machine) createFrameSizeSlot(cur *instruction, s, below int64) *instruction {
 	var frameSizeReg regalloc.VReg
 	if s > 0 {
 		cur = m.lowerConstantI64AndInsert(cur, tmpRegVReg, s)
@@ -336,8 +474,8 @@ func (m *machine) createFrameSizeSlot(cur *instruction, s int64) *instruction {
 		frameSizeReg = xzrVReg
 	}
 	_amode := addressModePreOrPostIndex(m, spVReg,
-		-16,  // stack pointer must be 16-byte aligned.
-		true, // Decrement before store.
+		-below, // a multiple of 16, as the stack pointer must be.
+		true,   // Decrement before store.
 	)
 	store := m.allocateInstr()
 	store.asStore(operandNR(frameSizeReg), _amode, 64)
@@ -385,37 +523,33 @@ func (m *machine) postRegAlloc() {
 func (m *machine) setupEpilogueAfter(cur *instruction) {
 	prevNext := cur.next
 
-	// We've stored the frame size in the prologue, and now that we are about to return from this function, we won't need it anymore.
-	cur = m.addsAddOrSubStackPointer(cur, spVReg, 16, true)
-
-	if s := m.spillSlotSize; s > 0 {
-		// Adjust SP to the original value:
-		//
-		//            (high address)                        (high address)
-		//          +-----------------+                  +-----------------+
-		//          |     .......     |                  |     .......     |
-		//          |      ret Y      |                  |      ret Y      |
-		//          |     .......     |                  |     .......     |
-		//          |      ret 0      |                  |      ret 0      |
-		//          |      arg X      |                  |      arg X      |
-		//          |     .......     |                  |     .......     |
-		//          |      arg 1      |                  |      arg 1      |
-		//          |      arg 0      |                  |      arg 0      |
-		//          |      xxxxx      |                  |      xxxxx      |
-		//          |   ReturnAddress |                  |   ReturnAddress |
-		//          +-----------------+      ====>       +-----------------+
-		//          |    clobbered M  |                  |    clobbered M  |
-		//          |   ............  |                  |   ............  |
-		//          |    clobbered 1  |                  |    clobbered 1  |
-		//          |    clobbered 0  |                  |    clobbered 0  |
-		//          |   spill slot N  |                  +-----------------+ <---- SP
-		//          |   ............  |
-		//          |   spill slot 0  |
-		//   SP---> +-----------------+
-		//             (low address)
-		//
-		cur = m.addsAddOrSubStackPointer(cur, spVReg, s, true)
-	}
+	// We've stored the frame size in the prologue, and now that we are about to return from this function,
+	// we won't need it anymore; one add frees it and the spill slots with it, adjusting SP to:
+	//
+	//            (high address)                        (high address)
+	//          +-----------------+                  +-----------------+
+	//          |     .......     |                  |     .......     |
+	//          |      ret Y      |                  |      ret Y      |
+	//          |     .......     |                  |     .......     |
+	//          |      ret 0      |                  |      ret 0      |
+	//          |      arg X      |                  |      arg X      |
+	//          |     .......     |                  |     .......     |
+	//          |      arg 1      |                  |      arg 1      |
+	//          |      arg 0      |                  |      arg 0      |
+	//          |      xxxxx      |                  |      xxxxx      |
+	//          |   ReturnAddress |                  |   ReturnAddress |
+	//          +-----------------+      ====>       +-----------------+
+	//          |    clobbered M  |                  |    clobbered M  |
+	//          |   ............  |                  |   ............  |
+	//          |    clobbered 1  |                  |    clobbered 1  |
+	//          |    clobbered 0  |                  |    clobbered 0  |
+	//          |   spill slot N  |                  +-----------------+ <---- SP
+	//          |   ............  |
+	//          |   spill slot 0  |
+	//   SP---> +-----------------+
+	//             (low address)
+	//
+	cur = m.addsAddOrSubStackPointer(cur, spVReg, 16+m.spillSlotSize, true)
 
 	// First we need to restore the clobbered registers.
 	if len(m.clobberedRegs) > 0 {
@@ -527,14 +661,18 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 		panic("BUG")
 	}
 
-	if immm12op, ok := asImm12Operand(uint64(requiredStackSize)); ok {
-		// sub tmp, sp, #requiredStackSize
+	// The stored limit is raised by backend.StackCheckBiasBytes, so only the excess is checked for.
+	adjust := max(requiredStackSize-backend.StackCheckBiasBytes, 0)
+	if adjust == 0 {
+		// sp itself is compared.
+	} else if immm12op, ok := asImm12Operand(uint64(adjust)); ok {
+		// sub tmp, sp, #adjust
 		sub := m.allocateInstr()
 		sub.asALU(aluOpSub, tmpRegVReg, operandNR(spVReg), immm12op, true)
 		cur = linkInstr(cur, sub)
 	} else {
-		// This case, we first load the requiredStackSize into the temporary register,
-		cur = m.lowerConstantI64AndInsert(cur, tmpRegVReg, requiredStackSize)
+		// This case, we first load the adjustment into the temporary register,
+		cur = m.lowerConstantI64AndInsert(cur, tmpRegVReg, adjust)
 		// Then subtract it.
 		sub := m.allocateInstr()
 		sub.asALU(aluOpSub, tmpRegVReg, operandNR(spVReg), operandNR(tmpRegVReg), true)
@@ -554,9 +692,13 @@ func (m *machine) insertStackBoundsCheck(requiredStackSize int64, cur *instructi
 	ldr.asULoad(tmp2, amode, 64)
 	cur = linkInstr(cur, ldr)
 
-	// subs xzr, tmp, tmp2
+	// subs xzr, tmp, tmp2, or subs xzr, sp, tmp2.
 	subs := m.allocateInstr()
-	subs.asALU(aluOpSubS, xzrVReg, operandNR(tmpRegVReg), operandNR(tmp2), true)
+	if adjust == 0 {
+		subs.asALU(aluOpSubS, xzrVReg, operandNR(spVReg), operandNR(tmp2), true)
+	} else {
+		subs.asALU(aluOpSubS, xzrVReg, operandNR(tmpRegVReg), operandNR(tmp2), true)
+	}
 	cur = linkInstr(cur, subs)
 
 	// b.ge #imm

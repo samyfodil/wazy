@@ -132,6 +132,12 @@ func WithComponentImport(name string, componentBytes []byte) Option {
 	return instance.WithComponentImport(name, componentBytes)
 }
 
+// WithAsyncImportCustom is WithAsyncImport with a hand-built signature, as
+// WithImportCustom is WithImport's: build fd and resolve from a TypeTable.
+func WithAsyncImportCustom(iface, name string, fn AsyncHostFunc, fd FuncDesc, resolve Resolver) Option {
+	return instance.WithAsyncImportCustom(iface, name, fn, fd, resolve)
+}
+
 // WithAsyncImport registers fn as the component's async-lowered import
 // iface/name. Pair it with Instance.CallAsync so fn may complete the call later,
 // from another goroutine (real I/O), via AsyncCall.Resolve.

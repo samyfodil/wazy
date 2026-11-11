@@ -179,18 +179,15 @@ func TestMachine_LowerInstr_IcmpImm(t *testing.T) {
 			},
 		},
 		{
-			// All ones. A 64-bit CMP against imm32 0xffffffff would in fact
-			// compare against -1 correctly, but the lowering reuses the same
-			// conservative test as Icmp's y operand and materializes it.
+			// All ones: the 64-bit CMP sign-extends imm32 0xffffffff to -1.
 			name: "i64/eq/all ones",
 			typ:  ssa.TypeI64,
 			imm:  ^uint64(0),
 			cond: ssa.IntegerCmpCondEqual,
 			exp: []string{
-				"movabsq $-1, %r100?",
-				"cmpq %r100?, %rax",
-				"setz %r101?",
-				"movzx.bq %r101?, %rcx",
+				"cmpq $-1, %rax",
+				"setz %r100?",
+				"movzx.bq %r100?, %rcx",
 			},
 		},
 	} {

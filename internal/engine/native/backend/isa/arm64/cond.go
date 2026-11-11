@@ -23,6 +23,10 @@ const (
 	// condKindCondFlagSet indicates that the instruction must be encoded as B.cond:
 	// https://developer.arm.com/documentation/ddi0596/2020-12/Base-Instructions/B-cond--Branch-conditionally-
 	condKindCondFlagSet
+	// condKindRegisterSignBit indicates that the instruction must be encoded as TBNZ, or TBZ, on bit 63:
+	// https://developer.arm.com/documentation/ddi0596/2020-12/Base-Instructions/TBNZ--Test-bit-and-Branch-if-Nonzero-
+	// It reaches only ±32KB, against ±1MB for the others.
+	condKindRegisterSignBit
 )
 
 // kind returns the kind of condition which is stored in the first two bits.
@@ -37,10 +41,27 @@ func (c cond) asUint64() uint64 {
 // register returns the register for register conditions.
 // This panics if the condition is not a register condition (condKindRegisterZero or condKindRegisterNotZero).
 func (c cond) register() regalloc.VReg {
-	if c.kind() != condKindRegisterZero && c.kind() != condKindRegisterNotZero {
-		panic("condition is not a register")
+	switch c.kind() {
+	case condKindRegisterZero, condKindRegisterNotZero:
+		return regalloc.VReg(c >> 2)
+	case condKindRegisterSignBit:
+		return regalloc.VReg(c >> 3)
 	}
-	return regalloc.VReg(c >> 2)
+	panic("condition is not a register")
+}
+
+// registerAsSignBitCond is the condition that r's sign bit is set, or, with set false, clear.
+func registerAsSignBitCond(r regalloc.VReg, set bool) cond {
+	c := cond(r)<<3 | cond(condKindRegisterSignBit)
+	if set {
+		c |= 1 << 2
+	}
+	return c
+}
+
+// signBitSet reports whether a condKindRegisterSignBit condition is that the bit is set.
+func (c cond) signBitSet() bool {
+	return c>>2&1 == 1
 }
 
 func registerAsRegZeroCond(r regalloc.VReg) cond {

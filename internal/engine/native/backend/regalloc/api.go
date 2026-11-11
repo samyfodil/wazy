@@ -11,8 +11,8 @@ type (
 	//
 	// I is the type of the instruction, and B is the type of the basic block.
 	Function[I Instr, B Block[I]] interface {
-		// PostOrderBlockIteratorBegin returns the first block in the post-order traversal of the CFG.
-		// In other words, the last blocks in the CFG will be returned first.
+		// PostOrderBlockIteratorBegin returns the first block in a depth-first post-order traversal of the CFG,
+		// in which an edge to a block not yet returned is a loop's back edge.
 		PostOrderBlockIteratorBegin() B
 		// PostOrderBlockIteratorNext returns the next block in the post-order traversal of the CFG.
 		PostOrderBlockIteratorNext() B

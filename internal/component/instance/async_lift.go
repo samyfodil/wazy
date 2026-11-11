@@ -83,7 +83,7 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	// sched.lockdown): once guest code anywhere in the store has trapped,
 	// every later entry is refused permanently.
 	if in.sched.lockdown {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 
 	// t.onResolve/gt.onStart are left nil: task.returnValues/cancelResolve
@@ -167,7 +167,7 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, be.flattenErr)
 	}
 	if in.sched.lockdown { // Store.lift's prologue: trap_if(!may_enter_from)
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 
 	t := &task{inst: in, be: be, noExclusive: be.stackfulAsyncOpts}
@@ -242,7 +242,7 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 	// instance unless this instance IS the caller re-entering itself --
 	// exactly the case mayEnter guards), kept as a real trap for parity.
 	if in.sched.lockdown {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 	fr := &callbackFrame{}
 	t, gt := &fr.t, &fr.gt
@@ -291,7 +291,7 @@ func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
 ) (calleeTask *task, err error) {
 	if in.sched.lockdown {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 	t := &task{inst: in, be: be, noExclusive: be.stackfulAsyncOpts}
 	t.onResolve = func(vals []abi.Value, cancelled bool) {

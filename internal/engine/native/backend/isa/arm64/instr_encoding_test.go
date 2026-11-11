@@ -76,40 +76,50 @@ func TestInstruction_encode(t *testing.T) {
 			i.asVecShiftImm(vecOpSshr, v1VReg, operandNR(v2VReg), operandShiftImm(7), vecArrangement2D)
 		}},
 
-		{want: "41a40d0f", setup: func(i *instruction) {
+		// shl, ushr and sshr by an immediate, as llvm-mc encodes them.
+		{want: "4154274f", setup: func(i *instruction) {
+			i.asVecShiftImm(vecOpShl, v1VReg, operandNR(v2VReg), operandShiftImm(7), vecArrangement4S)
+		}},
+		{want: "4104776f", setup: func(i *instruction) {
+			i.asVecShiftImm(vecOpUshr, v1VReg, operandNR(v2VReg), operandShiftImm(9), vecArrangement2D)
+		}},
+		{want: "4104214f", setup: func(i *instruction) {
+			i.asVecShiftImm(vecOpSshr, v1VReg, operandNR(v2VReg), operandShiftImm(31), vecArrangement4S)
+		}},
+		{want: "41a40b0f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement8B)
 		}},
-		{want: "41a40d4f", setup: func(i *instruction) { // sshll2
+		{want: "41a40b4f", setup: func(i *instruction) { // sshll2
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement16B)
 		}},
-		{want: "41a41d0f", setup: func(i *instruction) {
+		{want: "41a4130f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement4H)
 		}},
-		{want: "41a41d4f", setup: func(i *instruction) { // sshll2
+		{want: "41a4134f", setup: func(i *instruction) { // sshll2
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement8H)
 		}},
-		{want: "41a43d0f", setup: func(i *instruction) {
+		{want: "41a4230f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement2S)
 		}},
-		{want: "41a43d4f", setup: func(i *instruction) { // sshll2
+		{want: "41a4234f", setup: func(i *instruction) { // sshll2
 			i.asVecShiftImm(vecOpSshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement4S)
 		}},
-		{want: "41a40d2f", setup: func(i *instruction) {
+		{want: "41a40b2f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement8B)
 		}},
-		{want: "41a40d6f", setup: func(i *instruction) { // ushll2
+		{want: "41a40b6f", setup: func(i *instruction) { // ushll2
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement16B)
 		}},
-		{want: "41a41d2f", setup: func(i *instruction) {
+		{want: "41a4132f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement4H)
 		}},
-		{want: "41a41d6f", setup: func(i *instruction) { // ushll2
+		{want: "41a4136f", setup: func(i *instruction) { // ushll2
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement8H)
 		}},
-		{want: "41a43d2f", setup: func(i *instruction) {
+		{want: "41a4232f", setup: func(i *instruction) {
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement2S)
 		}},
-		{want: "41a43d6f", setup: func(i *instruction) { // ushll2
+		{want: "41a4236f", setup: func(i *instruction) { // ushll2
 			i.asVecShiftImm(vecOpUshll, v1VReg, operandNR(v2VReg), operandShiftImm(3), vecArrangement4S)
 		}},
 		{want: "4100030e", setup: func(i *instruction) {
@@ -931,6 +941,9 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "411c024e", setup: func(i *instruction) { i.asMovToVec(v1VReg, operandNR(x2VReg), vecArrangementH, 0) }},
 		{want: "411c044e", setup: func(i *instruction) { i.asMovToVec(v1VReg, operandNR(x2VReg), vecArrangementS, 0) }},
 		{want: "411c084e", setup: func(i *instruction) { i.asMovToVec(v1VReg, operandNR(x2VReg), vecArrangementD, 0) }},
+		{want: "4100679e", setup: func(i *instruction) { i.asFpuMovFromInt(v1VReg, operandNR(x2VReg), true) }},
+		{want: "4100271e", setup: func(i *instruction) { i.asFpuMovFromInt(v1VReg, operandNR(x2VReg), false) }},
+		{want: "e103679e", setup: func(i *instruction) { i.asFpuMovFromInt(v1VReg, operandNR(xzrVReg), true) }},
 		{want: "413c010e", setup: func(i *instruction) { i.asMovFromVec(x1VReg, operandNR(v2VReg), vecArrangementB, 0, false) }},
 		{want: "413c020e", setup: func(i *instruction) { i.asMovFromVec(x1VReg, operandNR(v2VReg), vecArrangementH, 0, false) }},
 		{want: "413c040e", setup: func(i *instruction) { i.asMovFromVec(x1VReg, operandNR(v2VReg), vecArrangementS, 0, false) }},
@@ -1023,6 +1036,10 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "60033fd6", setup: func(i *instruction) {
 			i.asCallIndirect(tmpRegVReg, nil)
 		}},
+		// mov x27, x8; str x30, [x27, #744]; ldr x30, [x27, #88]; blr x30.
+		{want: "fb0308aa7e7701f97e2f40f9c0033fd6", setup: func(i *instruction) {
+			i.asYield(x8VReg)
+		}},
 		{want: "fb633bcb", setup: func(i *instruction) {
 			i.asALU(aluOpSub, tmpRegVReg, operandNR(spVReg), operandNR(tmpRegVReg), true)
 		}},
@@ -1089,12 +1106,12 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "30000010", setup: func(i *instruction) { i.asAdr(v16VReg, 4) }},
 		{want: "50050030", setup: func(i *instruction) { i.asAdr(v16VReg, 169) }},
 		{want: "101e302e", setup: func(i *instruction) { i.asLoadFpuConst32(v16VReg, uint64(math.Float32bits(0))) }},
-		{want: "5000001c020000140000803f", setup: func(i *instruction) {
-			i.asLoadFpuConst32(v16VReg, uint64(math.Float32bits(1.0)))
+		{want: "5000001c02000014cdcc8c3f", setup: func(i *instruction) {
+			i.asLoadFpuConst32(v16VReg, uint64(math.Float32bits(1.1)))
 		}},
 		{want: "101e302e", setup: func(i *instruction) { i.asLoadFpuConst64(v16VReg, uint64(math.Float32bits(0))) }},
-		{want: "5000005c03000014000000000000f03f", setup: func(i *instruction) {
-			i.asLoadFpuConst64(v16VReg, math.Float64bits(1.0))
+		{want: "5000005c030000149a9999999999f13f", setup: func(i *instruction) {
+			i.asLoadFpuConst64(v16VReg, math.Float64bits(1.1))
 		}},
 		{want: "101e306e", setup: func(i *instruction) { i.asLoadFpuConst128(v16VReg, 0, 0) }},
 		{want: "5000009c05000014ffffffffffffffffaaaaaaaaaaaaaaaa", setup: func(i *instruction) { i.asLoadFpuConst128(v16VReg, 0xffffffff_ffffffff, 0xaaaaaaaa_aaaaaaaa) }},
@@ -1149,6 +1166,8 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "5255b552", setup: func(i *instruction) { i.asMOVZ(x18VReg, 0xaaaa, 1, false) }},
 		{want: "5255f5d2", setup: func(i *instruction) { i.asMOVZ(x18VReg, 0xaaaa, 3, true) }},
 		{want: "4f020012", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x15VReg, x18VReg, 0x1, false) }},
+		// A 32-bit run that wraps around, given zero-extended: and w0, w1, #0xfffffffb.
+		{want: "20781d12", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x0VReg, x1VReg, 0xfffffffb, false) }},
 		{want: "4f0a0012", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x15VReg, x18VReg, 0x7, false) }},
 		{want: "4f0e0012", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x15VReg, x18VReg, 0xf, false) }},
 		{want: "4f120012", setup: func(i *instruction) { i.asALUBitmaskImm(aluOpAnd, x15VReg, x18VReg, 0x1f, false) }},
@@ -1338,6 +1357,19 @@ func TestInstruction_encode(t *testing.T) {
 			i.asCondBr(registerAsRegZeroCond(x1VReg), dummyLabel, false)
 			i.condBrOffsetResolve(0x80)
 		}},
+		// tbnz x1, #63, #0x80; tbz x1, #63, #0x80; tbnz x1, #63, #-0x80.
+		{want: "0104f8b7", setup: func(i *instruction) {
+			i.asCondBr(registerAsSignBitCond(x1VReg, true), dummyLabel, true)
+			i.condBrOffsetResolve(0x80)
+		}},
+		{want: "0104f8b6", setup: func(i *instruction) {
+			i.asCondBr(registerAsSignBitCond(x1VReg, false), dummyLabel, true)
+			i.condBrOffsetResolve(0x80)
+		}},
+		{want: "01fcffb7", setup: func(i *instruction) {
+			i.asCondBr(registerAsSignBitCond(x1VReg, true), dummyLabel, true)
+			i.condBrOffsetResolve(-0x80)
+		}},
 		{want: "010400b4", setup: func(i *instruction) {
 			i.asCondBr(registerAsRegZeroCond(x1VReg), dummyLabel, true)
 			i.condBrOffsetResolve(0x80)
@@ -1488,6 +1520,33 @@ func TestInstruction_encode(t *testing.T) {
 		{want: "407c0153", setup: func(i *instruction) {
 			i.asALUShift(aluOpLsr, x0VReg, operandNR(x2VReg), operandShiftImm(1), false)
 		}},
+		{want: "207c229b", setup: func(i *instruction) { // smull x0, w1, w2
+			i.asALURRRR(aluOpSMAddL, x0VReg, operandNR(x1VReg), operandNR(x2VReg), xzrVReg, true)
+		}},
+		{want: "200ca29b", setup: func(i *instruction) { // umaddl x0, w1, w2, x3
+			i.asALURRRR(aluOpUMAddL, x0VReg, operandNR(x1VReg), operandNR(x2VReg), x3VReg, true)
+		}},
+		{want: "208c229b", setup: func(i *instruction) { // smsubl x0, w1, w2, x3
+			i.asALURRRR(aluOpSMSubL, x0VReg, operandNR(x1VReg), operandNR(x2VReg), x3VReg, true)
+		}},
+		{want: "208ca29b", setup: func(i *instruction) { // umsubl x0, w1, w2, x3
+			i.asALURRRR(aluOpUMSubL, x0VReg, operandNR(x1VReg), operandNR(x2VReg), x3VReg, true)
+		}},
+		{want: "40380e53", setup: func(i *instruction) {
+			i.asALUShift(aluOpUbfx, x0VReg, operandNR(x2VReg), operandBitfield(14, 1), false)
+		}},
+		{want: "40180353", setup: func(i *instruction) {
+			i.asALUShift(aluOpUbfx, x0VReg, operandNR(x2VReg), operandBitfield(3, 4), false)
+		}},
+		{want: "40bc68d3", setup: func(i *instruction) {
+			i.asALUShift(aluOpUbfx, x0VReg, operandNR(x2VReg), operandBitfield(40, 8), true)
+		}},
+		{want: "403c0013", setup: func(i *instruction) { // sxth w0, w2
+			i.asALUShift(aluOpSbfx, x0VReg, operandNR(x2VReg), operandBitfield(0, 16), false)
+		}},
+		{want: "407c4093", setup: func(i *instruction) { // sxtw x0, w2
+			i.asALUShift(aluOpSbfx, x0VReg, operandNR(x2VReg), operandBitfield(0, 32), true)
+		}},
 		{want: "407c1f53", setup: func(i *instruction) {
 			i.asALUShift(aluOpLsr, x0VReg, operandNR(x2VReg), operandShiftImm(31), false)
 		}},
@@ -1551,6 +1610,62 @@ func TestInstruction_encode(t *testing.T) {
 		}},
 		{want: "41c0234e", setup: func(i *instruction) {
 			i.asVecRRR(vecOpSmull2, v1VReg, operandNR(v2VReg), operandNR(v3VReg), vecArrangement8B)
+		}},
+		// umull v1.2d, v2.2s, v3.2s, as llvm-mc encodes it.
+		{want: "41c0a32e", setup: func(i *instruction) {
+			i.asVecRRR(vecOpUmull, v1VReg, operandNR(v2VReg), operandNR(v3VReg), vecArrangement4S)
+		}},
+		// mov v1.s[0], wzr and mov v1.d[0], xzr.
+		{want: "e11f044e", setup: func(i *instruction) {
+			i.asMovToVec(v1VReg, operandNR(xzrVReg), vecArrangementS, vecIndex(0))
+		}},
+		{want: "e11f084e", setup: func(i *instruction) {
+			i.asMovToVec(v1VReg, operandNR(xzrVReg), vecArrangementD, vecIndex(0))
+		}},
+		// fmov d3, #3.0; fmov d3, #0.5; fmov s3, #-1.5; fmov d7, #31.0; fmov d7, #0.125
+		{want: "0310611e", setup: func(i *instruction) { i.asLoadFpuConst64(v3VReg, math.Float64bits(3)) }},
+		{want: "03106c1e", setup: func(i *instruction) { i.asLoadFpuConst64(v3VReg, math.Float64bits(0.5)) }},
+		{want: "03103f1e", setup: func(i *instruction) { i.asLoadFpuConst32(v3VReg, uint64(math.Float32bits(-1.5))) }},
+		{want: "07f0671e", setup: func(i *instruction) { i.asLoadFpuConst64(v7VReg, math.Float64bits(31)) }},
+		{want: "0710681e", setup: func(i *instruction) { i.asLoadFpuConst64(v7VReg, math.Float64bits(0.125)) }},
+		// bic w1, w2, w3; bics wzr, w2, w3; eon x1, x2, x3; mvn w1, w2
+		{want: "4100230a", setup: func(i *instruction) {
+			i.asALU(aluOpBic, x1VReg, operandNR(x2VReg), operandNR(x3VReg), false)
+		}},
+		{want: "5f00236a", setup: func(i *instruction) {
+			i.asALU(aluOpBics, xzrVReg, operandNR(x2VReg), operandNR(x3VReg), false)
+		}},
+		{want: "410023ca", setup: func(i *instruction) {
+			i.asALU(aluOpEon, x1VReg, operandNR(x2VReg), operandNR(x3VReg), true)
+		}},
+		{want: "e103222a", setup: func(i *instruction) {
+			i.asALU(aluOpOrn, x1VReg, operandNR(xzrVReg), operandNR(x2VReg), false)
+		}},
+		// neg w24, w16; neg x1, x2, lsl #3
+		{want: "f803104b", setup: func(i *instruction) {
+			i.asALU(aluOpSub, x24VReg, operandNR(xzrVReg), operandNR(x16VReg), false)
+		}},
+		{want: "e10f02cb", setup: func(i *instruction) {
+			i.asALU(aluOpSub, x1VReg, operandNR(xzrVReg), operandSR(x2VReg, 3, shiftOpLSL), true)
+		}},
+		// cmp sp, x11
+		{want: "ff632beb", setup: func(i *instruction) {
+			i.asALU(aluOpSubS, xzrVReg, operandNR(spVReg), operandNR(x11VReg), true)
+		}},
+		// ccmp w20, w22, #0, ge; ccmp x1, x2, #4, lt
+		{want: "80a2567a", setup: func(i *instruction) {
+			i.asCCmpReg(operandNR(x20VReg), operandNR(x22VReg), ge, 0, false)
+		}},
+		{want: "24b042fa", setup: func(i *instruction) {
+			i.asCCmpReg(operandNR(x1VReg), operandNR(x2VReg), lt, 4, true)
+		}},
+		// uadalp v1.2d, v2.4s
+		{want: "4168a06e", setup: func(i *instruction) {
+			i.asVecMisc(vecOpUadalp, v1VReg, operandNR(v2VReg), vecArrangement4S)
+		}},
+		// xtn v1.2s, v2.2d
+		{want: "4128a10e", setup: func(i *instruction) {
+			i.asVecMisc(vecOpXtn, v1VReg, operandNR(v2VReg), vecArrangement2S)
 		}},
 		{want: "41c0634e", setup: func(i *instruction) {
 			i.asVecRRR(vecOpSmull2, v1VReg, operandNR(v2VReg), operandNR(v3VReg), vecArrangement8H)
@@ -2337,6 +2452,33 @@ func Test_encodeBrTableSequence(t *testing.T) {
 	require.Equal(t, "0100000002000000030000000400000005000000060000000700000008000000090000000a000000", hex.EncodeToString(encoded[brTableSequenceOffsetTableBegin:]))
 }
 
+func Test_encodeBoundedBrTableSequence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		targets []uint32
+		// check is the bounds check, the b.hs, and the branch after the table.
+		check, bhs, after string
+	}{
+		// cmp w22, #3; b.hs to the default itself.
+		{name: "default near", targets: []uint32{4, 8, 12, 0x40}, check: "df0e0071", bhs: "a2020054", after: "0c000014"},
+		// Past b.hs's reach: it goes to the branch after the table, which reaches the default.
+		{name: "default far", targets: []uint32{4, 8, 0x400000}, check: "df0a0071", bhs: "02010054", after: "fdff0f14"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, m := newSetupWithMockContext()
+			i := &instruction{}
+			i.asBoundedBrTableSequence(x22VReg, 0, len(tc.targets))
+			m.jmpTableTargets = [][]uint32{tc.targets}
+			i.encode(m)
+			encoded := m.compiler.Buf()
+			require.Equal(t, i.size(), int64(len(encoded)))
+			require.Equal(t, tc.check+tc.bhs, hex.EncodeToString(encoded[:brTableBoundsCheckSize]))
+			require.Equal(t, "9b000010765bb6b87b03168b60031fd6", hex.EncodeToString(encoded[brTableBoundsCheckSize:i.brTableBegin()]))
+			require.Equal(t, tc.after, hex.EncodeToString(encoded[len(encoded)-4:]))
+		})
+	}
+}
+
 func Test_encodeUnconditionalBranch(t *testing.T) {
 	buf := make([]byte, 4)
 
@@ -2347,4 +2489,30 @@ func Test_encodeUnconditionalBranch(t *testing.T) {
 	actual = encodeUnconditionalBranch(false, 4*1024)
 	binary.LittleEndian.PutUint32(buf, actual)
 	require.Equal(t, "0x00040014", fmt.Sprintf("%#x", buf))
+}
+
+// Test_fpImm8 checks fpImm8 against VFPExpandImm: every immediate's float, at both widths, encodes
+// as that immediate, and its neighbours by one unit in the last place do not encode.
+func Test_fpImm8(t *testing.T) {
+	for imm := uint64(0); imm < 256; imm++ {
+		a, b, cd, efgh := imm>>7&1, imm>>6&1, imm>>4&3, imm&15
+		f64 := a<<63 | ((1-b)<<10|b*0xff<<2|cd)<<52 | efgh<<48
+		f32 := a<<31 | ((1-b)<<7|b*0x1f<<2|cd)<<23 | efgh<<19
+		for _, c := range []struct {
+			v    uint64
+			bits byte
+		}{{f64, 64}, {f32, 32}} {
+			got, ok := fpImm8(c.v, c.bits)
+			require.True(t, ok, "%#x", c.v)
+			require.Equal(t, uint32(imm), got)
+			_, ok = fpImm8(c.v+1, c.bits)
+			require.False(t, ok)
+			_, ok = fpImm8(c.v-1, c.bits)
+			require.False(t, ok)
+		}
+	}
+	for _, v := range []float64{0, 1.1, 32, 0.0625, math.Inf(1), math.NaN()} {
+		_, ok := fpImm8(math.Float64bits(v), 64)
+		require.False(t, ok, "%v", v)
+	}
 }

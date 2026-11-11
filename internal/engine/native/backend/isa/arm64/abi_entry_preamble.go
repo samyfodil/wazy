@@ -123,6 +123,23 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 		cur = linkInstr(cur, toReg)
 	}
 
+	// A 32-bit result fills its whole 64-bit slot, zero-extended as api.EncodeI32 and api.EncodeF32 do:
+	// the slot held a parameter before. Writing a W register clears the upper half of its X register.
+	switch typ {
+	case ssa.TypeI32:
+		if !isStackArg { // LDR Wt has already zero-extended a stack one.
+			mov := m.allocateInstr()
+			mov.asMove32(x15VReg, storeTargetReg.reg())
+			cur = linkInstr(cur, mov)
+		}
+		storeTargetReg, bits = operandNR(x15VReg), 64
+	case ssa.TypeF32:
+		mov := m.allocateInstr()
+		mov.asMovFromVec(x15VReg, storeTargetReg, vecArrangementS, vecIndex(0), false)
+		cur = linkInstr(cur, mov)
+		storeTargetReg, bits = operandNR(x15VReg), 64
+	}
+
 	mode := m.amodePool.Allocate()
 	*mode = addressMode{kind: addressModeKindPostIndex, rn: resultSlicePtr, imm: postIndexImm}
 	instr := m.allocateInstr()
@@ -157,13 +174,9 @@ func (m *machine) constructEntryPreamble(sig *ssa.Signature) (root *instruction)
 	// 		mov sp, goAllocatedStackPtr
 	cur = m.move64(spVReg, goAllocatedStackPtr, cur)
 
-	// Fill the termination-fuel counter for this entry into compiled code.
-	// 		movz fuel, #TerminationFuel
-	//
-	// Emitted unconditionally: the preamble is shared by every module, and one
-	// immediate move per entry into compiled code is not worth a second preamble to
-	// avoid when the option is off. See fuelVReg.
-	cur = m.lowerConstantI64AndInsert(cur, fuelVReg, nativeapi.TerminationFuel)
+	// Load the address preemption checks read into the preempt register.
+	// 		ldr preempt, [savedExecutionContextPtr, #PreemptWordAddress]
+	cur = m.loadOrStoreAtExecutionContext(preemptVReg, nativeapi.ExecutionContextOffsetPreemptWordAddress, false, cur)
 
 	prReg := paramResultSlicePtr
 	if len(abi.Args) > 2 && len(abi.Rets) > 0 {

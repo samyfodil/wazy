@@ -12,6 +12,7 @@ import (
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/internalapi"
 	internalsys "github.com/samyfodil/wazy/internal/sys"
+	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/sys"
 )
 
@@ -69,6 +70,12 @@ type (
 		// already meant for a 32-bit memory by way of the decoder.
 		MemoryLimitPages, Memory64LimitPages uint64
 
+		// TableLimitElements caps how many entries a table may hold, mirroring
+		// the embedder's WithTableLimitElements. A declared minimum over it, or
+		// a module's minimums summed, fails instantiation, and table.grow past
+		// it fails.
+		TableLimitElements uint64
+
 		// typeIDs maps each FunctionType.String() to a unique FunctionTypeID. This is used at runtime to
 		// do type-checks on indirect function calls.
 		typeIDs map[string]FunctionTypeID
@@ -120,6 +127,13 @@ type (
 		// registration a memory import performs) so none is recycled while this
 		// module is alive, and releases them on Close. See holdMemoriesOf.
 		heldMemories []*MemoryInstance
+
+		// slotMux guards the CallSlots this module hands its callEngines: how many registered their own,
+		// and the chunk the rest come from. See CallSlotFor.
+		slotMux     sync.Mutex
+		slotsSingly uint32
+		slotChunk   *callSlotChunk
+		slotNext    int
 
 		// Engine implements function calls for this module.
 		Engine ModuleEngine
@@ -356,6 +370,15 @@ func (m *ModuleInstance) applyData(data []DataSegment) error {
 	return nil
 }
 
+// export is getExport for a caller that only needs to know whether the export is there. Instantiation looks up
+// each start function this way and most modules export none, so a miss must not cost an error.
+func (m *ModuleInstance) export(name string, et ExternType) *Export {
+	if exp, ok := m.Exports[name]; ok && exp.Type == et {
+		return exp
+	}
+	return nil
+}
+
 // GetExport returns an export of the given name and type or errs if not exported or the wrong type.
 func (m *ModuleInstance) getExport(name string, et ExternType) (*Export, error) {
 	exp, ok := m.Exports[name]
@@ -378,6 +401,7 @@ func NewStore(enabledFeatures api.CoreFeatures, engine Engine) *Store {
 		functionMaxTypes:   maximumFunctionTypes,
 		MemoryLimitPages:   uint64(MemoryLimitPages),
 		Memory64LimitPages: uint64(MemoryLimitPages),
+		TableLimitElements: TableLimitElements,
 	}
 }
 
@@ -464,7 +488,7 @@ func (s *Store) instantiate(
 
 	err = m.buildTables(module,
 		// As of reference-types proposal, boundary check must be done after instantiation.
-		s.EnabledFeatures.IsEnabled(api.CoreFeatureReferenceTypes))
+		s.EnabledFeatures.IsEnabled(api.CoreFeatureReferenceTypes), s.TableLimitElements)
 	if err != nil {
 		return nil, err
 	}
@@ -822,7 +846,7 @@ func (s *Store) GetFunctionTypeIDs(ts []FunctionType) ([]FunctionTypeID, error) 
 		groupKey := ""
 		if !isPlainFuncType(ts, start, end) {
 			groupKey = RecGroupKey(ts, start, end, func(idx Index) string {
-				if indexOutOfRange(idx, len(ret)) {
+				if u32.OutOfRange(idx, len(ret)) {
 					return fmt.Sprintf("?%d", idx)
 				}
 				return fmt.Sprintf("#tid=%d", ret[idx])
@@ -878,7 +902,7 @@ func (s *Store) TypeIDIsSubtypeOf(actual, target FunctionTypeID) bool {
 	// Bounded by the number of types: the chain is acyclic by construction (a supertype index is always below
 	// its subtype's), but this is reached from guest execution, so do not depend on that for termination.
 	for i := 0; i <= len(supers); i++ {
-		if int(actual) >= len(supers) {
+		if u32.OutOfRange(uint32(actual), len(supers)) {
 			return false
 		}
 		actual = supers[actual]

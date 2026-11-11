@@ -24,7 +24,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rbp, 16(%rax)
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
-	movl $8192, %r13d
+	movq 736(%rdx), %r13
 	xor %rbp, %rbp
 	callq *%r14
 	movq 16(%rdx), %rbp
@@ -43,7 +43,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rbp, 16(%rax)
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
-	movl $8192, %r13d
+	movq 736(%rdx), %r13
 	movzx.lq (%r12), %rcx
 	movq 8(%r12), %rdi
 	movss 16(%r12), %xmm0
@@ -69,13 +69,15 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rbp, 16(%rax)
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
-	movl $8192, %r13d
+	movq 736(%rdx), %r13
 	xor %rbp, %rbp
 	callq *%r14
-	mov.l %rax, (%r12)
+	movzx.lq %rax, %r15
+	mov.q %r15, (%r12)
 	movdqu %xmm0, 8(%r12)
 	mov.q %rbx, 24(%r12)
-	movss %xmm1, 32(%r12)
+	movd %xmm1, %r15d
+	mov.q %r15, 32(%r12)
 	movsd %xmm2, 40(%r12)
 	movq 16(%rdx), %rbp
 	movq 24(%rdx), %rsp
@@ -94,7 +96,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rbp, 16(%rax)
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
-	movl $8192, %r13d
+	movq 736(%rdx), %r13
 	movzx.lq (%r12), %rcx
 	movq 8(%r12), %rdi
 	movss 16(%r12), %xmm0
@@ -103,10 +105,12 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	movq 48(%r12), %rsi
 	xor %rbp, %rbp
 	callq *%r14
-	mov.l %rax, (%r12)
+	movzx.lq %rax, %r15
+	mov.q %r15, (%r12)
 	movdqu %xmm0, 8(%r12)
 	mov.q %rbx, 24(%r12)
-	movss %xmm1, 32(%r12)
+	movd %xmm1, %r15d
+	mov.q %r15, 32(%r12)
 	movsd %xmm2, 40(%r12)
 	movq 16(%rdx), %rbp
 	movq 24(%rdx), %rsp
@@ -128,7 +132,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rbp, 16(%rax)
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
-	movl $8192, %r13d
+	movq 736(%rdx), %r13
 	sub $64, %rsp
 	movzx.lq (%r12), %rcx
 	movq 8(%r12), %rdi
@@ -182,23 +186,27 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rbp, 16(%rax)
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
-	movl $8192, %r13d
+	movq 736(%rdx), %r13
 	sub $64, %rsp
 	xor %rbp, %rbp
 	callq *%r14
 	mov.q %rax, (%r12)
 	mov.q %rbx, 8(%r12)
-	mov.l %rcx, 16(%r12)
+	movzx.lq %rcx, %r15
+	mov.q %r15, 16(%r12)
 	mov.q %rdi, 24(%r12)
-	movss %xmm0, 32(%r12)
+	movd %xmm0, %r15d
+	mov.q %r15, 32(%r12)
 	movsd %xmm1, 40(%r12)
 	movdqu %xmm2, 48(%r12)
 	mov.q %rsi, 64(%r12)
 	mov.q %r8, 72(%r12)
 	mov.q %r9, 80(%r12)
-	mov.l %r10, 88(%r12)
+	movzx.lq %r10, %r15
+	mov.q %r15, 88(%r12)
 	mov.q %r11, 96(%r12)
-	movss %xmm3, 104(%r12)
+	movd %xmm3, %r15d
+	mov.q %r15, 104(%r12)
 	movsd %xmm4, 112(%r12)
 	movdqu %xmm5, 120(%r12)
 	movq (%rsp), %r15
@@ -208,10 +216,11 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	movq 16(%rsp), %r15
 	mov.q %r15, 152(%r12)
 	movzx.lq 24(%rsp), %r15
-	mov.l %r15, 160(%r12)
+	mov.q %r15, 160(%r12)
 	movq 32(%rsp), %r15
 	mov.q %r15, 168(%r12)
-	movss %xmm6, 176(%r12)
+	movd %xmm6, %r15d
+	mov.q %r15, 176(%r12)
 	movsd %xmm7, 184(%r12)
 	movdqu 40(%rsp), %xmm15
 	movdqu %xmm15, 192(%r12)
@@ -242,7 +251,7 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	mov.q %rbp, 16(%rax)
 	mov.q %rsp, 24(%rax)
 	movq %r13, %rsp
-	movl $8192, %r13d
+	movq 736(%rdx), %r13
 	sub $128, %rsp
 	movzx.lq (%r12), %rcx
 	movq 8(%r12), %rdi
@@ -277,17 +286,21 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	callq *%r14
 	mov.q %rax, (%r12)
 	mov.q %rbx, 8(%r12)
-	mov.l %rcx, 16(%r12)
+	movzx.lq %rcx, %r15
+	mov.q %r15, 16(%r12)
 	mov.q %rdi, 24(%r12)
-	movss %xmm0, 32(%r12)
+	movd %xmm0, %r15d
+	mov.q %r15, 32(%r12)
 	movsd %xmm1, 40(%r12)
 	movdqu %xmm2, 48(%r12)
 	mov.q %rsi, 64(%r12)
 	mov.q %r8, 72(%r12)
 	mov.q %r9, 80(%r12)
-	mov.l %r10, 88(%r12)
+	movzx.lq %r10, %r15
+	mov.q %r15, 88(%r12)
 	mov.q %r11, 96(%r12)
-	movss %xmm3, 104(%r12)
+	movd %xmm3, %r15d
+	mov.q %r15, 104(%r12)
 	movsd %xmm4, 112(%r12)
 	movdqu %xmm5, 120(%r12)
 	movq 64(%rsp), %r15
@@ -297,10 +310,11 @@ func TestMachineCompileEntryPreamble(t *testing.T) {
 	movq 80(%rsp), %r15
 	mov.q %r15, 152(%r12)
 	movzx.lq 88(%rsp), %r15
-	mov.l %r15, 160(%r12)
+	mov.q %r15, 160(%r12)
 	movq 96(%rsp), %r15
 	mov.q %r15, 168(%r12)
-	movss %xmm6, 176(%r12)
+	movd %xmm6, %r15d
+	mov.q %r15, 176(%r12)
 	movsd %xmm7, 184(%r12)
 	movdqu 104(%rsp), %xmm15
 	movdqu %xmm15, 192(%r12)

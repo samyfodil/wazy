@@ -6,6 +6,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/internal/component/abi"
+	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
 // BenchmarkCallAsyncFirstLight measures the callback-lift hot path with no
@@ -68,6 +69,32 @@ func BenchmarkCallAsyncAwaitImport(b *testing.B) {
 		}
 		if got, ok := res[0].(uint32); !ok || got != 99 {
 			b.Fatalf("run-async = %v, want 99", res[0])
+		}
+	}
+}
+
+// BenchmarkGuestStreamToHost is a guest's stream.write completing a host
+// read parked in an import: the element check and the host's callback.
+func BenchmarkGuestStreamToHost(b *testing.B) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	sinkParams := []binary.TypeDesc{binary.StreamDesc{Element: &binary.TypeRef{Primitive: "u8"}}}
+	opt := WithImport("sink", "", func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+		reader := args[0].(*StreamReader)
+		reader.Read(4, func(CopyResult, []abi.Value) {})
+		return nil, nil
+	}, sinkParams, nil)
+	in, err := Instantiate(ctx, r, streamWriteHostReadWasm, opt)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer in.Close(ctx)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := in.Call(ctx, "run"); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

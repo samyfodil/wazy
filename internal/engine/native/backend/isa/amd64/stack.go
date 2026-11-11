@@ -166,3 +166,14 @@ func AdjustClonedStack(oldRsp, oldTop, rsp, rbp, top uintptr) {
 		i = adjustedCallerRBP - uint64(rbp)
 	}
 }
+
+// InlinedCallMarker is the displacement of the nop that follows a call from a copy of a function's body
+// lowered in place of a call to it, which no other nop has: see ssa.Instruction.MarkInlinedCall.
+const InlinedCallMarker = 0x7c11ed1c
+
+// InlinedCallAt reports whether the call returning to retAddr is from such a copy.
+// It reads no further than the instruction there: one that starts 0F 1F 80 is seven bytes long.
+func InlinedCallAt(retAddr uintptr) bool {
+	b := stackView(retAddr, retAddr+7) // Code, not stack, but read the same way.
+	return b[0] == 0x0f && b[1] == 0x1f && b[2] == 0x80 && binary.LittleEndian.Uint32(b[3:]) == InlinedCallMarker
+}

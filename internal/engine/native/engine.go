@@ -36,11 +36,7 @@ type (
 		compiledModules map[wasm.ModuleID]*compiledModuleWithCount
 		// sortedCompiledModules is a list of compiled modules sorted by the initial address of the executable.
 		sortedCompiledModules []*compiledModule
-		// gcRootsReserve is the size of the region at the bottom of every wasm stack that GC safepoints spill
-		// into: enough for the largest safepoint of any module this engine has instantiated, since a call can
-		// reach functions of any of them. See callEngine.gcRootsReserve.
-		gcRootsReserve atomic.Int32
-		mux            sync.RWMutex
+		mux                   sync.RWMutex
 		// sharedFunctions is compiled functions shared by all modules.
 		sharedFunctions *sharedFunctions
 		// setFinalizer defaults to runtime.SetFinalizer, but overridable for tests.
@@ -54,8 +50,8 @@ type (
 		// goroutine-safe, so no extra locking is needed here.
 		stackPools [stackPoolNumClasses]sync.Pool
 
-		// enabledFeatures is the runtime's feature set, kept so compilation knows whether to emit the
-		// collector's loop-header safepoint. See frontend.Compiler.SetGCEnabled.
+		// enabledFeatures is the runtime's feature set, kept so calls know whether to register with the
+		// collector. See collectorEnabled.
 		enabledFeatures api.CoreFeatures
 	}
 
@@ -64,8 +60,8 @@ type (
 		executable []byte
 		// memoryGrowAddress is the address of memory.grow builtin function.
 		memoryGrowAddress *byte
-		// checkModuleExitCodeAddress is the address of checking module instance exit code.
-		// This is used when ensureTermination is true.
+		// checkModuleExitCodeAddress is the address of the trampoline preemption checks
+		// return to Go through. See nativeapi.ExitCodeCheckModuleExitCode.
 		checkModuleExitCodeAddress *byte
 		// stackGrowAddress is the address of growing stack builtin function.
 		stackGrowAddress *byte
@@ -105,18 +101,14 @@ type (
 	compiledModule struct {
 		*executables
 		// functionOffsets maps a local function index to the offset in the executable.
-		functionOffsets   []int
-		parent            *engine
-		module            *wasm.Module
-		ensureTermination bool
+		functionOffsets []int
+		parent          *engine
+		module          *wasm.Module
 		// funcrefSlots assigns a dense slot to each local function a funcref can name, so a
 		// moduleEngine memoizes one functionInstance per slot and finds it by index rather than
 		// by scanning. Built once per compiled module, lazily; see funcrefSlotsOf.
-		funcrefSlots     map[wasm.Index]uint32
-		funcrefSlotsOnce sync.Once
-		// maxGCRoots is the most values any safepoint in this module writes; see
-		// frontend.Compiler.MaxGCRoots.
-		maxGCRoots                int
+		funcrefSlots              map[wasm.Index]uint32
+		funcrefSlotsOnce          sync.Once
 		listeners                 []api.FunctionListener
 		listenerBeforeTrampolines []*byte
 		listenerAfterTrampolines  []*byte
@@ -161,9 +153,10 @@ type sourceMap struct {
 
 var _ wasm.Engine = (*engine)(nil)
 
-// gcSafepoints reports whether this engine's code polls the collector at loop headers and spills its roots
-// there, and so whether its calls register with the store's collector.
-func (e *engine) gcSafepoints() bool {
+// collectorEnabled reports whether this engine's calls register with the store's collector. Compiled code
+// does not depend on it: a collection parks a call through the preemption check every loop has (see
+// callEngine.RequestPark).
+func (e *engine) collectorEnabled() bool {
 	return wasm.CollectorEnabled(e.enabledFeatures)
 }
 
@@ -181,12 +174,12 @@ func NewEngine(ctx context.Context, enabledFeatures api.CoreFeatures, fc filecac
 }
 
 // HasCompiledModule implements wasm.Engine.
-func (e *engine) HasCompiledModule(module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (bool, error) {
+func (e *engine) HasCompiledModule(module *wasm.Module, listeners []api.FunctionListener) (bool, error) {
 	if nativeapi.PerfMapEnabled {
 		nativeapi.PerfMap.Lock()
 		defer nativeapi.PerfMap.Unlock()
 	}
-	_, ok, err := e.getCompiledModule(module, listeners, ensureTermination)
+	_, ok, err := e.getCompiledModule(module, listeners)
 	if ok {
 		releaseFunctionBodies(module)
 	}
@@ -208,7 +201,7 @@ func releaseFunctionBodies(module *wasm.Module) {
 }
 
 // CompileModule implements wasm.Engine.
-func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (err error) {
+func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (err error) {
 	// Deferred first so that it runs last, after a recovered panic has set err.
 	defer func() {
 		if err == nil {
@@ -234,7 +227,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 		defer nativeapi.PerfMap.Unlock()
 	}
 
-	if _, ok, err := e.getCompiledModule(module, listeners, ensureTermination); ok { // cache hit!
+	if _, ok, err := e.getCompiledModule(module, listeners); ok { // cache hit!
 		return nil
 	} else if err != nil {
 		return err
@@ -243,7 +236,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 	if nativeapi.DeterministicCompilationVerifierEnabled {
 		ctx = nativeapi.NewDeterministicCompilationVerifierContext(ctx, len(module.CodeSection))
 	}
-	cm, err := e.compileModule(ctx, module, listeners, ensureTermination)
+	cm, err := e.compileModule(ctx, module, listeners)
 	if err != nil {
 		return err
 	}
@@ -253,7 +246,7 @@ func (e *engine) CompileModule(ctx context.Context, module *wasm.Module, listene
 
 	if nativeapi.DeterministicCompilationVerifierEnabled {
 		for i := 0; i < nativeapi.DeterministicCompilationVerifyingIter; i++ {
-			_, err := e.compileModule(ctx, module, listeners, ensureTermination)
+			_, err := e.compileModule(ctx, module, listeners)
 			if err != nil {
 				return err
 			}
@@ -339,7 +332,7 @@ func acquireCompileUnit() *compileUnit {
 	return &compileUnit{machine: machine, builder: builder, be: backend.NewCompiler(context.Background(), machine, builder)}
 }
 
-func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener, ensureTermination bool) (*compiledModule, error) {
+func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (*compiledModule, error) {
 	if module.IsHostModule {
 		return e.compileHostModule(ctx, module, listeners)
 	}
@@ -347,8 +340,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	withListener := len(listeners) > 0
 	cm := &compiledModule{
 		offsets: nativeapi.NewModuleContextOffsetData(module, withListener), parent: e, module: module,
-		ensureTermination: ensureTermination,
-		executables:       &executables{},
+		executables: &executables{},
 	}
 
 	importedFns, localFns := int(module.ImportFunctionCount), len(module.FunctionSection)
@@ -380,8 +372,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
-		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo)
-		fe.SetGCEnabled(e.gcSafepoints())
+		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, withListener, needSourceInfo)
 
 		for i := range module.CodeSection {
 			if nativeapi.DeterministicCompilationVerifierEnabled {
@@ -400,7 +391,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 			relocator.appendFunction(fctx, module, cm, i, fidx, body, relsPerFunc, be.SourceOffsetInfo(), ehEntries, frameSize)
 		}
 		cm.tryTableInfo = fe.TryTableMetadata()
-		cm.maxGCRoots = fe.MaxGCRoots()
 	} else {
 		// Compile with N worker goroutines.
 		// Collect compiled functions across workers in a slice,
@@ -426,9 +416,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		sharedTTM := frontend.NewSharedTryTableMetadata()
 
 		var count atomic.Uint32
-		// maxGCRoots is the largest root-buffer size any worker's frontend needed; see
-		// frontend.Compiler.MaxGCRoots.
-		var maxGCRoots atomic.Int64
 		var wg sync.WaitGroup
 		wg.Add(workers)
 
@@ -441,9 +428,8 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 				defer compileUnits.Put(unit)
 				ssaBuilder, be := unit.builder, unit.be
 				fe := frontend.NewFrontendCompiler(
-					module, ssaBuilder, &cm.offsets, ensureTermination, withListener, needSourceInfo).
+					module, ssaBuilder, &cm.offsets, withListener, needSourceInfo).
 					WithTryTableMetadata(sharedTTM)
-				fe.SetGCEnabled(e.gcSafepoints())
 
 				for {
 					if err := ctx.Err(); err != nil {
@@ -470,9 +456,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 						return
 					}
 
-					if n := fe.MaxGCRoots(); n > int(maxGCRoots.Load()) {
-						maxGCRoots.Store(int64(n))
-					}
 					compiledFuncs[i] = compiledFunc{
 						fctx, i, fidx, body,
 						// These slices are internal to the backend compiler and since we are going to buffer them instead
@@ -487,7 +470,6 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		}
 
 		wg.Wait()
-		cm.maxGCRoots = int(maxGCRoots.Load())
 		if err := context.Cause(ctx); err != nil {
 			return nil, err
 		}
@@ -1012,23 +994,9 @@ func checkAddrInBytes(addr uintptr, b []byte) bool {
 	return uintptr(unsafe.Pointer(&b[0])) <= addr && addr <= uintptr(unsafe.Pointer(&b[len(b)-1]))
 }
 
-// noteGCRoots grows the engine's root region to fit a module whose largest safepoint spills n words: the words,
-// plus the header, 16-byte aligned so the go-call margin above the region keeps the alignment the trampoline
-// wants. Even n == 0 gets the header, which is where a safepoint of a module instantiated later finds that the
-// region is too small for it.
-func (e *engine) noteGCRoots(n int) {
-	want := int32((8*n + 8 + 15) &^ 15)
-	for {
-		cur := e.gcRootsReserve.Load()
-		if cur >= want || e.gcRootsReserve.CompareAndSwap(cur, want) {
-			return
-		}
-	}
-}
-
 // NewModuleEngine implements wasm.Engine.
 func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.ModuleEngine, error) {
-	me := &moduleEngine{gcEnabled: e.gcSafepoints()}
+	me := &moduleEngine{gcEnabled: e.collectorEnabled()}
 
 	// Note: imported functions are resolved in moduleEngine.ResolveImportedFunction.
 	me.importedFunctions = make([]importedFunction, m.ImportFunctionCount)
@@ -1039,10 +1007,6 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 	}
 	me.parent = compiled
 	me.module = mi
-	if me.gcEnabled {
-		e.noteGCRoots(compiled.maxGCRoots)
-		me.gcRootsReserve = &e.gcRootsReserve
-	}
 	me.listeners = compiled.listeners
 
 	if m.IsHostModule {
@@ -1090,11 +1054,7 @@ func (e *engine) compileSharedFunctions() {
 		}, false))
 
 	be.Init()
-	addTrampoline(2,
-		machine.CompileGoFunctionTrampoline(nativeapi.ExitCodeCheckModuleExitCode, &ssa.Signature{
-			Params:  []ssa.Type{ssa.TypeI32 /* exec context */},
-			Results: []ssa.Type{ssa.TypeI32},
-		}, false))
+	addTrampoline(2, machine.CompileYieldTrampoline())
 
 	be.Init()
 	addTrampoline(3,

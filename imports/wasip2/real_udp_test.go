@@ -57,7 +57,9 @@ func runFixedReplyUDPServer(t *testing.T, prefix string) (addr string, received 
 	ch := make(chan []byte, 1)
 	go func() {
 		defer conn.Close()
-		if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		// The guest is still compiling when this starts waiting, so the wait is long; the call's own
+		// timeout in TestRealUDP is what bounds a lost datagram.
+		if err := conn.SetDeadline(time.Now().Add(time.Minute)); err != nil {
 			t.Errorf("SetDeadline: %v", err)
 		}
 		buf := make([]byte, 4096)
@@ -112,7 +114,9 @@ func TestRealUDP(t *testing.T) {
 			}
 			defer inst.Close(ctx)
 
-			if _, err := inst.Call(ctx, "wasi:cli/run@0.2.3#run"); err != nil {
+			callCtx, cancel := context.WithTimeout(ctx, time.Minute)
+			defer cancel()
+			if _, err := inst.Call(callCtx, "wasi:cli/run@0.2.3#run"); err != nil {
 				t.Fatalf("Call run(): %v (stdout so far: %q, stderr: %q)", err, stdout.String(), stderr.String())
 			}
 

@@ -2,12 +2,13 @@ package instance
 
 import (
 	"fmt"
-	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // This file carries the resource support for internal nested-component
@@ -39,7 +40,7 @@ import (
 func resolveDefinedResourceDtors(comp *binary.Component, coreFuncTarget func(int) (api.Module, string, error)) map[uint32]func() api.Function {
 	var out map[uint32]func() api.Function
 	for idx, entry := range comp.TypeSpace {
-		if entry.Kind != binary.TypeSpaceDef || int(entry.Def) >= len(comp.Types) {
+		if entry.Kind != binary.TypeSpaceDef || u32.OutOfRange(entry.Def, len(comp.Types)) {
 			continue
 		}
 		rd, ok := comp.Types[entry.Def].Descriptor.(binary.ResourceDesc)
@@ -217,11 +218,11 @@ func exportedInstanceResourceDefs(comp *binary.Component, instanceExportName str
 			argByName[arg.Name] = arg
 		}
 		for _, member := range shim.Exports {
-			if member.ExternType != 0x03 || int(member.ExternIndex) >= len(shim.TypeSpace) { // type
+			if member.ExternType != 0x03 || u32.OutOfRange(member.ExternIndex, len(shim.TypeSpace)) { // type
 				continue
 			}
 			e := shim.TypeSpace[member.ExternIndex]
-			if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(shim.Imports) {
+			if e.Kind != binary.TypeSpaceImport || u32.OutOfRange(e.Import, len(shim.Imports)) {
 				continue
 			}
 			arg, ok := argByName[shim.Imports[e.Import].Name]
@@ -304,11 +305,11 @@ func uninstantiatedTypeExport(comp *binary.Component, cfg *config, inst *binary.
 		return 0, false
 	}
 	for _, ex := range shim.Exports {
-		if ex.Name != name || ex.ExternType != ctSortType || int(ex.ExternIndex) >= len(shim.TypeSpace) {
+		if ex.Name != name || ex.ExternType != ctSortType || u32.OutOfRange(ex.ExternIndex, len(shim.TypeSpace)) {
 			continue
 		}
 		e := shim.TypeSpace[ex.ExternIndex]
-		if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(shim.Imports) {
+		if e.Kind != binary.TypeSpaceImport || u32.OutOfRange(e.Import, len(shim.Imports)) {
 			return 0, false
 		}
 		for _, a := range inst.Args {
@@ -328,11 +329,11 @@ func uninstantiatedTypeExport(comp *binary.Component, cfg *config, inst *binary.
 // it. ok is false for a resource comp defines itself.
 func traceResource(comp *binary.Component, cfg *config, byIdx map[int]*Instance, typeIdx uint32) (prov *Instance, idx uint32, ok bool) {
 	for range instanceArgMaxDepth {
-		if int(typeIdx) >= len(comp.TypeSpace) {
+		if u32.OutOfRange(typeIdx, len(comp.TypeSpace)) {
 			break
 		}
 		e := comp.TypeSpace[typeIdx]
-		if e.Kind != binary.TypeSpaceAlias || int(e.Alias) >= len(comp.Aliases) {
+		if e.Kind != binary.TypeSpaceAlias || u32.OutOfRange(e.Alias, len(comp.Aliases)) {
 			break
 		}
 		al := comp.Aliases[e.Alias]
@@ -478,24 +479,24 @@ func resolveInstanceArgTarget(comp *binary.Component, idx uint32) (instanceArgTa
 	}
 	cur := idx
 	for depth := 0; depth < instanceArgMaxDepth; depth++ {
-		if int(cur) >= len(comp.ComponentInstanceSpace) {
+		if u32.OutOfRange(cur, len(comp.ComponentInstanceSpace)) {
 			return instanceArgTarget{}, fmt.Errorf("instance %d is past the end of the %d-entry component instance index space", cur, len(comp.ComponentInstanceSpace))
 		}
 		switch e := comp.ComponentInstanceSpace[cur]; e.Kind {
 		case binary.ComponentInstanceFromDefinition:
 			return instanceArgTarget{spaceIdx: cur, projection: reversed()}, nil
 		case binary.ComponentInstanceFromImport:
-			if int(e.Import) >= len(comp.Imports) {
+			if u32.OutOfRange(e.Import, len(comp.Imports)) {
 				return instanceArgTarget{}, fmt.Errorf("instance %d names import %d, past the end of the %d import(s)", cur, e.Import, len(comp.Imports))
 			}
 			return instanceArgTarget{imported: true, importName: comp.Imports[e.Import].Name, projection: reversed()}, nil
 		case binary.ComponentInstanceFromExport:
-			if int(e.Export) >= len(comp.Exports) {
+			if u32.OutOfRange(e.Export, len(comp.Exports)) {
 				return instanceArgTarget{}, fmt.Errorf("instance %d names export %d, past the end of the %d export(s)", cur, e.Export, len(comp.Exports))
 			}
 			cur = comp.Exports[e.Export].ExternIndex
 		case binary.ComponentInstanceFromAlias:
-			if int(e.Alias) >= len(comp.Aliases) {
+			if u32.OutOfRange(e.Alias, len(comp.Aliases)) {
 				return instanceArgTarget{}, fmt.Errorf("instance %d names alias %d, past the end of the %d alias(es)", cur, e.Alias, len(comp.Aliases))
 			}
 			al := comp.Aliases[e.Alias]
@@ -662,7 +663,7 @@ func translateResourceFD(fd binary.FuncDesc, providerResolve abi.Resolver, trans
 // core func is always ready here (instantiateNestedInstances, this func's
 // only caller, runs after the core-instance loop that builds it).
 func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest *nesting, byIdx map[int]*Instance, funcIdx uint32, componentFunc func(uint32) (bool, int, aliasTarget, error), coreFuncTarget func(int) (api.Module, string, error), resolve abi.Resolver) (*hostImport, error) {
-	if int(funcIdx) >= len(comp.ComponentFuncSpace) {
+	if u32.OutOfRange(funcIdx, len(comp.ComponentFuncSpace)) {
 		return nil, fmt.Errorf("func arg index %d out of range of the component func index space", funcIdx)
 	}
 	e := comp.ComponentFuncSpace[funcIdx]
@@ -686,7 +687,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest 
 		hi := delegatingHostImport(newGuestAsyncTarget(in, be, diagName, provToImp))
 		return hi, nil
 	}
-	if int(e.Alias) >= len(comp.Aliases) {
+	if u32.OutOfRange(e.Alias, len(comp.Aliases)) {
 		return nil, fmt.Errorf("func arg index %d is not an instance-export alias", funcIdx)
 	}
 	al := comp.Aliases[e.Alias]
@@ -754,7 +755,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest 
 func importedTypeIndex(comp *binary.Component, importName string) (uint32, bool) {
 	for idx := range comp.TypeSpace {
 		e := comp.TypeSpace[idx]
-		if e.Kind != binary.TypeSpaceImport || int(e.Import) >= len(comp.Imports) {
+		if e.Kind != binary.TypeSpaceImport || u32.OutOfRange(e.Import, len(comp.Imports)) {
 			continue
 		}
 		if im := comp.Imports[e.Import]; im.Name == importName && im.ExternType == 0x03 {
@@ -798,32 +799,146 @@ func (in *Instance) originOf(tag uint32) resourceIdentity {
 }
 
 // elemTypesCompatible compares a stream/future element type carried by two
-// (possibly different) instances -- Feature 3, docs/component-model-async-
-// final3-fable.md §3.3. aIn/bIn are the instances whose resolver/TypeSpace a/b's
-// type indices are relative to (nil for a host-created stream/future).
+// (possibly different) type spaces -- Feature 3, docs/component-model-async-
+// final3-fable.md §3.3. aRes/bRes resolve a/b's type indices, and aIn/bIn are
+// the instances whose resources they name (nil for a host-created
+// stream/future).
 //
-// A plain reflect.DeepEqual on the two binary.TypeDesc values is WRONG for an
-// own<R> element the moment R crosses an instance boundary: composition
-// (aliasing, re-exporting) gives the SAME underlying resource a different
-// LOCAL TypeSpace index on every instance that names it (a producer's own
-// $R vs. a consumer's imported alias of it -- see passing-resources.wast),
-// so aIn's OwnDesc{ResourceType: 3} and bIn's OwnDesc{ResourceType: 7} can
-// name the identical resource despite unequal raw indices.
+// The compare is structural. The same element type has a different LOCAL
+// index in every space that names it: a composed component's, or the
+// TypeTable a host built its signature from. So a record element whose field
+// is a list<string> is equal across two spaces without its TypeDesc values
+// being equal.
 //
-// Only own<R> needs this: stream_builtins.go's resolveStreamOrFutureElem
-// bind-time ceiling already guarantees every OTHER element shape reaching
-// this compare is entirely handle-free (borrow is rejected anywhere in the
-// element; own is rejected below the top level), so DeepEqual is always
-// correct for them regardless of which instance defined them -- a
-// non-resource type's shape carries no instance-local index that
-// composition can rename.
-func elemTypesCompatible(aIn *Instance, a binary.TypeDesc, bIn *Instance, b binary.TypeDesc) bool {
-	ao, aOk := a.(binary.OwnDesc)
-	bo, bOk := b.(binary.OwnDesc)
-	if aOk && bOk && aIn != nil && bIn != nil {
-		return aIn.originOf(aIn.canonTag(ao.ResourceType)) == bIn.originOf(bIn.canonTag(bo.ResourceType))
+// own<R>/borrow<R> compare by resource identity the moment both instances
+// are known: composition (aliasing, re-exporting) gives the SAME underlying
+// resource a different local index on every instance that names it (a
+// producer's own $R vs. a consumer's imported alias of it -- see
+// passing-resources.wast).
+func elemTypesCompatible(aIn *Instance, a binary.TypeDesc, aRes abi.Resolver, bIn *Instance, b binary.TypeDesc, bRes abi.Resolver) bool {
+	return sameElemType(elemSpace{aIn, aRes}, a, elemSpace{bIn, bRes}, b, 0)
+}
+
+type elemSpace struct {
+	in      *Instance
+	resolve abi.Resolver
+}
+
+func sameElemType(as elemSpace, a binary.TypeDesc, bs elemSpace, b binary.TypeDesc, depth int) bool {
+	if depth > maxResourceWalkDepth {
+		return false
 	}
-	return reflect.DeepEqual(a, b)
+	switch x := a.(type) {
+	case nil:
+		return b == nil
+	case binary.PrimitiveDesc:
+		y, ok := b.(binary.PrimitiveDesc)
+		return ok && x == y
+	case binary.OwnDesc:
+		y, ok := b.(binary.OwnDesc)
+		return ok && sameResource(as, x.ResourceType, bs, y.ResourceType)
+	case binary.BorrowDesc:
+		y, ok := b.(binary.BorrowDesc)
+		return ok && sameResource(as, x.ResourceType, bs, y.ResourceType)
+	case binary.ListDesc:
+		y, ok := b.(binary.ListDesc)
+		return ok && sameElemRef(as, &x.Element, bs, &y.Element, depth)
+	case binary.FixedListDesc:
+		y, ok := b.(binary.FixedListDesc)
+		return ok && x.Length == y.Length && sameElemRef(as, &x.Element, bs, &y.Element, depth)
+	case binary.OptionDesc:
+		y, ok := b.(binary.OptionDesc)
+		return ok && sameElemRef(as, &x.Element, bs, &y.Element, depth)
+	case binary.MapDesc:
+		y, ok := b.(binary.MapDesc)
+		return ok && sameElemRef(as, &x.Key, bs, &y.Key, depth) && sameElemRef(as, &x.Value, bs, &y.Value, depth)
+	case binary.ResultDesc:
+		y, ok := b.(binary.ResultDesc)
+		return ok && sameOptElemRef(as, x.Ok, bs, y.Ok, depth) && sameOptElemRef(as, x.Err, bs, y.Err, depth)
+	case binary.StreamDesc:
+		y, ok := b.(binary.StreamDesc)
+		return ok && sameOptElemRef(as, x.Element, bs, y.Element, depth)
+	case binary.FutureDesc:
+		y, ok := b.(binary.FutureDesc)
+		return ok && sameOptElemRef(as, x.Element, bs, y.Element, depth)
+	case binary.EnumDesc:
+		y, ok := b.(binary.EnumDesc)
+		return ok && slices.Equal(x.Cases, y.Cases)
+	case binary.FlagsDesc:
+		y, ok := b.(binary.FlagsDesc)
+		return ok && slices.Equal(x.Names, y.Names)
+	case binary.TupleDesc:
+		y, ok := b.(binary.TupleDesc)
+		if !ok || len(x.Elements) != len(y.Elements) {
+			return false
+		}
+		for i := range x.Elements {
+			if !sameElemRef(as, &x.Elements[i], bs, &y.Elements[i], depth) {
+				return false
+			}
+		}
+		return true
+	case binary.RecordDesc:
+		y, ok := b.(binary.RecordDesc)
+		if !ok || len(x.Fields) != len(y.Fields) {
+			return false
+		}
+		for i := range x.Fields {
+			if x.Fields[i].Name != y.Fields[i].Name || !sameElemRef(as, &x.Fields[i].Type, bs, &y.Fields[i].Type, depth) {
+				return false
+			}
+		}
+		return true
+	case binary.VariantDesc:
+		y, ok := b.(binary.VariantDesc)
+		if !ok || len(x.Cases) != len(y.Cases) {
+			return false
+		}
+		for i := range x.Cases {
+			if x.Cases[i].Name != y.Cases[i].Name || !sameOptElemRef(as, x.Cases[i].Type, bs, y.Cases[i].Type, depth) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func sameResource(as elemSpace, a uint32, bs elemSpace, b uint32) bool {
+	if as.in != nil && bs.in != nil {
+		return as.in.originOf(as.in.canonTag(a)) == bs.in.originOf(bs.in.canonTag(b))
+	}
+	return a == b
+}
+
+func sameOptElemRef(as elemSpace, a *binary.TypeRef, bs elemSpace, b *binary.TypeRef, depth int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return sameElemRef(as, a, bs, b, depth)
+}
+
+// sameElemRef compares two type references from their own spaces. A
+// reference neither space can resolve (a test's resolver-less stream) is
+// equal only to the same raw index.
+func sameElemRef(as elemSpace, a *binary.TypeRef, bs elemSpace, b *binary.TypeRef, depth int) bool {
+	at, aok := lookupElemRef(a, as.resolve)
+	bt, bok := lookupElemRef(b, bs.resolve)
+	if !aok || !bok {
+		return !aok && !bok && a.TypeIndex != nil && b.TypeIndex != nil && *a.TypeIndex == *b.TypeIndex
+	}
+	return sameElemType(as, at, bs, bt, depth+1)
+}
+
+func lookupElemRef(ref *binary.TypeRef, resolve abi.Resolver) (binary.TypeDesc, bool) {
+	if ref.Primitive != "" {
+		return binary.PrimitiveDesc{Prim: ref.Primitive}, true
+	}
+	if ref.TypeIndex == nil || resolve == nil {
+		return nil, false
+	}
+	t := resolve(*ref.TypeIndex)
+	return t, t != nil
 }
 
 // repToProviderHandle mints, in the provider's own table, the handle its
@@ -942,6 +1057,11 @@ func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 		return sub.resources.Rep(sub.canonTag(d.ResourceType), h)
 
 	case binary.StreamDesc:
+		// A sync lift took the readable end already (takeAsyncResult); an
+		// async one's task.return hands back the handle.
+		if r, ok := v.(*StreamReader); ok {
+			return r.shared, nil
+		}
 		h, ok := v.(uint32)
 		if !ok {
 			return nil, fmt.Errorf("delegated stream result: expected a uint32 handle, got %T", v)
@@ -953,9 +1073,12 @@ func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 				return nil, fmt.Errorf("delegated stream result: element type: %w", eerr)
 			}
 		}
-		return takeReadableStreamEnd(sub, sub.resources, elemDesc, h)
+		return takeReadableStreamEnd(sub, sub.resources, elemDesc, sub.resolve, h)
 
 	case binary.FutureDesc:
+		if r, ok := v.(*FutureReader); ok {
+			return r.shared, nil
+		}
 		h, ok := v.(uint32)
 		if !ok {
 			return nil, fmt.Errorf("delegated future result: expected a uint32 handle, got %T", v)
@@ -967,7 +1090,19 @@ func providerHandleToRep(sub *Instance, desc binary.TypeDesc, v abi.Value) (abi.
 				return nil, fmt.Errorf("delegated future result: element type: %w", eerr)
 			}
 		}
-		return takeReadableFutureEnd(sub, sub.resources, elemDesc, h)
+		return takeReadableFutureEnd(sub, sub.resources, elemDesc, sub.resolve, h)
+
+	case binary.PrimitiveDesc:
+		h, ok := v.(uint32)
+		if d.Prim != "error-context" || !ok {
+			return v, nil // a sync lift's error context is already the value
+		}
+		raw, _ := sub.resources.getEntry(h)
+		ec, ok := raw.(*ErrorContext)
+		if !ok {
+			return nil, fmt.Errorf("delegated error-context result: handle %d is not an error-context", h)
+		}
+		return ec, nil
 
 	default:
 		return v, nil

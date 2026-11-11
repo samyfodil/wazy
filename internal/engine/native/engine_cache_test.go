@@ -11,7 +11,6 @@ import (
 	"testing/iotest"
 
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
-	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/testing/require"
 	"github.com/samyfodil/wazy/internal/u32"
 	"github.com/samyfodil/wazy/internal/u64"
@@ -57,8 +56,6 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
-				[]byte{gcRootsFormatVersion},       // gc roots format version.
-				u32.LeBytes(0),                     // max gc roots.
 			),
 		},
 		{
@@ -88,8 +85,6 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
-				[]byte{gcRootsFormatVersion},       // gc roots format version.
-				u32.LeBytes(0),                     // max gc roots.
 			),
 		},
 		{
@@ -125,8 +120,6 @@ func TestSerializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                       // func[1] frame size.
 				[]byte{entryPreambleFormatVersion},   // entry preamble format version.
 				u32.LeBytes(0),                       // no entry preambles.
-				[]byte{gcRootsFormatVersion},         // gc roots format version.
-				u32.LeBytes(0),                       // max gc roots.
 			),
 		},
 	}
@@ -176,7 +169,7 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				[]byte(testVersion),
 				u32.LeBytes(1), // number of functions.
 			),
-			expErr: "compilationcache: invalid magic number: got NATIV2 but want abcdef",
+			expErr: "compilationcache: invalid magic number: got NATIV4 but want abcdef",
 		},
 		{
 			name: "version mismatch",
@@ -221,15 +214,12 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[0] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
-				[]byte{gcRootsFormatVersion},       // gc roots format version.
-				u32.LeBytes(3),                     // max gc roots.
 			),
 			expCompiledModule: &compiledModule{
 				executables:        &executables{executable: []byte{1, 2, 3, 4, 5}},
 				functionOffsets:    []int{0},
 				ehTables:           [][]nativeapi.EhEntry{nil},
 				functionFrameSizes: []int64{0},
-				maxGCRoots:         3,
 			},
 			expStaleCache: false,
 			expErr:        "",
@@ -262,8 +252,6 @@ func TestDeserializeCompiledModule(t *testing.T) {
 				u64.LeBytes(0),                     // func[1] frame size.
 				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
 				u32.LeBytes(0),                     // no entry preambles.
-				[]byte{gcRootsFormatVersion},       // gc roots format version.
-				u32.LeBytes(0),                     // max gc roots.
 			),
 			importedFunctionCount: 1,
 			expCompiledModule: &compiledModule{
@@ -274,34 +262,6 @@ func TestDeserializeCompiledModule(t *testing.T) {
 			},
 			expStaleCache: false,
 			expErr:        "",
-		},
-		{
-			// An entry written before maxGCRoots was cached: loading it would size no root-spill region for
-			// code whose safepoints spill into one, so it must be recompiled.
-			name: "old cache without gc roots (stale)",
-			in: concat(
-				magic,
-				[]byte{byte(len(testVersion))},
-				[]byte(testVersion),
-				u32.LeBytes(1), // number of functions.
-				u64.LeBytes(0), // offset.
-				// Executable.
-				u64.LeBytes(5),                     // size.
-				codePadding(1),                     // aligns the code.
-				[]byte{1, 2, 3, 4, 5},              // machine code.
-				crcf([]byte{1, 2, 3, 4, 5}),        // machine code.
-				[]byte{0},                          // no source map.
-				[]byte{tryTableInfoFormatVersion},  // try-table info format version.
-				u32.LeBytes(0),                     // empty catch clause table.
-				[]byte{ehTableFormatVersion},       // eh table format version.
-				u32.LeBytes(1),                     // number of functions (eh tables).
-				u32.LeBytes(0),                     // func[0]: 0 eh entries.
-				u32.LeBytes(1),                     // number of function frame sizes.
-				u64.LeBytes(0),                     // func[0] frame size.
-				[]byte{entryPreambleFormatVersion}, // entry preamble format version.
-				u32.LeBytes(0),                     // no entry preambles.
-			),
-			expStaleCache: true,
 		},
 		{
 			name: "old cache without catch clause table (stale)",
@@ -558,53 +518,7 @@ func Test_fileCacheKey(t *testing.T) {
 	m := &wasm.Module{}
 	s.Sum(m.ID[:0])
 	original := m.ID
-	result := fileCacheKey(m, false)
+	result := fileCacheKey(m)
 	require.Equal(t, original, m.ID)
 	require.NotEqual(t, original, result)
-}
-
-// Test_fileCacheKey_cpuFeatures pins the property the whole on-disk cache relies
-// on: two hosts that would compile the same module into different machine code
-// must not share a cache entry. The JCC-erratum workaround is the case that
-// motivated this -- it changes both function alignment and the emitted bytes,
-// and unlike an instruction-set feature it is not detectable by inspecting the
-// cached code -- but the assertion is over CpuFeatures as a whole, so any future
-// flag inherits it.
-func Test_fileCacheKey_cpuFeatures(t *testing.T) {
-	saved := platform.CpuFeatures
-	t.Cleanup(func() { platform.CpuFeatures = saved })
-
-	m := &wasm.Module{}
-	s := sha256.New()
-	s.Write([]byte("hello world"))
-	s.Sum(m.ID[:0])
-
-	for _, flag := range []platform.CpuFeatureFlags{
-		platform.CpuFeatureAmd64JCCErratum,
-		platform.CpuFeatureAmd64SSE4_1,
-		platform.CpuFeatureAmd64BMI1,
-		platform.CpuFeatureAmd64ABM,
-	} {
-		platform.CpuFeatures = saved &^ flag
-		without := fileCacheKey(m, false)
-		platform.CpuFeatures = saved | flag
-		with := fileCacheKey(m, false)
-		require.NotEqual(t, without, with, "cache key does not depend on CPU feature %#x", uint64(flag))
-
-		// And it is stable: the same flags always give the same key, otherwise
-		// the cache would simply never hit and the check above would be vacuous.
-		require.Equal(t, with, fileCacheKey(m, false))
-	}
-}
-
-// Test_fileCacheKey_gcSafepoints: code compiled with the collector's loop-header safepoints and code compiled
-// without them must not share an entry. Without safepoints a loop never parks, so a collection on a runtime
-// that loaded such code would wait on it forever.
-func Test_fileCacheKey_gcSafepoints(t *testing.T) {
-	m := &wasm.Module{}
-	s := sha256.New()
-	s.Write([]byte("hello world"))
-	s.Sum(m.ID[:0])
-	require.NotEqual(t, fileCacheKey(m, false), fileCacheKey(m, true))
-	require.Equal(t, fileCacheKey(m, true), fileCacheKey(m, true))
 }

@@ -14,24 +14,23 @@ var (
 	floatArgResultRegs = []regalloc.RealReg{xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7}
 )
 
-// fuelVReg is the termination-fuel counter's home: reserved out of
+// preemptVReg holds the address of the running goroutine's g.stackguard0, which
+// preemption checks read (see ssa.OpcodePreemptRequested). It is reserved out of
 // AllocatableRegisters below, so nothing the register allocator emits can touch
-// it and it survives a wasm->wasm call for free. It is still a member of
-// calleeSavedVRegs (abi_go_call.go), which is what carries it across an exit to
-// Go -- the counter has to be preserved, not refilled, or a guest calling a host
-// function inside a loop would reset it every iteration and never check anything.
+// it and it survives a wasm->wasm call for free, and it is a member of
+// calleeSavedVRegs (abi_go_call.go), which carries it across an exit to Go.
 //
 // r13 is a good one to take: callee-saved in wazy's own convention, absent from
 // intArgResultRegs so no ABI position depends on it, and used elsewhere only as
 // the entry preamble's goAllocatedStackPtr, which is dead the moment the preamble
-// has moved it into RSP -- and which the preamble overwrites with the initial
-// fuel right there. See ssa.OpcodeFuelDec.
-var fuelVReg = r13VReg
+// has moved it into RSP -- and which the preamble overwrites with the address
+// right there.
+var preemptVReg = r13VReg
 
 var regInfo = &regalloc.RegisterInfo{
 	AllocatableRegisters: [regalloc.NumRegType][]regalloc.RealReg{
 		regalloc.RegTypeInt: {
-			// r13 is missing on purpose: it is the fuel register. See fuelVReg.
+			// r13 is missing on purpose: it is the preempt register. See preemptVReg.
 			rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10, r11, r12, r14, r15,
 		},
 		regalloc.RegTypeFloat: {

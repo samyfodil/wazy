@@ -122,7 +122,7 @@ func (in *Instance) CallAsync(ctx context.Context, export string, args ...abi.Va
 		return nil, fmt.Errorf("component/instance: CallAsync %q: only async (callback) lifts are supported by this milestone", export)
 	}
 	if in.sched.lockdown {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", export)
+		return nil, in.cannotEnter(export)
 	}
 	if len(args) != len(be.fd.Params) {
 		return nil, fmt.Errorf("component/instance: export %q takes %d parameter(s), got %d", export, len(be.fd.Params), len(args))
@@ -187,6 +187,10 @@ func (in *Instance) pumpPending(p *PendingCall) error {
 			return err
 		}
 		if !applied {
+			if p.t.state == taskResolved {
+				// Returned, with work parked after it: see invokeAsyncCallback.
+				in.finishAsync(p, p.t.result, nil)
+			}
 			return nil // parked, waiting for an external completion
 		}
 	}

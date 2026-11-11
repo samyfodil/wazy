@@ -170,7 +170,8 @@ type Module interface {
 	// definitions in this module, keyed on export name.
 	ExportedFunctionDefinitions() map[string]FunctionDefinition
 
-	// TODO: Table
+	// ExportedTable returns a table exported from this module or nil if it wasn't.
+	ExportedTable(name string) Table
 
 	// ExportedMemory returns a memory exported from this module or nil if it wasn't.
 	//
@@ -210,8 +211,6 @@ type Module interface {
 	//   - Closer was called directly.
 	//   - A guest function called Closer indirectly, such as `_start` calling
 	//     `proc_exit`, which internally closed the module.
-	//   - wazy.RuntimeConfig `WithCloseOnContextDone` was enabled and a
-	//     context completion closed the module.
 	//
 	// Where any of the above are possible, check this value before calling an
 	// ExportedFunction, even if you didn't formerly receive a sys.ExitError.
@@ -409,11 +408,13 @@ type Function interface {
 	// To safely encode/decode params/results expressed as uint64, users are encouraged to
 	// use api.EncodeXXX or DecodeXXX functions. See the docs on api.ValueType.
 	//
-	// When RuntimeConfig.WithCloseOnContextDone is toggled, the invocation of this Call method is ensured to be closed
-	// whenever one of the three conditions is met. In the event of close, sys.ExitError will be returned and
-	// the api.Module from which this api.Function is derived will be made closed. See the documentation of
-	// WithCloseOnContextDone on wazy.RuntimeConfig for detail. See examples in context_done_example_test.go for
-	// the end-to-end demonstrations of how these terminations can be performed.
+	// When ctx is done during the call -- canceled, or past its deadline -- the call ends the way a trap
+	// does: it returns an error that wraps ctx's (errors.Is(err, context.Canceled) or
+	// context.DeadlineExceeded), and the module stays usable. That holds however the guest runs, in a
+	// loop, through recursion or across a tree of calls, since compiled code returns to Go whenever the Go
+	// runtime asks it to: see "Why compiled code checks Go's preemption word" in RATIONALE.md. A call that
+	// is in a host function when ctx is done ends once it is back in the guest, so a host function that
+	// can block should watch ctx itself. See context_done_example_test.go for end-to-end demonstrations.
 	Call(ctx context.Context, params ...uint64) ([]uint64, error)
 
 	// CallWithStack is an optimized variation of Call that saves memory
@@ -576,6 +577,49 @@ type MutableGlobal interface {
 	internalapi.WazyOnly
 }
 
+// Table is a table exported by a module: a resizable array of references.
+//
+// An externref table, such as the one wasm-bindgen's reference-types output
+// exports to hold host objects, is read and written as opaque 64-bit values, as
+// externref is everywhere else in this API. A table of functions is read as
+// Function values. Its entries themselves are engine internals, and writing one
+// the engine did not make would corrupt it, so they are not exposed.
+//
+// See https://webassembly.github.io/spec/core/syntax/modules.html#tables
+//
+// # Notes
+//
+//   - This is an interface for decoupling, not third-party implementations.
+//     All implementations are in wazy.
+//   - Like a Memory, a Table must not be used while a call into a module that
+//     can reach it is running: table.grow can reallocate it.
+type Table interface {
+	// Size returns the number of entries in the table.
+	Size() uint32
+
+	// Grow appends delta entries holding init and returns the previous size,
+	// or false if the table cannot grow that far: past its declared maximum or
+	// past a limit the runtime enforces. init is 0 for a null entry, or any
+	// externref for an externref table; a table whose type excludes null cannot
+	// grow with it.
+	Grow(delta uint32, init uint64) (previousSize uint32, ok bool)
+
+	// Get returns the externref at index, or false when index is out of range
+	// or the table holds something other than externref.
+	Get(index uint32) (uint64, bool)
+
+	// Set stores the externref v at index. It returns false when index is out
+	// of range, the table cannot hold any externref, or v is 0 and the table's
+	// type excludes null.
+	Set(index uint32, v uint64) bool
+
+	// Function returns the function at index, or nil when index is out of range,
+	// the entry is null, or the table does not hold functions.
+	Function(index uint32) Function
+
+	internalapi.WazyOnly
+}
+
 // Memory allows restricted access to a module's memory. Notably, this does not allow growing.
 //
 // See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#storage%E2%91%A0
@@ -589,9 +633,9 @@ type MutableGlobal interface {
 // # Concurrency and Module.Close
 //
 // A Memory may be used from any goroutine, including one racing the owning
-// module's Close -- which an embedder cannot always avoid, since
-// RuntimeConfig.WithCloseOnContextDone closes a module from a watchdog
-// goroutine while a call is still unwinding through host code. A method that
+// module's Close -- which an embedder cannot always avoid when it closes a
+// module from a watchdog goroutine, say on a context.AfterFunc, while a call
+// is still unwinding through host code. A method that
 // STARTS after the storage was reclaimed is safe: the memory reads as empty,
 // so Size returns 0 and every accessor returns false rather than touching it.
 // A memory another live module still holds -- an imported or a shared one --

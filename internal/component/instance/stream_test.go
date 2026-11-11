@@ -495,17 +495,17 @@ func TestTakeReadableStreamEnd_Traps(t *testing.T) {
 	r, w := newBareStreamEnds(in)
 
 	// Transferring the WRITABLE end (not readable) traps.
-	if _, err := takeReadableStreamEnd(in, in.resources, nil, w); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, nil, in.resolve, w); err == nil {
 		t.Fatal("expected a trap transferring a writable end as readable")
 	}
 	// Elem type mismatch traps.
-	if _, err := takeReadableStreamEnd(in, in.resources, binary.PrimitiveDesc{Prim: "u32"}, r); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, binary.PrimitiveDesc{Prim: "u32"}, in.resolve, r); err == nil {
 		t.Fatal("expected an element-type-mismatch trap")
 	}
 	// A COPYING (in-flight) readable end cannot be transferred.
 	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
 	callBuiltin(asyncRead, uint64(r), 0, 1)
-	if _, err := takeReadableStreamEnd(in, in.resources, nil, r); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, nil, in.resolve, r); err == nil {
 		t.Fatal("expected a trap transferring a COPYING readable end")
 	}
 
@@ -513,14 +513,14 @@ func TestTakeReadableStreamEnd_Traps(t *testing.T) {
 	r2, _ := newBareStreamEnds(in)
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(r2), uint64(set))
-	if _, err := takeReadableStreamEnd(in, in.resources, nil, r2); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, nil, in.resolve, r2); err == nil {
 		t.Fatal("expected a trap transferring a waitable-set-joined readable end")
 	}
 
 	// A genuinely idle, unjoined readable end transfers cleanly and is
 	// removed from the table.
 	r3, _ := newBareStreamEnds(in)
-	shared, err := takeReadableStreamEnd(in, in.resources, nil, r3)
+	shared, err := takeReadableStreamEnd(in, in.resources, nil, in.resolve, r3)
 	if err != nil {
 		t.Fatalf("clean transfer failed: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 	if !ok {
 		t.Fatal("error-context handle not in table")
 	}
-	ec := raw.(*errorContext)
+	ec := raw.(*ErrorContext)
 	if ec.debugMessage != msg {
 		t.Fatalf("debugMessage = %q, want %q", ec.debugMessage, msg)
 	}
@@ -579,7 +579,7 @@ func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 		t.Fatal("error-context.drop did not remove the entry")
 	}
 
-	// Copy semantics: lift is a GET; lowering that *errorContext again (the
+	// Copy semantics: lift is a GET; lowering that *ErrorContext again (the
 	// Call-arg seam, resolveArgHandlesDepth's PrimitiveDesc{"error-context"}
 	// case) mints a SECOND handle sharing the same underlying message,
 	// independent of the first.
@@ -587,8 +587,8 @@ func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 	newFn.fn.Call(ctx, mod, stack2)
 	h2 := uint32(stack2[0])
 	raw2, _ := in.resources.getEntry(h2)
-	ec2 := raw2.(*errorContext)
-	v, err := in.resolveArgHandlesDepth(ec2, binary.PrimitiveDesc{Prim: "error-context"}, 0)
+	ec2 := raw2.(*ErrorContext)
+	v, err := in.resolveArgHandlesDepth(ec2, binary.PrimitiveDesc{Prim: "error-context"}, 0, new(*task))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -597,8 +597,8 @@ func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 		t.Fatalf("resolveArgHandlesDepth returned %T, want uint32", v)
 	}
 	raw3, _ := in.resources.getEntry(h3)
-	if raw3.(*errorContext) != ec2 {
-		t.Fatal("the new handle should share the SAME *errorContext (copy semantics)")
+	if raw3.(*ErrorContext) != ec2 {
+		t.Fatal("the new handle should share the SAME *ErrorContext (copy semantics)")
 	}
 	if h3 == h2 {
 		t.Fatal("the new handle must be DIFFERENT from the source handle (lift is a GET, not a remove)")

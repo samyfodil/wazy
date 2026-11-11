@@ -18,6 +18,8 @@ type instruction struct {
 	// mayThrow is set on a call a caught exception resumes after; see
 	// ClobbersAllRegisters.
 	mayThrow bool
+	// vecProg is a vecMap's program.
+	vecProg *ssa.VecProgram
 }
 
 // IsCall implements regalloc.Instr.
@@ -59,6 +61,11 @@ func (i *instruction) String() string {
 		}
 	case xmmRmR:
 		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(false), i.op2.format(false))
+	case imulImm:
+		return fmt.Sprintf("imul $%d, %s, %s", int32(i.u1), i.op1.format(i.b1), i.op2.format(i.b1))
+	case xmmRmRVex:
+		src1 := newOperandReg(regalloc.VReg(i.u1))
+		return fmt.Sprintf("v%s %s, %s, %s", sseOpcode(i.u2), i.op1.format(false), src1.format(false), i.op2.format(false))
 	case gprToXmm:
 		return fmt.Sprintf("%s %s, %s", sseOpcode(i.u1), i.op1.format(i.b1), i.op2.format(i.b1))
 	case xmmUnaryRmR:
@@ -247,9 +254,18 @@ func (i *instruction) String() string {
 		return fmt.Sprintf("jump_table_island: jmp_table_index=%d", i.u1)
 	case exitSequence:
 		return fmt.Sprintf("exit_sequence %s", i.op1.format(true))
+	case preemptCheck:
+		return fmt.Sprintf("testb $0x80, %s", i.op1.format(true))
+	case yield:
+		return fmt.Sprintf("yield *%s", i.op1.format(true))
+	case vecMap:
+		return i.vecMapString()
 	case ud2:
 		return "ud2"
 	case call:
+		if i.b1 {
+			return fmt.Sprintf("call %s; nopl %#x(%%rax)", ssa.FuncRef(i.u1), InlinedCallMarker)
+		}
 		return fmt.Sprintf("call %s", ssa.FuncRef(i.u1))
 	case callIndirect:
 		return fmt.Sprintf("callq *%s", i.op1.format(true))
@@ -361,6 +377,12 @@ func (i *instruction) Defs(regs *[]regalloc.VReg) []regalloc.VReg {
 		} else {
 			*regs = append(*regs, rdxVReg)
 		}
+	case defKindMulHi:
+		*regs = append(*regs, raxVReg, rdxVReg)
+	case defKindVecMap:
+		for k := range i.vecProg.Reduces {
+			*regs = append(*regs, regInfo.RealRegToVReg[vecMapResultReg(i.vecProg, k)])
+		}
 	default:
 		panic(fmt.Sprintf("BUG: invalid defKind \"%s\" for %s", dk, i))
 	}
@@ -372,6 +394,18 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 	*regs = (*regs)[:0]
 	switch uk := useKinds[i.kind]; uk {
 	case useKindNone:
+	case useKindVecMap:
+		i.vecMapUses(regs)
+	case useKindOp1U1Reg:
+		switch i.op1.kind {
+		case operandKindReg:
+			*regs = append(*regs, i.op1.reg())
+		case operandKindMem:
+			i.op1.addressMode().uses(regs)
+		default:
+			panic(fmt.Sprintf("BUG: invalid operand: %s", i))
+		}
+		*regs = append(*regs, regalloc.VReg(i.u1))
 	case useKindOp1Op2Reg, useKindOp1RegOp2:
 		opAny, opReg := &i.op1, &i.op2
 		if uk == useKindOp1RegOp2 {
@@ -433,8 +467,16 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 		*regs = append(*regs, src, tmpGp, tmpGp2)
 	case useKindDivRem:
 		execCtx, divisor, tmpGp, _, _, _ := i.idivRemSequenceData()
-		// idiv uses rax and rdx as implicit operands.
-		*regs = append(*regs, raxVReg, rdxVReg, execCtx, divisor, tmpGp)
+		// idiv uses rax and rdx as implicit operands. One trapping through the shared islands has no
+		// execution context.
+		*regs = append(*regs, raxVReg, rdxVReg)
+		if execCtx.Valid() {
+			*regs = append(*regs, execCtx)
+		}
+		*regs = append(*regs, divisor, tmpGp)
+	case useKindMulHi:
+		// mul multiplies rax by its operand.
+		*regs = append(*regs, raxVReg, i.op1.reg())
 	case useKindBlendvpd:
 		*regs = append(*regs, xmm0VReg)
 
@@ -477,6 +519,19 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 func (i *instruction) AssignUse(index int, v regalloc.VReg) {
 	switch uk := useKinds[i.kind]; uk {
 	case useKindNone:
+	case useKindOp1U1Reg:
+		nregs := 1
+		if i.op1.kind == operandKindMem {
+			nregs = i.op1.addressMode().nregs()
+		}
+		switch {
+		case index == nregs:
+			i.u1 = uint64(v)
+		case i.op1.kind == operandKindReg:
+			i.op1.setReg(v)
+		default:
+			i.op1.addressMode().assignUses(index, v)
+		}
 	case useKindCallInd, useKindTailCallInd:
 		if index != 0 {
 			panic("BUG")
@@ -582,6 +637,9 @@ func (i *instruction) AssignUse(index int, v regalloc.VReg) {
 			panic("BUG")
 		}
 	case useKindDivRem:
+		if execCtx, _, _, _, _, _ := i.idivRemSequenceData(); !execCtx.Valid() && index >= 2 {
+			index++
+		}
 		switch index {
 		case 0:
 			if v != raxVReg {
@@ -597,6 +655,17 @@ func (i *instruction) AssignUse(index int, v regalloc.VReg) {
 			i.op2.setReg(v)
 		case 4:
 			i.u1 = uint64(v)
+		default:
+			panic("BUG")
+		}
+	case useKindMulHi:
+		switch index {
+		case 0:
+			if v != raxVReg {
+				panic("BUG")
+			}
+		case 1:
+			i.op1.setReg(v)
 		default:
 			panic("BUG")
 		}
@@ -787,6 +856,13 @@ const (
 	// XMM (scalar or vector) binary op: (add sub and or xor mul adc? sbb?) (32 64) (reg addr) reg
 	xmmRmR
 
+	// xmmRmRVex is xmmRmR's AVX form, which does not overwrite either operand: op2 = u1 op op1.
+	xmmRmRVex
+
+	// imulImm is the three-operand integer multiplication by an immediate: op2 = op1 * u1, op1 a
+	// register or memory.
+	imulImm
+
 	// XMM (scalar or vector) unary op: mov between XMM registers (32 64) (reg addr) reg.
 	//
 	// This differs from xmmRmR in that the dst register of xmmUnaryRmR is not used in the
@@ -907,6 +983,19 @@ const (
 
 	// nopUseReg is a meta instruction that uses one register and does nothing.
 	nopUseReg
+
+	// preemptCheck is `testb $0x80, 7(%r13)`: it tests the sign bit of Go's preemption
+	// word, whose address the preempt register holds, which StackPreempt sets and a
+	// stack bound never does. See ssa.OpcodePreemptRequested.
+	preemptCheck
+
+	// yield is the slow path of a preemption check, `pushq %ctx; callq *off(%ctx);
+	// add $8, %rsp`: it calls the yield trampoline, whose address the execution context
+	// in op1's base holds, with that context on the stack. The trampoline preserves
+	// every register, so to the allocator this is no call. See ssa.OpcodeYield.
+	yield
+	// vecMap expands an OpcodeVecMap; see lowerVecMap.
+	vecMap
 
 	// tailCall is a meta instruction that emits a tail call.
 	tailCall
@@ -1154,6 +1243,10 @@ func (k instructionKind) String() string {
 		return "movRR"
 	case xmmRmR:
 		return "xmmRmR"
+	case xmmRmRVex:
+		return "xmmRmRVex"
+	case imulImm:
+		return "imulImm"
 	case gprToXmm:
 		return "gprToXmm"
 	case xmmUnaryRmR:
@@ -1222,6 +1315,12 @@ func (k instructionKind) String() string {
 		return "jmpTableIsland"
 	case exitSequence:
 		return "exit_sequence"
+	case preemptCheck:
+		return "preemptCheck"
+	case vecMap:
+		return "vecMap"
+	case yield:
+		return "yield"
 	case ud2:
 		return "ud2"
 	case xchg:
@@ -1281,6 +1380,23 @@ func (a aluRmiROpcode) String() string {
 	}
 }
 
+// asPreemptCheck makes i the test of the sign bit of Go's preemption word, whose
+// top byte is at amode; the preempt register is reserved, so the allocator never
+// sees it. Its flags are NZ when preemption is requested.
+func (i *instruction) asPreemptCheck(amode *amode) *instruction {
+	i.kind = preemptCheck
+	i.op1 = newOperandMem(amode)
+	return i
+}
+
+// asYield makes i the slow path of a preemption check, which calls the yield
+// trampoline at amode, in the execution context. See yield.
+func (i *instruction) asYield(amode *amode) *instruction {
+	i.kind = yield
+	i.op1 = newOperandMem(amode)
+	return i
+}
+
 func (i *instruction) asJmpIf(cond cond, target operand) *instruction {
 	i.kind = jmpIf
 	i.u1 = uint64(cond)
@@ -1305,7 +1421,7 @@ func (i *instruction) asJmp(target operand) *instruction {
 
 func (i *instruction) jmpLabel() label {
 	switch i.kind {
-	case jmp, jmpIf, lea, xmmUnaryRmR:
+	case jmp, jmpIf, lea, xmmUnaryRmR, xmmRmRVex:
 		return i.op1.label()
 	default:
 		panic("BUG")
@@ -1400,6 +1516,27 @@ func (i *instruction) asBlendvpd(rm operand, rd regalloc.VReg) *instruction {
 	i.kind = blendvpd
 	i.op1 = rm
 	i.op2 = newOperandReg(rd)
+	return i
+}
+
+// asXmmRmRVex initializes this as rd = src1 op src2, op one of the scalar float arithmetic opcodes
+// vexScalarOp knows, in its AVX form.
+func (i *instruction) asXmmRmRVex(op sseOpcode, src2 operand, src1, rd regalloc.VReg) *instruction {
+	i.kind = xmmRmRVex
+	i.op1, i.op2 = src2, newOperandReg(rd)
+	i.u1, i.u2 = uint64(src1), uint64(op)
+	return i
+}
+
+func (i *instruction) asImulImm(rm operand, imm uint32, rd regalloc.VReg, _64 bool) *instruction {
+	if rm.kind != operandKindReg && rm.kind != operandKindMem {
+		panic("BUG")
+	}
+	i.kind = imulImm
+	i.op1 = rm
+	i.op2 = newOperandReg(rd)
+	i.u1 = uint64(imm)
+	i.b1 = _64
 	return i
 }
 
@@ -2483,6 +2620,8 @@ const (
 	defKindOp2
 	defKindCall
 	defKindDivRem
+	defKindMulHi
+	defKindVecMap
 )
 
 var defKinds = [instrMax]defKind{
@@ -2500,6 +2639,8 @@ var defKinds = [instrMax]defKind{
 	xmmUnaryRmRImm:         defKindOp2,
 	xmmCmpRmR:              defKindNone,
 	xmmRmR:                 defKindNone,
+	xmmRmRVex:              defKindOp2,
+	imulImm:                defKindOp2,
 	xmmRmRImm:              defKindNone,
 	mov64MR:                defKindOp2,
 	movsxRmR:               defKindOp2,
@@ -2524,6 +2665,7 @@ var defKinds = [instrMax]defKind{
 	fcvtToUintSequence:     defKindNone,
 	xmmCMov:                defKindOp2,
 	idivRemSequence:        defKindDivRem,
+	mulHi:                  defKindMulHi,
 	blendvpd:               defKindNone,
 	mfence:                 defKindNone,
 	xchg:                   defKindNone,
@@ -2531,6 +2673,9 @@ var defKinds = [instrMax]defKind{
 	lockxadd:               defKindNone,
 	neg:                    defKindNone,
 	nopUseReg:              defKindNone,
+	preemptCheck:           defKindNone,
+	yield:                  defKindNone,
+	vecMap:                 defKindVecMap,
 	tailCall:               defKindCall,
 	tailCallIndirect:       defKindCall,
 	xmmLoadConst:           defKindOp2,
@@ -2551,6 +2696,10 @@ func (d defKind) String() string {
 		return "call"
 	case defKindDivRem:
 		return "divrem"
+	case defKindMulHi:
+		return "mulhi"
+	case defKindVecMap:
+		return "vecmap"
 	default:
 		return "invalid"
 	}
@@ -2568,8 +2717,12 @@ const (
 	// useKindRaxOp1RegOp2 is Op1 must be a register, Op2 can be any operand, and RAX is used.
 	useKindRaxOp1RegOp2
 	useKindDivRem
+	useKindMulHi
 	useKindBlendvpd
 	useKindCall
+	useKindVecMap
+	// useKindOp1U1Reg reads op1, a register or memory, and the register in u1.
+	useKindOp1U1Reg
 	useKindCallInd
 	useKindTailCallInd
 	useKindFcvtToSintSequence
@@ -2593,6 +2746,8 @@ var useKinds = [instrMax]useKind{
 	xmmUnaryRmRImm:         useKindOp1,
 	xmmCmpRmR:              useKindOp1Op2Reg,
 	xmmRmR:                 useKindOp1Op2Reg,
+	xmmRmRVex:              useKindOp1U1Reg,
+	imulImm:                useKindOp1,
 	xmmRmRImm:              useKindOp1Op2Reg,
 	mov64MR:                useKindOp1,
 	movzxRmR:               useKindOp1,
@@ -2616,6 +2771,7 @@ var useKinds = [instrMax]useKind{
 	fcvtToUintSequence:     useKindFcvtToUintSequence,
 	xmmCMov:                useKindOp1Op2Reg,
 	idivRemSequence:        useKindDivRem,
+	mulHi:                  useKindMulHi,
 	blendvpd:               useKindBlendvpd,
 	mfence:                 useKindNone,
 	xchg:                   useKindOp1RegOp2,
@@ -2623,6 +2779,9 @@ var useKinds = [instrMax]useKind{
 	lockxadd:               useKindOp1RegOp2,
 	neg:                    useKindOp1,
 	nopUseReg:              useKindOp1,
+	preemptCheck:           useKindNone,
+	yield:                  useKindOp1,
+	vecMap:                 useKindVecMap,
 	tailCall:               useKindCall,
 	tailCallIndirect:       useKindTailCallInd,
 	xmmLoadConst:           useKindOp1,
@@ -2644,12 +2803,16 @@ func (u useKind) String() string {
 		return "op1RegOp2"
 	case useKindCall:
 		return "call"
+	case useKindVecMap:
+		return "vecmap"
 	case useKindCallInd:
 		return "callInd"
 	case useKindTailCallInd:
 		return "tailCallInd"
 	case useKindCvtUint64ToFloatSeq:
 		return "cvtUint64ToFloatSeq"
+	case useKindMulHi:
+		return "mulhi"
 	default:
 		return "invalid"
 	}

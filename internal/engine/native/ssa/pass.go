@@ -20,12 +20,15 @@ func (b *builder) RunPasses() {
 }
 
 func (b *builder) runPreBlockLayoutPasses() {
+	passRemoveElidedPreemptChecks(b)
 	passSortSuccessors(b)
 	passDeadBlockEliminationOpt(b)
 	// The result of passCalculateImmediateDominators will be used by various passes below.
 	passCalculateImmediateDominators(b)
 	passRedundantPhiEliminationOpt(b)
+	passWidenMemoryBoundsOpt(b)
 	passDominatedMemoryBoundsEliminationOpt(b)
+	passMergeBoundsChecksOpt(b)
 
 	// Note: wazy intentionally does NOT run middle-end "language compiler"
 	// optimizations here (constant folding, algebraic identities, CSE,
@@ -46,7 +49,10 @@ func (b *builder) runPreBlockLayoutPasses() {
 
 	// Hoisting has to happen before the dead code pass, which stamps every
 	// instruction with the group id the backend reads.
+	passLinearFormOpt(b)
 	passLoopInvariantCodeMotionOpt(b)
+
+	passCloneSharedComparesOpt(b)
 
 	// passDeadCodeEliminationOpt could be more accurate if we do this after other optimizations.
 	passDeadCodeEliminationOpt(b)
@@ -99,6 +105,150 @@ func passDominatedMemoryBoundsEliminationOpt(b *builder) {
 }
 
 func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID, ceil uint64, ok bool) {
+	base, memLen, ceil, _, _, ok = memoryBoundsCheckParts(b, instr)
+	return
+}
+
+// passCloneSharedComparesOpt gives each select and conditional branch on an integer comparison of its
+// block a copy of the comparison of its own, right before it, where the comparison has other uses: a
+// comparison only one instruction uses becomes the flags that instruction reads, rather than a 0 or 1 in a
+// register that it tests again. The original goes where nothing else uses it.
+func passCloneSharedComparesOpt(b *builder) {
+	// The comparisons of interest, those a select or a branch of their block takes, are marked by value
+	// ID with this pass's stamp, and only their uses counted. A use through an alias is not, which at
+	// worst leaves one comparison shared: a copy is never wrong, only sometimes not needed.
+	b.cloneStamp++
+	stamp := b.cloneStamp
+	if n := int(b.nextValueID); len(b.cloneMark) < n {
+		b.cloneMark = append(b.cloneMark, make([]cloneMark, n-len(b.cloneMark))...)
+	}
+	mark := b.cloneMark
+	blockStamp := b.cloneBlockStamp
+	any := false
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		blockStamp++
+		for cur := blk.rootInstr; cur != nil; cur = cur.next {
+			switch cur.opcode {
+			case OpcodeIcmp:
+				mark[cur.rValue.ID()] = cloneMark{stamp: stamp, block: blockStamp}
+			case OpcodeSelect, OpcodeBrz, OpcodeBrnz:
+				c := b.resolveAlias(cur.v)
+				if m := &mark[c.ID()]; m.stamp == stamp && m.block == blockStamp {
+					m.candidate, any = true, true
+				}
+			}
+		}
+	}
+	if !any {
+		b.cloneBlockStamp = blockStamp
+		return
+	}
+	count := func(v Value) {
+		if v.Valid() {
+			if m := &mark[v.ID()]; m.stamp == stamp && m.candidate {
+				m.uses++
+			}
+		}
+	}
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		for cur := blk.rootInstr; cur != nil; cur = cur.next {
+			v1, v2, v3, vs := cur.Args()
+			count(v1)
+			count(v2)
+			count(v3)
+			for _, v := range vs {
+				count(v)
+			}
+		}
+	}
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		for cur := blk.rootInstr; cur != nil; cur = cur.next {
+			switch cur.opcode {
+			case OpcodeSelect, OpcodeBrz, OpcodeBrnz:
+			default:
+				continue
+			}
+			c := b.resolveAlias(cur.v)
+			m := &mark[c.ID()]
+			if m.stamp != stamp || !m.candidate || m.uses < 2 {
+				continue
+			}
+			x, y, cond := b.InstructionOfValue(c).IcmpData()
+			cur.v = b.insertBefore(blk, cur, b.AllocateInstruction().AsIcmp(x, y, cond))
+			m.uses--
+		}
+	}
+	b.cloneBlockStamp = blockStamp
+}
+
+// cloneMark is passCloneSharedComparesOpt's per value scratch: a comparison's stamp, its block's, whether
+// a select or a branch of the block takes it, and how many instructions do.
+type cloneMark struct {
+	stamp, block, uses int32
+	candidate          bool
+}
+
+// passWidenMemoryBoundsOpt merges a bounds check into an earlier one in its block of the same address and
+// memory, where only pure instructions, loads and other bounds checks run between them: the earlier one
+// checks the greater ceiling of the two, and the later one goes. Two fields of a struct read one after
+// the other then cost one check. A check that would have trapped later traps earlier instead, as out of
+// bounds still, with nothing observable having happened between.
+func passWidenMemoryBoundsOpt(b *builder) {
+	type open struct {
+		base, memLen ValueID
+		ceil         uint64
+		check        *Instruction
+		ext, lenV    Value
+	}
+	var opens []open
+	for _, blk := range b.reversePostOrderedBasicBlocks {
+		opens = opens[:0]
+		for cur := blk.rootInstr; cur != nil; {
+			next := cur.next
+			base, memLen, ceil, ext, lenV, ok := memoryBoundsCheckParts(b, cur)
+			switch {
+			case ok:
+				i := 0
+				for i < len(opens) && (opens[i].base != base || opens[i].memLen != memLen) {
+					i++
+				}
+				if i == len(opens) {
+					opens = append(opens, open{base: base, memLen: memLen, ceil: ceil, check: cur, ext: ext, lenV: lenV})
+					break
+				}
+				if o := &opens[i]; ceil > o.ceil {
+					// memLen < zext(base) + ceil: the form that holds for any ceiling.
+					k := b.insertBefore(blk, o.check, b.AllocateInstruction().AsIconst64(ceil))
+					end := b.insertBefore(blk, o.check, b.AllocateInstruction().AsIadd(o.ext, k))
+					o.check.v2 = b.insertBefore(blk, o.check, b.AllocateInstruction().AsIcmp(o.lenV, end, IntegerCmpCondUnsignedLessThan))
+					o.ceil = ceil
+				}
+				blk.removeInstruction(cur)
+			case cur.sideEffect() != sideEffectNone:
+				opens = opens[:0]
+			}
+			cur = next
+		}
+	}
+}
+
+// insertBefore inserts instr, which returns one value, into blk right before at, and returns its value.
+func (b *builder) insertBefore(blk *basicBlock, at, instr *Instruction) Value {
+	t, _ := instructionReturnTypes[instr.opcode](b, instr)
+	instr.rValue = b.allocateValue(t).setInstructionID(instr.id)
+	instr.prev, instr.next = at.prev, at
+	if at.prev != nil {
+		at.prev.next = instr
+	} else {
+		blk.rootInstr = instr
+	}
+	at.prev = instr
+	return instr.rValue
+}
+
+// memoryBoundsCheckParts is memoryBoundsCheckData with the zero-extended address and the memory length it
+// compares.
+func memoryBoundsCheckParts(b *builder, instr *Instruction) (base, memLen ValueID, ceil uint64, ext, lenV Value, ok bool) {
 	if instr.opcode != OpcodeExitIfTrueWithCode {
 		return
 	}
@@ -111,6 +261,23 @@ func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID
 		return
 	}
 	lenOperand, end, cond := cmp.IcmpData()
+	if cond == IntegerCmpCondUnsignedGreaterThan {
+		// The form for an address with no offset: `zext(base) > memLen - ceil`.
+		sub := b.InstructionOfValue(b.resolveAlias(end))
+		if sub == nil || sub.opcode != OpcodeIsub {
+			return
+		}
+		memLenV, k := sub.Arg2()
+		constant := b.InstructionOfValue(b.resolveAlias(k))
+		extend := b.InstructionOfValue(b.resolveAlias(lenOperand))
+		if constant == nil || !constant.Constant() || extend == nil || extend.opcode != OpcodeUExtend {
+			return
+		}
+		if from, to, _ := extend.ExtendData(); from != 32 || to != 64 {
+			return
+		}
+		return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(memLenV).ID(), uint64(constant.ConstantVal()), lenOperand, memLenV, true
+	}
 	if cond != IntegerCmpCondUnsignedLessThan {
 		return
 	}
@@ -135,7 +302,7 @@ func memoryBoundsCheckData(b *builder, instr *Instruction) (base, memLen ValueID
 	if from != 32 || to != 64 {
 		return
 	}
-	return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(lenOperand).ID(), ceil, true
+	return b.resolveAlias(extend.Arg()).ID(), b.resolveAlias(lenOperand).ID(), ceil, extended, lenOperand, true
 }
 
 func (b *builder) hasDominatingMemoryBound(blk *basicBlock, base, memLen ValueID, ceil uint64) bool {
@@ -229,6 +396,62 @@ func passDeadBlockEliminationOpt(b *builder) {
 			blk.invalid = true
 		}
 		blk.visited = 0
+	}
+}
+
+// passRemoveElidedPreemptChecks takes the preemption checks the frontend elided
+// (see Instruction.ElidePreemptCheck) out of the function, with the branches to
+// their slow blocks: an elided check compiles to nothing, but its slow path, which
+// makes a call, would still cost the code around it in registers and spills. A
+// slow block left without predecessors goes too, along with its edges, before
+// passDeadBlockEliminationOpt sees it.
+func passRemoveElidedPreemptChecks(b *builder) {
+	for blk := b.blockIteratorBegin(); blk != nil; blk = b.blockIteratorNext() {
+		br := blk.currentInstr // a conditional branch ends its block, or comes right before the jump that does
+		if br != nil && br.opcode == OpcodeJump {
+			br = br.prev
+		}
+		if br == nil || br.opcode != OpcodeBrnz {
+			continue
+		}
+		check := b.InstructionOfValue(br.v)
+		if check == nil || check.opcode != OpcodePreemptRequested {
+			continue
+		}
+		if _, _, elided := check.PreemptCheckData(); !elided {
+			continue
+		}
+		blk.removeInstruction(check)
+		blk.removeInstruction(br)
+		slow := b.basicBlock(BasicBlockID(br.rValue))
+		removeEdge(blk, slow, br)
+		if len(slow.preds) == 0 {
+			for _, succ := range slow.success {
+				for i := range succ.preds {
+					if succ.preds[i].blk == slow {
+						succ.preds = append(succ.preds[:i], succ.preds[i+1:]...)
+						break
+					}
+				}
+			}
+			slow.success = slow.success[:0]
+		}
+	}
+}
+
+// removeEdge removes the edge from pred to succ that branch makes.
+func removeEdge(pred, succ *basicBlock, branch *Instruction) {
+	for i := range succ.preds {
+		if succ.preds[i].branch == branch {
+			succ.preds = append(succ.preds[:i], succ.preds[i+1:]...)
+			break
+		}
+	}
+	for i, s := range pred.success {
+		if s == succ {
+			pred.success = append(pred.success[:i], pred.success[i+1:]...)
+			break
+		}
 	}
 }
 

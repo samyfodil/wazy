@@ -93,6 +93,7 @@ import (
 	"strings"
 
 	"github.com/samyfodil/wazy/component"
+	"github.com/samyfodil/wazy/internal/component/instance"
 	ast "github.com/samyfodil/wazy/internal/component/wit"
 )
 
@@ -284,6 +285,9 @@ type Signature struct {
 	// resource -- to that name. Anonymous types (list<u8>, option<T>, ...)
 	// have none.
 	TypeNames map[uint32]string
+	// TypeOwners maps the same indices to the qualified name of the interface
+	// defining the type, "" for a world's own.
+	TypeOwners map[uint32]string
 }
 
 // Signature builds the func's descriptor, with every own and borrow of a
@@ -296,7 +300,39 @@ func (f *Func) Signature(tags Tags) (*Signature, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wit: %s: %w", f.where(), err)
 	}
-	return &Signature{Desc: fd, Types: b.tbl, TypeNames: b.names}, nil
+	return &Signature{Desc: fd, Types: b.tbl, TypeNames: b.names, TypeOwners: b.owners}, nil
+}
+
+// TypeSet is the value types an interface defines, built into one table as
+// a Signature's are.
+type TypeSet struct {
+	// Refs are the interface's value types -- records, variants, enums,
+	// flags and aliases, not resources -- in declaration order.
+	Refs       []component.TypeRef
+	Types      *component.TypeTable
+	TypeNames  map[uint32]string
+	TypeOwners map[uint32]string
+}
+
+// Types builds every value type the interface defines, whether or not a func
+// of its uses it, with resources carrying their tags from tags.
+func (i *Interface) Types(tags Tags) (*TypeSet, error) {
+	b := newBuilder(tags, false)
+	set := &TypeSet{Types: b.tbl, TypeNames: b.names, TypeOwners: b.owners}
+	for _, name := range i.scope.order {
+		if i.scope.off[name] {
+			continue
+		}
+		if _, ok := i.scope.types[name].Type.(*ast.Resource); ok {
+			continue
+		}
+		ref, err := b.named(i.scope, name)
+		if err != nil {
+			return nil, fmt.Errorf("wit: %s: %w", i.Name, err)
+		}
+		set.Refs = append(set.Refs, ref)
+	}
+	return set, nil
 }
 
 func (f *Func) where() string {
@@ -315,6 +351,18 @@ func Parse(filename, src string, opts ...Option) (*Package, error) {
 		return nil, err
 	}
 	return resolve(append(nested, main), main.name, newConfig(opts))
+}
+
+// FromComponent reads the WIT of a compiled component: what it imports and
+// exports, as the world "root" of a package "root:component", with each
+// interface in a package of its own, as `wasm-tools component wit` prints it.
+// It is the WIT a host needs to bind a component it did not build.
+func FromComponent(componentBytes []byte, opts ...Option) (*Package, error) {
+	src, err := instance.ComponentWIT(componentBytes)
+	if err != nil {
+		return nil, err
+	}
+	return Parse("component.wit", src, opts...)
 }
 
 // ParseFile reads the single WIT file at path, as Parse does.

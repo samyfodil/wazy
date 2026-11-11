@@ -118,6 +118,12 @@ func operandShiftImm(amount byte) operand {
 	return operand{kind: operandKindShiftImm, data: uint64(amount)}
 }
 
+// operandBitfield is the field of width bits from bit lsb on, which ubfx takes in the place of a shift
+// amount.
+func operandBitfield(lsb, width byte) operand {
+	return operand{kind: operandKindShiftImm, data: uint64(lsb) | uint64(width)<<8}
+}
+
 // shiftImm decodes the underlying shift amount data assuming the operand is of operandKindShiftImm.
 func (o operand) shiftImm() byte {
 	return byte(o.data)

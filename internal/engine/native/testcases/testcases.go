@@ -411,6 +411,43 @@ var (
 			wasm.OpcodeEnd,
 		}, []wasm.ValueType{}),
 	}
+	// LoopCounted counts up for ever, so its preemption check tests the counter first.
+	LoopCounted = TestCase{
+		Name: "loop_counted",
+		Module: SingleFunctionModule(vv, []byte{
+			wasm.OpcodeLoop, 0,
+			wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Const, 1, wasm.OpcodeI32Add, wasm.OpcodeLocalSet, 0,
+			wasm.OpcodeI32Const, 1, wasm.OpcodeBrIf, 0,
+			wasm.OpcodeEnd,
+			wasm.OpcodeEnd,
+		}, []wasm.ValueType{i32}),
+	}
+	// LoopBounded counts up to 100 from zero, so it needs no preemption check.
+	LoopBounded = TestCase{
+		Name: "loop_bounded",
+		Module: SingleFunctionModule(vv, []byte{
+			wasm.OpcodeLoop, 0,
+			wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Const, 1, wasm.OpcodeI32Add, wasm.OpcodeLocalTee, 0,
+			wasm.OpcodeI32Const, 0xe4, 0x00, wasm.OpcodeI32LtU, wasm.OpcodeBrIf, 0,
+			wasm.OpcodeEnd,
+			wasm.OpcodeEnd,
+		}, []wasm.ValueType{i32}),
+	}
+	// LoopCountDown counts its parameter down to zero, testing for zero at the top:
+	// the loop's own test folds into its masked preemption check.
+	LoopCountDown = TestCase{
+		Name: "loop_count_down",
+		Module: SingleFunctionModule(i32_v, []byte{
+			wasm.OpcodeBlock, blockSignature_vv,
+			wasm.OpcodeLoop, blockSignature_vv,
+			wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Eqz, wasm.OpcodeBrIf, 1,
+			wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Const, 1, wasm.OpcodeI32Sub, wasm.OpcodeLocalSet, 0,
+			wasm.OpcodeBr, 0,
+			wasm.OpcodeEnd,
+			wasm.OpcodeEnd,
+			wasm.OpcodeEnd,
+		}, nil),
+	}
 	LoopBrWithParamResults = TestCase{
 		Name: "loop_with_param_results",
 		Module: SingleFunctionModule(i32i32_i32, []byte{
@@ -1532,6 +1569,35 @@ var (
 					wasm.OpcodeEnd,
 
 					// Therefore, this block should reload the memory buf/size pointer here.
+					wasm.OpcodeLocalGet, 0,
+					wasm.OpcodeI32Load, 0x2, 0x0, // alignment=2 (natural alignment) staticOffset=0
+
+					wasm.OpcodeEnd,
+				}},
+				// The callee may grow the memory, so its callers cannot keep the base and length.
+				{Body: []byte{wasm.OpcodeI32Const, 1, wasm.OpcodeMemoryGrow, 0, wasm.OpcodeDrop, wasm.OpcodeEnd}},
+			},
+			DataSection: []wasm.DataSegment{{OffsetExpression: constExprI32(0), Init: maskedBuf(int(wasm.MemoryPageSize))}},
+		},
+	}
+
+	MemoryLoadAfterPureCall = TestCase{
+		Name: "memory_load_after_pure_call",
+		Module: &wasm.Module{
+			TypeSection:     []wasm.FunctionType{i32_i32, {}},
+			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
+			MemorySection:   []wasm.Memory{{Min: 1}},
+			FunctionSection: []wasm.Index{0, 1},
+			CodeSection: []wasm.Code{
+				{Body: []byte{
+					wasm.OpcodeLocalGet, 0,
+					wasm.OpcodeI32Const, 0,
+					wasm.OpcodeI32Eq,
+					wasm.OpcodeIf, blockSignature_vv,
+					wasm.OpcodeCall, 0x1, // The callee cannot grow the memory, so nothing reloads.
+					wasm.OpcodeElse,
+					wasm.OpcodeEnd,
+
 					wasm.OpcodeLocalGet, 0,
 					wasm.OpcodeI32Load, 0x2, 0x0, // alignment=2 (natural alignment) staticOffset=0
 

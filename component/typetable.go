@@ -3,6 +3,7 @@ package component
 import (
 	"github.com/samyfodil/wazy/internal/component/abi"
 	"github.com/samyfodil/wazy/internal/component/binary"
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // TypeTable interns the composite types one host func's signature refers to,
@@ -51,7 +52,7 @@ func (t *TypeTable) Add(td TypeDesc) TypeRef {
 // after the signature is fully built.
 func (t *TypeTable) Resolver() Resolver {
 	return func(idx uint32) binary.TypeDesc {
-		if int(idx) >= len(t.entries) {
+		if u32.OutOfRange(idx, len(t.entries)) {
 			return nil
 		}
 		return t.entries[idx]
@@ -166,6 +167,23 @@ func (t *TypeTable) Enum(cases ...string) TypeRef {
 // whose bits are set in declaration order.
 func (t *TypeTable) Flags(names ...string) TypeRef {
 	return t.Add(binary.FlagsDesc{Names: names})
+}
+
+// Stream interns stream<elem>. Pass the zero TypeRef for a bare stream.
+func (t *TypeTable) Stream(elem TypeRef) TypeRef {
+	return t.Add(binary.StreamDesc{Element: optRef(elem)})
+}
+
+// Future interns future<elem>. Pass the zero TypeRef for a bare future.
+func (t *TypeTable) Future(elem TypeRef) TypeRef {
+	return t.Add(binary.FutureDesc{Element: optRef(elem)})
+}
+
+func optRef(r TypeRef) *TypeRef {
+	if r == (TypeRef{}) {
+		return nil
+	}
+	return &r
 }
 
 // Own interns own<R> for the resource identified by tag -- the same tag

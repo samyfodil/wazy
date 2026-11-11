@@ -366,7 +366,8 @@ func (gt *guestTask) firstRunBody() error {
 	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
 	*coreArgsPtr = (*coreArgsPtr)[:0]
 	t.state = taskStarted
-	coreArgs, err := gt.in.lowerParams(be, args, mem, memAvailable, realloc, gt.exportName, *coreArgsPtr)
+	scope := t
+	coreArgs, err := gt.in.lowerParams(be, args, mem, memAvailable, realloc, gt.exportName, *coreArgsPtr, &scope)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
 		gt.in.leaveRun()

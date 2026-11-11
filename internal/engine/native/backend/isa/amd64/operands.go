@@ -306,6 +306,10 @@ func (m *machine) getOperand_Imm32_Reg(def backend.SSAValueDefinition) (op opera
 }
 
 func asImm32Operand(val uint64, allowSignExt bool) (operand, bool) {
+	// A 64-bit instruction sign-extends its 32-bit immediate.
+	if !allowSignExt && int64(int32(val)) == int64(val) {
+		return newOperandImm32(uint32(val)), true
+	}
 	if imm32, ok := asImm32(val, allowSignExt); ok {
 		return newOperandImm32(imm32), true
 	}

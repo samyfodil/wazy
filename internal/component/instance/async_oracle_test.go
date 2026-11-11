@@ -365,9 +365,9 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			si := resolveHandle(env, op["set"])
 			var def hostFuncDef
 			if kind == "waitable-set.wait" {
-				def = waitableSetWaitHostFunc(in, binary.Canon{})
+				def = waitableSetWaitHostFunc(in, binary.Canon{}, nil)
 			} else {
-				def = waitableSetPollHostFunc(in, binary.Canon{})
+				def = waitableSetPollHostFunc(in, binary.Canon{}, nil)
 			}
 			stack := []uint64{uint64(si), asyncEventPtr}
 			def.fn.Call(ctx, mod, stack)
@@ -716,7 +716,7 @@ func (t *handleTable) entriesSnapshot() []asyncTableEntry {
 				entry.Kind = "future-write"
 			}
 			entry.Copy = copyStateName(v.state)
-		case *errorContext:
+		case *ErrorContext:
 			entry.Kind = "error-context"
 		default:
 			panic(fmt.Sprintf("component/instance: async oracle: entriesSnapshot: unknown entry kind %T", e))

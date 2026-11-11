@@ -41,6 +41,9 @@ func (i *instruction) encode(m *machine) {
 		// We still don't know the exact address of the function to call, so we emit a placeholder.
 		c.AddRelocationInfo(i.callFuncRef(), false)
 		c.Emit4Bytes(encodeUnconditionalBranch(true, 0)) // 0 = placeholder
+		if i.inlinedCall {
+			c.Emit4Bytes(InlinedCallMarker)
+		}
 	case callInd:
 		c.Emit4Bytes(encodeUnconditionalBranchReg(regNumberInEncoding[i.rn.realReg()], true))
 	case store8, store16, store32, store64, fpuStore32, fpuStore64, fpuStore128:
@@ -67,6 +70,9 @@ func (i *instruction) encode(m *machine) {
 		case condKindRegisterNotZero:
 			rt := regNumberInEncoding[brCond.register().RealReg()]
 			c.Emit4Bytes(encodeCBZCBNZ(rt, true, imm19U32, i.condBr64bit()))
+		case condKindRegisterSignBit:
+			rt := regNumberInEncoding[brCond.register().RealReg()]
+			c.Emit4Bytes(encodeTBZTBNZSignBit(rt, brCond.signBitSet(), imm19/4))
 		case condKindCondFlagSet:
 			// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/B-cond--Branch-conditionally-
 			fl := brCond.flag()
@@ -109,14 +115,18 @@ func (i *instruction) encode(m *machine) {
 		}
 	case loadFpuConst32:
 		rd := regNumberInEncoding[i.rd.RealReg()]
-		if i.u1 == 0 {
+		if imm, ok := fpImm8(i.u1, 32); ok {
+			c.Emit4Bytes(0x1e201000 | imm<<13 | rd) // fmov sd, #imm
+		} else if i.u1 == 0 {
 			c.Emit4Bytes(encodeVecRRR(vecOpEOR, rd, rd, rd, vecArrangement8B))
 		} else {
 			encodeLoadFpuConst32(c, rd, i.u1)
 		}
 	case loadFpuConst64:
 		rd := regNumberInEncoding[i.rd.RealReg()]
-		if i.u1 == 0 {
+		if imm, ok := fpImm8(i.u1, 64); ok {
+			c.Emit4Bytes(0x1e601000 | imm<<13 | rd) // fmov dd, #imm
+		} else if i.u1 == 0 {
 			c.Emit4Bytes(encodeVecRRR(vecOpEOR, rd, rd, rd, vecArrangement8B))
 		} else {
 			encodeLoadFpuConst64(c, regNumberInEncoding[i.rd.RealReg()], i.u1)
@@ -161,7 +171,7 @@ func (i *instruction) encode(m *machine) {
 			aluOp(i.u1),
 			regNumberInEncoding[i.rd.RealReg()],
 			regNumberInEncoding[i.rn.realReg()],
-			uint32(i.rm.shiftImm()),
+			uint32(i.rm.data),
 			uint32(i.u2>>32),
 		))
 	case aluRRR:
@@ -283,6 +293,12 @@ func (i *instruction) encode(m *machine) {
 			condFlag(i.u1),
 			i.u2 == 1,
 		))
+	case fpuMovFromInt:
+		c.Emit4Bytes(encodeFpuMovFromInt(
+			regNumberInEncoding[i.rd.RealReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			i.u1 == 1,
+		))
 	case movToVec:
 		c.Emit4Bytes(encodeMoveToVec(
 			regNumberInEncoding[i.rd.RealReg()],
@@ -370,7 +386,11 @@ func (i *instruction) encode(m *machine) {
 		)
 	case brTableSequence:
 		targets := m.jmpTableTargets[i.u1]
-		encodeBrTableSequence(c, i.rn.reg(), targets)
+		if i.brTableBounded() {
+			encodeBoundedBrTableSequence(c, i.rn.reg(), targets)
+		} else {
+			encodeBrTableSequence(c, i.rn.reg(), targets)
+		}
 	case fpuToInt, intToFpu:
 		c.Emit4Bytes(encodeCnvBetweenFloatInt(i))
 	case fpuRR:
@@ -403,6 +423,13 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(
 			sf<<31 | 0b111101001<<22 | imm<<16 | cond<<12 | 0b1<<11 | rn<<5 | nzcv,
 		)
+	case cCmpReg:
+		sf := uint32((i.u2 >> 32) & 0b1)
+		nzcv := uint32(i.u2 & 0b1111)
+		cond := uint32(condFlag(i.u1))
+		rn := regNumberInEncoding[i.rn.realReg()]
+		rm := regNumberInEncoding[i.rm.realReg()]
+		c.Emit4Bytes(sf<<31 | 0b111101001<<22 | rm<<16 | cond<<12 | rn<<5 | nzcv)
 	case movFromFPSR:
 		rt := regNumberInEncoding[i.rd.RealReg()]
 		c.Emit4Bytes(encodeSystemRegisterMove(rt, true))
@@ -446,6 +473,17 @@ func (i *instruction) encode(m *machine) {
 		c.Emit4Bytes(encodeUnconditionalBranch(false, 0)) // 0 = placeholder
 	case tailCallInd:
 		c.Emit4Bytes(encodeUnconditionalBranchReg(regNumberInEncoding[i.rn.realReg()], false))
+	case yield:
+		const t, lr = 27, 30 // tmp and lr; see tmp
+		c.Emit4Bytes(encodeMov64(t, regNumberInEncoding[i.rn.realReg()], false, false))
+		c.Emit4Bytes(encodeLoadOrStore(store64, lr, addressMode{
+			kind: addressModeKindRegUnsignedImm12, rn: tmpRegVReg, imm: nativeapi.ExecutionContextOffsetYieldSavedLR.I64(),
+		}))
+		c.Emit4Bytes(encodeLoadOrStore(uLoad64, lr, addressMode{
+			kind: addressModeKindRegUnsignedImm12, rn: tmpRegVReg,
+			imm: nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.I64(),
+		}))
+		c.Emit4Bytes(encodeUnconditionalBranchReg(lr, true))
 	default:
 		panic(i.String())
 	}
@@ -740,6 +778,13 @@ func encodeVecRRR(op vecOp, rd, rn, rm uint32, arr vecArrangement) uint32 {
 		size, _ := arrToSizeQEncoded(arr)
 		return encodeAdvancedSIMDThreeDifferent(rd, rn, rm, 0b1100, size, 0b0, 0b1)
 
+	case vecOpUmull:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, _ := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeDifferent(rd, rn, rm, 0b1100, size, 0b1, 0b0)
+
 	case vecOpZip1, vecOpZip2, vecOpUzp1, vecOpUzp2, vecOpTrn1, vecOpTrn2:
 		// "Advanced SIMD permute" is a three-register group as well, so a vecRRR
 		// carrying one of these ops denotes exactly the permute instruction.
@@ -918,6 +963,15 @@ func encodeFpuCSel(rd, rn, rm uint32, c condFlag, _64bit bool) uint32 {
 }
 
 // encodeMoveToVec encodes as "Move general-purpose register to a vector element" (represented as `ins`) in
+// encodeFpuMovFromInt encodes FMOV (general) from Wn to Sd, or from Xn to Dd.
+// https://developer.arm.com/documentation/ddi0602/2024-12/SIMD-FP-Instructions/FMOV--general---Floating-point-move-to-or-from-general-purpose-register-without-conversion-
+func encodeFpuMovFromInt(rd, rn uint32, _64bit bool) uint32 {
+	if _64bit {
+		return 0x9e670000 | rn<<5 | rd
+	}
+	return 0x1e270000 | rn<<5 | rd
+}
+
 // https://developer.arm.com/documentation/dui0801/g/A64-SIMD-Vector-Instructions/MOV--vector--from-general-
 // https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/MOV--from-general---Move-general-purpose-register-to-a-vector-element--an-alias-of-INS--general--?lang=en
 func encodeMoveToVec(rd, rn uint32, arr vecArrangement, index vecIndex) uint32 {
@@ -1289,6 +1343,17 @@ func encodeAluRRRR(op aluOp, rd, rn, rm, ra, _64bit uint32) uint32 {
 		op31, oO = 0b000, 0b0
 	case aluOpMSub:
 		op31, oO = 0b000, 0b1
+	case aluOpSMAddL, aluOpSMSubL, aluOpUMAddL, aluOpUMSubL:
+		// SMADDL <Xd>, <Wn>, <Wm>, <Xa> = 1|00|11011|001|Rm|0|Ra|Rn|Rd; SMSUBL has o0 set, and UMADDL and
+		// UMSUBL op31 = 101. All are 64-bit only.
+		op31 = 0b001
+		if op == aluOpUMAddL || op == aluOpUMSubL {
+			op31 = 0b101
+		}
+		if op == aluOpSMSubL || op == aluOpUMSubL {
+			oO = 1
+		}
+		_64bit = 1
 	case aluOpSMulH, aluOpUMulH:
 		// SMULH/UMULH belong to the same "Data-processing (3 source)" group, but
 		// they have no Ra operand (the field is fixed to 0b11111) and no 32-bit
@@ -1520,6 +1585,9 @@ func encodeAluBitmaskImmediate(op aluOp, rd, rn uint32, imm uint64, _64bit bool)
 }
 
 func bitmaskImmediate(c uint64, is64bit bool) (immr, imms, N byte) {
+	if !is64bit {
+		c = replicate32(c)
+	}
 	var size uint32
 	switch {
 	case c != c>>32|c<<32:
@@ -1796,12 +1864,14 @@ func encodeAluRRR(op aluOp, rd, rn, rm uint32, _64bit, isRnSp bool) uint32 {
 			// "Shifted register" with shift = 0
 			_31to21 = 0b01101011_000
 		}
-	case aluOpAnd, aluOpOrr, aluOpOrn, aluOpEor, aluOpAnds:
+	case aluOpAnd, aluOpBic, aluOpOrr, aluOpOrn, aluOpEor, aluOpEon, aluOpAnds, aluOpBics:
 		// "Logical (shifted register)".
 		var opc, n uint32
 		switch op {
 		case aluOpAnd:
 			// all zeros
+		case aluOpBic:
+			n = 1
 		case aluOpOrr:
 			opc = 0b01
 		case aluOpOrn:
@@ -1809,8 +1879,14 @@ func encodeAluRRR(op aluOp, rd, rn, rm uint32, _64bit, isRnSp bool) uint32 {
 			n = 1
 		case aluOpEor:
 			opc = 0b10
+		case aluOpEon:
+			opc = 0b10
+			n = 1
 		case aluOpAnds:
 			opc = 0b11
+		case aluOpBics:
+			opc = 0b11
+			n = 1
 		}
 		_31to21 = 0b000_01010_000 | opc<<8 | n
 	case aluOpLsl, aluOpAsr, aluOpLsr, aluOpRotR:
@@ -1945,6 +2021,17 @@ func encodeUnconditionalBranch(link bool, imm26 int64) (ret uint32) {
 // encodeCBZCBNZ encodes as either CBZ or CBNZ:
 // https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/CBZ--Compare-and-Branch-on-Zero-
 // https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/CBNZ--Compare-and-Branch-on-Nonzero-
+// encodeTBZTBNZSignBit encodes TBNZ, or with nz false TBZ, of bit 63 of rt, to imm14
+// instructions away.
+// https://developer.arm.com/documentation/ddi0596/2020-12/Base-Instructions/TBNZ--Test-bit-and-Branch-if-Nonzero-
+func encodeTBZTBNZSignBit(rt uint32, nz bool, imm14 int64) (ret uint32) {
+	ret = 1<<31 | 0b011011<<25 | 0b11111<<19 | (uint32(imm14)&0x3fff)<<5 | rt
+	if nz {
+		ret |= 1 << 24
+	}
+	return
+}
+
 func encodeCBZCBNZ(rt uint32, nz bool, imm19 uint32, _64bit bool) (ret uint32) {
 	ret = rt
 	ret |= imm19 << 5
@@ -2008,6 +2095,15 @@ func encodeAluRRImm(op aluOp, rd, rn, amount, _64bit uint32) uint32 {
 		// https://developer.arm.com/documentation/ddi0596/2020-12/Base-Instructions/SBFM--Signed-Bitfield-Move-?lang=en
 		opc = 0b00
 		imms, immr = 0b011111|_64bit<<5, amount
+	case aluOpUbfx, aluOpSbfx:
+		// UBFX and SBFX are aliases for UBFM and SBFM, of the field's lowest bit and its last:
+		// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/UBFX--Unsigned-Bitfield-Extract--an-alias-of-UBFM-?lang=en
+		lsb, width := amount&0xff, amount>>8
+		opc = 0b10
+		if op == aluOpSbfx {
+			opc = 0b00
+		}
+		immr, imms = lsb, lsb+width-1
 	default:
 		panic(op.String())
 	}
@@ -2048,46 +2144,53 @@ func encodeVecLanes(op vecOp, rd uint32, rn uint32, arr vecArrangement) uint32 {
 // encodeVecLanes encodes as Data Processing (Advanced SIMD scalar shift by immediate) depending on vecOp in
 // https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en
 func encodeVecShiftImm(op vecOp, rd uint32, rn, amount uint32, arr vecArrangement) uint32 {
-	var u, q, immh, immb, opcode uint32
+	var u, q, opcode uint32
+	left := false
 	switch op {
 	case vecOpSshll:
-		u, opcode = 0b0, 0b10100
+		u, opcode, left = 0b0, 0b10100, true
 	case vecOpUshll:
-		u, opcode = 0b1, 0b10100
+		u, opcode, left = 0b1, 0b10100, true
 	case vecOpSshr:
 		u, opcode = 0, 0b00000
+	case vecOpUshr:
+		u, opcode = 1, 0b00000
+	case vecOpShl:
+		u, opcode, left = 0, 0b01010, true
 	default:
 		panic("unsupported or illegal vecOp: " + op.String())
 	}
+	var esize uint32
 	switch arr {
 	case vecArrangement16B:
 		q = 0b1
 		fallthrough
 	case vecArrangement8B:
-		immh = 0b0001
-		immb = 8 - uint32(amount&0b111)
+		esize = 8
 	case vecArrangement8H:
 		q = 0b1
 		fallthrough
 	case vecArrangement4H:
-		v := 16 - uint32(amount&0b1111)
-		immb = v & 0b111
-		immh = 0b0010 | (v >> 3)
+		esize = 16
 	case vecArrangement4S:
 		q = 0b1
 		fallthrough
 	case vecArrangement2S:
-		v := 32 - uint32(amount&0b11111)
-		immb = v & 0b111
-		immh = 0b0100 | (v >> 3)
+		esize = 32
 	case vecArrangement2D:
-		q = 0b1
-		v := 64 - uint32(amount&0b111111)
-		immb = v & 0b111
-		immh = 0b1000 | (v >> 3)
+		q, esize = 0b1, 64
 	default:
 		panic("unsupported arrangement: " + arr.String())
 	}
+	// immh:immb is esize+amount for a left shift, and 2*esize-amount for a right one, amount in [1, esize].
+	amount &= esize - 1
+	v := 2*esize - amount
+	if left {
+		v = esize + amount
+	} else if amount == 0 {
+		v = esize // A right shift by 0 has no encoding: this is one by esize, as it always was. None asks.
+	}
+	immh, immb := v>>3, v&0b111
 	return q<<30 | u<<29 | 0b011110<<23 | immh<<19 | immb<<16 | 0b000001<<10 | opcode<<11 | 0b1<<10 | rn<<5 | rd
 }
 
@@ -2332,6 +2435,10 @@ func encodeAdvancedSIMDTwoMisc(op vecOp, rd, rn uint32, arr vecArrangement) uint
 		u = 0b0
 		opcode = 0b10010
 		size, q = arrToSizeQEncoded(arr)
+	case vecOpUadalp:
+		u = 0b1
+		opcode = 0b00110
+		size, q = arrToSizeQEncoded(arr)
 	case vecOpShll:
 		u = 0b1
 		opcode = 0b10011
@@ -2349,6 +2456,34 @@ func encodeAdvancedSIMDTwoMisc(op vecOp, rd, rn uint32, arr vecArrangement) uint
 		panic("unsupported or illegal vecOp: " + op.String())
 	}
 	return q<<30 | u<<29 | 0b01110<<24 | size<<22 | 0b10000<<17 | opcode<<12 | 0b10<<10 | rn<<5 | rd
+}
+
+// brTableBoundsCheckSize is how much longer a bounded br_table sequence is ahead of its table.
+const brTableBoundsCheckSize = 8
+
+// encodeBoundedBrTableSequence encodes encodeBrTableSequence's sequence behind a bounds check of its
+// own, and a branch to the default after the table:
+//
+//	subs wzr, index, #len(targets)-1
+//	b.hs default            ;; or the branch after the table, where the default is out of range
+//	[encodeBrTableSequence]
+//	b default
+//
+// The default needs no clamped index, so nothing waits on the comparison before the table is read. The
+// sequence stays one instruction to the register allocator, which a branch of its own in front would
+// not be. targets holds the offsets of the targets from the table's start, the default's last.
+func encodeBoundedBrTableSequence(c backend.Compiler, index regalloc.VReg, targets []uint32) {
+	n := int64(len(targets))
+	indexNumber := regNumberInEncoding[index.RealReg()]
+	c.Emit4Bytes(encodeAluRRImm12(aluOpSubS, regNumberInEncoding[xzr], indexNumber, uint16(n-1), 0, false))
+	// From the b.hs, the table starts 20 bytes on, and the branch after it 20+4n.
+	def := 20 + int64(int32(targets[n-1]))
+	if def>>2 > maxSignedInt19 || def>>2 < minSignedInt19 {
+		def = 20 + 4*n
+	}
+	c.Emit4Bytes(0b01010100<<24 | uint32(def/4)&0x7ffff<<5 | uint32(hs))
+	encodeBrTableSequence(c, index, targets)
+	c.Emit4Bytes(encodeUnconditionalBranch(false, int64(int32(targets[n-1]))-4*n))
 }
 
 // brTableSequenceOffsetTableBegin is the offset inside the brTableSequence where the table begins after 4 instructions

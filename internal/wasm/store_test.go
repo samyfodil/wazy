@@ -99,6 +99,7 @@ func TestStore_Instantiate(t *testing.T) {
 		"foo",
 		[]string{"fn"},
 		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}}},
+		nil,
 		api.CoreFeaturesV1,
 	)
 	require.NoError(t, err)
@@ -183,6 +184,7 @@ func TestStore_hammer(t *testing.T) {
 		importedModuleName,
 		[]string{"fn"},
 		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}}},
+		nil,
 		api.CoreFeaturesV1,
 	)
 	require.NoError(t, err)
@@ -242,6 +244,7 @@ func TestStore_hammer_close(t *testing.T) {
 		importedModuleName,
 		[]string{"fn"},
 		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}}},
+		nil,
 		api.CoreFeaturesV1,
 	)
 	require.NoError(t, err)
@@ -306,6 +309,7 @@ func TestStore_Instantiate_Errors(t *testing.T) {
 		importedModuleName,
 		[]string{"fn"},
 		map[string]*HostFunc{"fn": {ExportName: "fn", Code: Code{GoFunc: api.GoFunc(func(context.Context, []uint64) {})}}},
+		nil,
 		api.CoreFeaturesV1,
 	)
 	require.NoError(t, err)
@@ -437,12 +441,12 @@ func (e *mockEngine) Close() error {
 }
 
 // CompileModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) CompileModule(context.Context, *Module, []api.FunctionListener, bool) error {
+func (e *mockEngine) CompileModule(context.Context, *Module, []api.FunctionListener) error {
 	return nil
 }
 
 // HasCompiledModule implements the same method as documented on wasm.Engine.
-func (e *mockEngine) HasCompiledModule(*Module, []api.FunctionListener, bool) (bool, error) {
+func (e *mockEngine) HasCompiledModule(*Module, []api.FunctionListener) (bool, error) {
 	return false, nil
 }
 

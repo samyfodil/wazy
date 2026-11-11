@@ -398,7 +398,7 @@ func TestInterpreter_Compile(t *testing.T) {
 			ID: wasm.ModuleID{},
 		}
 
-		err := e.CompileModule(testCtx, errModule, nil, false)
+		err := e.CompileModule(testCtx, errModule, nil)
 		require.EqualError(t, err, "handling instruction: apply stack failed for call: reading immediates: EOF")
 
 		// On the compilation failure, all the compiled functions including succeeded ones must be released.
@@ -418,7 +418,7 @@ func TestInterpreter_Compile(t *testing.T) {
 				{Body: []byte{wasm.OpcodeCall}},
 			},
 		}
-		require.NoError(t, e.CompileModule(api.WithInterpreterLazyLowering(testCtx), m, nil, false))
+		require.NoError(t, e.CompileModule(api.WithInterpreterLazyLowering(testCtx), m, nil))
 		funcs := e.compiledFunctions[m.ID].funcs
 		for i := range funcs {
 			require.Nil(t, funcs[i].body)
@@ -453,7 +453,7 @@ func TestInterpreter_Compile(t *testing.T) {
 			},
 			ID: wasm.ModuleID{},
 		}
-		err := e.CompileModule(testCtx, okModule, nil, false)
+		err := e.CompileModule(testCtx, okModule, nil)
 		require.NoError(t, err)
 
 		compiled, ok := e.compiledFunctions[okModule.ID]
@@ -500,14 +500,14 @@ func TestEngine_WasmModulesShareCompiledFunctions(t *testing.T) {
 		ID: wasm.ModuleID{},
 	}
 
-	err := e.CompileModule(ctx, m, nil, false)
+	err := e.CompileModule(ctx, m, nil)
 	require.NoError(t, err)
 
 	cf1, ok := e.compiledFunctions[m.ID]
 	require.True(t, ok)
 	require.Equal(t, 1, cf1.refCount)
 
-	err = e.CompileModule(ctx, m, nil, false)
+	err = e.CompileModule(ctx, m, nil)
 	require.NoError(t, err)
 	cf2, ok := e.compiledFunctions[m.ID]
 	require.True(t, ok)
@@ -575,6 +575,35 @@ func TestCompactBody(t *testing.T) {
 	}}, f.exceptionTable)
 }
 
+func TestFuseChecks(t *testing.T) {
+	const ret = math.MaxUint64
+	f := &compiledFunction{body: []unionOperation{
+		{Kind: operationKindBuiltinFunctionCheckExitCode}, // 0: the entry check
+		{Kind: operationKindConstI32},                     // 1
+		{Kind: operationKindBuiltinFunctionCheckExitCode}, // 2: a loop's check
+		{Kind: operationKindConstI32},                     // 3
+		{Kind: operationKindBrIf, U1: 2, U2: 5, U3: 7},    // 4
+		{Kind: operationKindBr, U1: 2},                    // 5
+		{Kind: operationKindBrIf, U1: 1, U2: 2},           // 6: only a taken branch is fused
+		{Kind: operationKindBr, U1: 1},                    // 7
+		{Kind: operationKindBr, U1: ret},                  // 8
+	}}
+
+	fuseChecks(f)
+
+	require.Equal(t, []unionOperation{
+		{Kind: operationKindBuiltinFunctionCheckExitCode},
+		{Kind: operationKindConstI32},
+		{Kind: operationKindBuiltinFunctionCheckExitCode},
+		{Kind: operationKindConstI32},
+		{Kind: operationKindBrIfCheck, U1: 3, U2: 5, U3: 7},
+		{Kind: operationKindBrCheck, U1: 3},
+		{Kind: operationKindBrIf, U1: 1, U2: 2},
+		{Kind: operationKindBr, U1: 1},
+		{Kind: operationKindBr, U1: ret},
+	}, f.body)
+}
+
 func TestCompactBody_NoLabelsSurviveCompilation(t *testing.T) {
 	e := NewEngine(testCtx, api.CoreFeaturesV1, nil).(*engine)
 	m := &wasm.Module{
@@ -591,7 +620,7 @@ func TestCompactBody_NoLabelsSurviveCompilation(t *testing.T) {
 		}}},
 		ID: wasm.ModuleID{1},
 	}
-	require.NoError(t, e.CompileModule(testCtx, m, nil, false))
+	require.NoError(t, e.CompileModule(testCtx, m, nil))
 	body := e.compiledFunctions[m.ID].funcs[0].body
 	require.NotEqual(t, 0, len(body))
 	for i := range body {

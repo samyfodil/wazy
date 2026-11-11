@@ -13,22 +13,6 @@ const (
 	nonBlockingFileWriteSupported = true
 )
 
-func rmdir(path string) sys.Errno {
-	err := syscall.Rmdir(path)
-	// POSIX lets rmdir report a non-empty directory as EITHER ENOTEMPTY or
-	// EEXIST, and platforms disagree: Linux and the BSDs pick ENOTEMPTY,
-	// illumos picks EEXIST. Normalize to ENOTEMPTY so a guest sees the same
-	// error wherever the host happens to run -- EEXIST has no other meaning
-	// for rmdir, so nothing is lost by folding it. This mirrors unlink's own
-	// EPERM -> EISDIR normalization (unlink_unix.go), which smooths the same
-	// kind of POSIX-sanctioned divergence.
-	if errno := sys.UnwrapOSError(err); errno == sys.EEXIST {
-		return sys.ENOTEMPTY
-	} else {
-		return errno
-	}
-}
-
 // readFd exposes syscall.Read.
 func readFd(fd uintptr, buf []byte) (int, sys.Errno) {
 	if len(buf) == 0 {
@@ -47,4 +31,13 @@ func writeFd(fd uintptr, buf []byte) (int, sys.Errno) {
 	n, err := syscall.Write(int(fd), buf)
 	errno := sys.UnwrapOSError(err)
 	return n, errno
+}
+
+// pwriteFd exposes syscall.Pwrite.
+func pwriteFd(fd uintptr, buf []byte, off int64) (int, sys.Errno) {
+	if len(buf) == 0 {
+		return 0, 0
+	}
+	n, err := syscall.Pwrite(int(fd), buf, off)
+	return max(n, 0), sys.UnwrapOSError(err)
 }

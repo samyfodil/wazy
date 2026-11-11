@@ -20,6 +20,8 @@ func NewBackend() backend.Machine {
 		cpuFeatures:                         platform.CpuFeatures,
 		regAlloc:                            regalloc.NewAllocator[*instruction, *labelPosition, *regAllocFn](regInfo),
 		spillSlots:                          map[regalloc.VRegID]int64{},
+		threadBegins:                        map[*instruction]label{},
+		remat:                               map[regalloc.VRegID]uint64{},
 		amodePool:                           nativeapi.NewPool[amode](nil),
 		labelPositionPool:                   nativeapi.NewIDedPool[labelPosition](resetLabelPosition),
 		instrPool:                           nativeapi.NewPool[instruction](resetInstruction),
@@ -84,7 +86,9 @@ type (
 		// execCtx/moduleCtx slots and setupPrologue stores rax/rbx there. See
 		// backend.Machine.EhCtxSlotOffsets. P3.0 groundwork; nothing reads
 		// the slots yet.
-		hasEHContext  bool
+		hasEHContext bool
+		// yields are the yields lowered so far: see reloadYieldContexts.
+		yields        []*instruction
 		currentABI    *backend.FunctionABI
 		clobberedRegs []regalloc.VReg
 
@@ -92,6 +96,16 @@ type (
 
 		labelResolutionPends []labelResolutionPend
 
+		// remat holds the bits of each float constant LICM pinned, by its VReg: spilling one stores
+		// nothing and reloading it loads the constant again. See insertReloadRegisterAt.
+		remat map[regalloc.VRegID]uint64
+		// threadTargets and threadBegins are threadJumps' scratch.
+		threadTargets []label
+		threadBegins  map[*instruction]label
+		// threadJumpsBuf is threadJumps' scratch.
+		threadJumpsBuf, threadCondJumpsBuf []*instruction
+		// foldRegs is foldReloads' scratch.
+		foldRegs []regalloc.VReg
 		// jmpTableTargets holds the labels of the jump table targets.
 		jmpTableTargets [][]uint32
 		// jmpTableTargetNext is the index to the jmpTableTargets slice to be used for the next jump table.
@@ -101,6 +115,10 @@ type (
 		// sequences, one per exit code, emitted once after register
 		// allocation (see lowerExitIfTrueWithCodeShared and emitTrapIslands).
 		trapIslands []trapIsland
+
+		// preemptIslands are the out-of-line halves of masked preemption checks,
+		// emitted after register allocation (see emitPreemptIslands).
+		preemptIslands []preemptIsland
 
 		consts []_const
 
@@ -157,7 +175,11 @@ func resetLabelPosition(l *labelPosition) {
 	*l = labelPosition{}
 }
 
-const labelReturn = math.MaxUint32
+const (
+	labelReturn = math.MaxUint32
+	// labelInvalid names no position, so a nop0 bound to it is no label at all.
+	labelInvalid = labelReturn - 1
+)
 
 func ssaBlockLabel(sb ssa.BasicBlock) label {
 	if sb.ReturnBlock() {
@@ -201,6 +223,15 @@ type trapIsland struct {
 	l    label
 }
 
+// preemptIsland is the out-of-line half of a masked preemption check: at l, it
+// reads g.stackguard0 and branches to slow if the runtime asked the goroutine to
+// stop, and back to the loop otherwise. test is the masked test, and backInstr
+// the label instruction that back names.
+type preemptIsland struct {
+	l, slow, back   label
+	test, backInstr *instruction
+}
+
 // getOrCreateTrapIsland returns the label of this function's shared trap
 // island for the given exit code, allocating it on first use. The island
 // itself is materialized by emitTrapIslands after register allocation.
@@ -217,8 +248,10 @@ func (m *machine) getOrCreateTrapIsland(code nativeapi.ExitCode) label {
 
 // Reset implements backend.Machine.
 func (m *machine) Reset() {
+	clear(m.remat)
 	m.consts = m.consts[:0]
 	m.trapIslands = m.trapIslands[:0]
+	m.preemptIslands = m.preemptIslands[:0]
 	m.clobberedRegs = m.clobberedRegs[:0]
 	for key := range m.spillSlots {
 		m.clobberedRegs = append(m.clobberedRegs, regalloc.VReg(key))
@@ -229,6 +262,7 @@ func (m *machine) Reset() {
 
 	m.stackBoundsCheckDisabled = false
 	m.hasEHContext = false
+	m.yields = m.yields[:0]
 	m.regAlloc.Reset()
 	m.labelPositionPool.Reset()
 	m.instrPool.Reset()
@@ -271,6 +305,7 @@ func (m *machine) LinkAdjacentBlocks(prev, next ssa.BasicBlock) {
 
 // StartBlock implements backend.Machine.
 func (m *machine) StartBlock(blk ssa.BasicBlock) {
+	m.aliasZeroExtended32(blk)
 	m.currentLabelPos = m.getOrAllocateSSABlockLabelPosition(blk)
 	labelPos := m.currentLabelPos
 	end := m.allocateNop()
@@ -350,7 +385,8 @@ func (m *machine) EhCtxSlotOffsets() (execCtxOffset, moduleCtxOffset int64) {
 // path (both execCtx and moduleCtx) and the shared conditional-trap islands
 // (execCtx only -- reloaded there instead of being re-saved at every trap
 // site; see lowerExitIfTrueWithCodeShared / emitTrapIslands). Trap islands are
-// created during lowering, so len(trapIslands) is final by RegAlloc time.
+// created during lowering, so len(trapIslands) is final by RegAlloc time. Yields
+// use it where it is there: see reloadYieldContexts.
 func (m *machine) needsCtxSlot() bool {
 	return m.hasEHContext || len(m.trapIslands) > 0
 }
@@ -363,6 +399,7 @@ func (m *machine) RegAlloc() {
 	// many spill slots this function ends up needing.
 	if m.needsCtxSlot() {
 		m.spillSlotSize = ehCtxReservedSlotSize
+		m.reloadYieldContexts()
 	}
 	m.regAllocStarted = true
 	m.regAlloc.DoAllocation(&m.regAllocFn)
@@ -458,6 +495,11 @@ func (m *machine) lowerBrTable(index ssa.Value, targets ssa.Values) {
 	m.insert(jmpTable)
 }
 
+// preemptWordTop addresses the top byte of g.stackguard0, which holds its sign bit.
+func (m *machine) preemptWordTop() *amode {
+	return m.newAmodeImmReg(7, preemptVReg)
+}
+
 // LowerConditionalBranch implements backend.Machine.
 func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	cval, args, targetBlkID := b.BranchData()
@@ -472,22 +514,61 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 	target := ssaBlockLabel(m.c.SSABuilder().BasicBlock(targetBlkID))
 	cvalDef := m.c.ValueDefinition(cval)
 
-	if m.c.MatchInstr(cvalDef, ssa.OpcodeFuelDec) {
-		// 		sub $1, %fuel
-		// 		jle  <slow>          ;; or jg, for a Brz
+	if m.c.MatchInstr(cvalDef, ssa.OpcodePreemptRequested) {
+		// 		testb $0x80, 7(%preempt)
+		// 		jnz  <slow>          ;; or jz, for a Brz
 		//
-		// SUB already sets the flags the branch needs, so the decrement and the test
-		// are the same instruction: the whole termination check is these two. Signed
-		// LE rather than Z so that a counter driven below zero -- which a re-entry
-		// restoring an already-exhausted value can do -- keeps taking the slow path
-		// instead of wrapping around for another 2^64 ticks.
+		// or, masked,
+		// 		test $mask, %counter
+		// 		jz   <island>        ;; see emitPreemptIslands
+		// 	back:
 		//
-		// Matched here rather than through condBranchMatches because that list is
-		// shared with lowerSelect, which must never see a FuelDec.
-		m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeSub, newOperandImm32(1), fuelVReg, true))
-		cc := condLE
+		// The preempt register holds the address of g.stackguard0 (see
+		// ssa.OpcodePreemptRequested). StackPreempt sets its sign bit, which no
+		// stack bound does, so the test reads the top byte alone, in five bytes
+		// and no register. A masked check reads it only when the counter's masked
+		// bits are zero, and an elided one not at all.
+		counter, mask, elided := cvalDef.Instr.PreemptCheckData()
+		brz := b.Opcode() == ssa.OpcodeBrz
+		if elided {
+			if brz {
+				m.insert(m.allocateInstr().asJmp(newOperandLabel(target)))
+			}
+			cvalDef.Instr.MarkLowered()
+			return
+		}
+		if counter.Valid() {
+			if brz {
+				panic("BUG: a masked preemption check is only ever consumed by Brnz")
+			}
+			// The full check is out of line, so the loop falls through a branch
+			// that is almost never taken: a taken jump around an inline check would
+			// cost every iteration more than the check itself.
+			test := m.allocateInstr().asCmpRmiR(false, newOperandImm32(uint32(mask)), m.c.VRegOf(counter), counter.Type().Bits() == 64)
+			m.insert(test)
+			island, _ := m.allocateLabel()
+			m.insert(m.allocateInstr().asJmpIf(condZ, newOperandLabel(island)))
+			back, backLabel := m.allocateBrTarget()
+			m.insert(back)
+			m.preemptIslands = append(m.preemptIslands, preemptIsland{l: island, slow: target, back: backLabel, test: test, backInstr: back})
+			cvalDef.Instr.MarkLowered()
+			return
+		}
+		m.insert(m.allocateInstr().asPreemptCheck(m.preemptWordTop()))
+		cc := condNZ
+		if brz {
+			cc = condZ
+		}
+		m.insert(m.allocateInstr().asJmpIf(cc, newOperandLabel(target)))
+		cvalDef.Instr.MarkLowered()
+		return
+	}
+
+	if m.c.MatchInstr(cvalDef, ssa.OpcodeVanyTrue) {
+		m.insertAnyTrueTest(cvalDef.Instr.Arg())
+		cc := condNZ
 		if b.Opcode() == ssa.OpcodeBrz {
-			cc = condNLE
+			cc = condZ
 		}
 		m.insert(m.allocateInstr().asJmpIf(cc, newOperandLabel(target)))
 		cvalDef.Instr.MarkLowered()
@@ -570,17 +651,27 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	switch op := instr.Opcode(); op {
 	case ssa.OpcodeBrz, ssa.OpcodeBrnz, ssa.OpcodeJump, ssa.OpcodeBrTable:
 		panic("BUG: branching instructions are handled by LowerBranches")
-	case ssa.OpcodeFuelDec:
+	case ssa.OpcodePreemptRequested:
 		// The frontend only ever emits this immediately before the branch that
 		// consumes it, so LowerConditionalBranch above has already folded it in and
 		// marked it lowered. Reaching here means something moved it away from its
-		// branch, which would leave the decrement without its test.
-		panic("BUG: FuelDec must be folded into the conditional branch consuming it")
+		// branch, which would leave the check without its test.
+		panic("BUG: " + op.String() + " must be folded into the conditional branch consuming it")
 	case ssa.OpcodeReturn:
 		panic("BUG: return must be handled by backend.Compiler")
-	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const: // Constant instructions are inlined.
+	case ssa.OpcodeIconst, ssa.OpcodeF32const, ssa.OpcodeF64const:
+		// A constant is computed where it is used, but one LICM pinned is an ordinary value.
+		if !instr.Constant() {
+			vr := m.c.VRegOf(instr.Return())
+			m.InsertLoadConstantBlockArg(instr, vr)
+			m.remat[vr.ID()] = instr.ConstantVal()
+		}
 	case ssa.OpcodeCall, ssa.OpcodeCallIndirect:
 		m.lowerCall(instr)
+	case ssa.OpcodeYield:
+		m.lowerYield(instr)
+	case ssa.OpcodeVecMap:
+		m.lowerVecMap(instr)
 	case ssa.OpcodeStore, ssa.OpcodeIstore8, ssa.OpcodeIstore16, ssa.OpcodeIstore32:
 		m.lowerStore(instr)
 	case ssa.OpcodeIadd:
@@ -589,6 +680,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerAluRmiROp(instr, aluRmiROpcodeSub)
 	case ssa.OpcodeImul:
 		m.lowerAluRmiROp(instr, aluRmiROpcodeMul)
+	case ssa.OpcodeUmulhi:
+		m.lowerUmulhi(instr)
 	case ssa.OpcodeSdiv, ssa.OpcodeUdiv, ssa.OpcodeSrem, ssa.OpcodeUrem:
 		isDiv := op == ssa.OpcodeSdiv || op == ssa.OpcodeUdiv
 		isSigned := op == ssa.OpcodeSdiv || op == ssa.OpcodeSrem
@@ -685,6 +778,8 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 		m.lowerVallTrue(instr)
 	case ssa.OpcodeVhighBits:
 		m.lowerVhighBits(instr)
+	case ssa.OpcodeVIaddReduce:
+		m.lowerVIaddReduce(instr)
 	case ssa.OpcodeVbnot:
 		m.lowerVbnot(instr)
 	case ssa.OpcodeVband:
@@ -1143,7 +1238,7 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	case ssa.OpcodeUload8, ssa.OpcodeUload16, ssa.OpcodeUload32, ssa.OpcodeSload8, ssa.OpcodeSload16, ssa.OpcodeSload32:
 		ptr, offset, _ := instr.LoadData()
 		ret := m.c.VRegOf(instr.Return())
-		m.lowerExtLoad(op, ptr, offset, ret)
+		m.lowerExtLoad(op, ptr, offset, ret, instr.Return().Type() == ssa.TypeI64)
 	case ssa.OpcodeVconst:
 		result := m.c.VRegOf(instr.Return())
 		lo, hi := instr.VconstData()
@@ -1455,7 +1550,7 @@ func (m *machine) lowerSelect(x, y, cval, ret ssa.Value) {
 		xc, yc, cc := icmp.IcmpData()
 		m.lowerIcmpToFlag(m.c.ValueDefinition(xc), m.c.ValueDefinition(yc), xc.Type() == ssa.TypeI64)
 		cond = condFromSSAIntCmpCond(cc)
-		icmp.Lowered()
+		icmp.MarkLowered()
 	default: // TODO: match ssa.OpcodeFcmp for optimization, but seems a bit complex.
 		cv := m.getOperand_Reg(cvalDef)
 		test := m.allocateInstr().asCmpRmiR(false, cv, cv.reg(), false)
@@ -1531,7 +1626,45 @@ func (m *machine) lowerXmmCmovAfterRegAlloc(i *instruction) {
 	jcc.asJmpIf(cond.invert(), newOperandLabel(end))
 }
 
+// aliasZeroExtended32 points the result of every unsigned 32->64 extend in blk at the virtual
+// register of its operand, so the extend needs no instruction and the two values no longer
+// interfere. Every i32 in a register already has bits 63:32 zero: each producer writes it as a 32-bit
+// register, which clears them (Intel SDM Vol.1, 3.4.1.1), and TestI32UpperHalf checks them one by
+// one. A constant is the exception, since it has no register of its own: it is materialized where
+// it is used, which lowerExtend does already extended.
+//
+// This runs before any instruction of blk is lowered. Blocks are lowered in reverse post-order and
+// a definition dominates its uses, so every consumer of the extend is lowered after this point.
+func (m *machine) aliasZeroExtended32(blk ssa.BasicBlock) {
+	builder := m.c.SSABuilder()
+	for cur := blk.Root(); cur != nil; cur = cur.Next() {
+		if cur.Opcode() != ssa.OpcodeUExtend {
+			continue
+		}
+		if from, _ := cur.ExtendFromToBits(); from != 32 {
+			continue
+		}
+		if arg := cur.Arg(); !isConstant(builder.InstructionOfValue(arg)) {
+			m.c.AliasVReg(cur.Return(), arg)
+		}
+	}
+}
+
+func isConstant(instr *ssa.Instruction) bool {
+	return instr != nil && instr.Constant()
+}
+
 func (m *machine) lowerExtend(_arg, ret ssa.Value, from, to byte, signed bool) {
+	if !signed && from == 32 {
+		if def := m.c.ValueDefinition(_arg); def.IsFromInstr() && def.Instr.Constant() {
+			m.lowerIconst(m.c.VRegOf(ret), uint64(uint32(def.Instr.ConstantVal())), true)
+			return
+		}
+		if m.c.VRegOf(ret) == m.c.VRegOf(_arg) {
+			// aliasZeroExtended32 already gave ret the operand's register.
+			return
+		}
+	}
 	// movsx/movzx are defKindOp2 (the extend itself is a valid single-Def
 	// spill anchor), so we extend straight into the return vreg -- no temp +
 	// copy. lowerIcmpToFlag's zero-extend (asMovzxRmR into VRegOf(ret)) does
@@ -1734,7 +1867,10 @@ func (m *machine) lowerLoad(ptr ssa.Value, offset uint32, typ ssa.Type, dst rega
 	m.insert(load)
 }
 
-func (m *machine) lowerExtLoad(op ssa.Opcode, ptr ssa.Value, offset uint32, dst regalloc.VReg) {
+// lowerExtLoad lowers a narrow load into an i32 (_64 false) or i64. An i32 is sign-extended within the
+// 32-bit register, whose write zeroes bits 63:32: every i32 in a register has them zero, which
+// lowerAddendFromInstr counts on when it uses a zero-extended address's register as is.
+func (m *machine) lowerExtLoad(op ssa.Opcode, ptr ssa.Value, offset uint32, dst regalloc.VReg, _64 bool) {
 	mem := newOperandMem(m.lowerToAddressMode(ptr, offset))
 	load := m.allocateInstr()
 	switch op {
@@ -1745,9 +1881,17 @@ func (m *machine) lowerExtLoad(op ssa.Opcode, ptr ssa.Value, offset uint32, dst 
 	case ssa.OpcodeUload32:
 		load.asMovzxRmR(extModeLQ, mem, dst)
 	case ssa.OpcodeSload8:
-		load.asMovsxRmR(extModeBQ, mem, dst)
+		if _64 {
+			load.asMovsxRmR(extModeBQ, mem, dst)
+		} else {
+			load.asMovsxRmR(extModeBL, mem, dst)
+		}
 	case ssa.OpcodeSload16:
-		load.asMovsxRmR(extModeWQ, mem, dst)
+		if _64 {
+			load.asMovsxRmR(extModeWQ, mem, dst)
+		} else {
+			load.asMovsxRmR(extModeWL, mem, dst)
+		}
 	case ssa.OpcodeSload32:
 		load.asMovsxRmR(extModeLQ, mem, dst)
 	default:
@@ -1816,16 +1960,12 @@ func (m *machine) lowerExitIfTrueWithCodeShared(cond ssa.Value, code nativeapi.E
 	m.insert(jmpIf)
 }
 
+// tryLowerBandToFlag sets the flags for comparing x, an and, with y, zero, with a test of the and's
+// operands. It reports false, emitting nothing, for any other comparison: in particular one of zero with
+// an and, whose condition the test's flags would answer for the operands the other way round.
 func (m *machine) tryLowerBandToFlag(x, y backend.SSAValueDefinition) (ok bool) {
 	var target backend.SSAValueDefinition
 	var got bool
-	if x.IsFromInstr() && x.Instr.Constant() && x.Instr.ConstantVal() == 0 {
-		if m.c.MatchInstr(y, ssa.OpcodeBand) {
-			target = y
-			got = true
-		}
-	}
-
 	if y.IsFromInstr() && y.Instr.Constant() && y.Instr.ConstantVal() == 0 {
 		if m.c.MatchInstr(x, ssa.OpcodeBand) {
 			target = x
@@ -1916,9 +2056,16 @@ func (m *machine) lowerAluRmiROp(si *ssa.Instruction, op aluRmiROpcode) {
 	// (C7) and dropped: real producers canonicalize the constant to y, so the
 	// swap fired 0 times across Go/Rust/TinyGo modules -- it only ever helps
 	// hand-written wasm, for the cost of a Constant() check on every ALU op.
+	rd := m.c.VRegOf(si.Return())
+	if op == aluRmiROpcodeMul && yDef.IsFromInstr() && yDef.Instr.Constant() {
+		if k, ok := asImm32Operand(yDef.Instr.ConstantVal(), !_64); ok {
+			yDef.Instr.MarkLowered()
+			m.insert(m.allocateInstr().asImulImm(m.getOperand_Mem_Reg(xDef), k.imm32(), rd, _64))
+			return
+		}
+	}
 	rn := m.getOperand_Reg(xDef)
 	rm := m.getOperand_Mem_Imm32_Reg(yDef)
-	rd := m.c.VRegOf(si.Return())
 
 	// An add is what LEA computes, and LEA is three-operand: it reads rn and rm and
 	// writes rd, so neither the copy in nor the copy out below is needed. LEA leaves the
@@ -2060,17 +2207,22 @@ func (m *machine) lowerXmmRmR(instr *ssa.Instruction) {
 	}
 
 	xDef, yDef := m.c.ValueDefinition(x), m.c.ValueDefinition(y)
-	rn := m.getOperand_Reg(yDef)
+	// A scalar operation reads its second operand from memory as well as from a register, and a load
+	// only it uses folds into it.
+	rn := m.getOperand_Mem_Reg(yDef)
 	rm := m.getOperand_Reg(xDef)
-	rd := m.c.VRegOf(instr.Return())
+	m.insertXmmBinary(op, rn, rm.reg(), m.c.VRegOf(instr.Return()))
+}
 
-	// rm is being overwritten, so we first copy its value to a temp register,
-	// in case it is referenced again later.
-	tmp := m.copyToTmp(rm.reg())
-
-	xmm := m.allocateInstr().asXmmRmR(op, rn, tmp)
-	m.insert(xmm)
-
+// insertXmmBinary inserts rd = src1 op src2: in AVX's three-operand form where there is one, which
+// overwrites neither, and otherwise as SSE's two-operand form on a copy of src1.
+func (m *machine) insertXmmBinary(op sseOpcode, src2 operand, src1, rd regalloc.VReg) {
+	if m.cpuFeatures.Has(platform.CpuFeatureAmd64AVX) && hasVexForm(op) {
+		m.insert(m.allocateInstr().asXmmRmRVex(op, src2, src1, rd))
+		return
+	}
+	tmp := m.copyToTmp(src1)
+	m.insert(m.allocateInstr().asXmmRmR(op, src2, tmp))
 	m.copyTo(tmp, rd)
 }
 
@@ -2156,6 +2308,37 @@ func (m *machine) lowerStore(si *ssa.Instruction) {
 	m.insert(store)
 }
 
+// lowerYield lowers the slow path of a preemption check: see yield. Below this
+// frame it takes 32 bytes, the pushed context and the trampoline's return
+// address, frame pointer and one more push, all it keeps on the stack. The
+// headroom a leaf leaves below its frame covers that (see
+// backend.LeafStackCheckHeadroomBytes), so unlike a call it leaves a function a
+// leaf, which needs no stack check of its own; the margin every call site keeps
+// covers it in any other function.
+func (m *machine) lowerYield(si *ssa.Instruction) {
+	ctx := m.c.VRegOf(si.Arg())
+	addr := m.newAmodeImmReg(nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(), ctx)
+	y := m.allocateInstr().asYield(addr)
+	m.insert(y)
+	m.yields = append(m.yields, y)
+}
+
+// reloadYieldContexts makes each yield reload the execution context from the
+// reserved slot, in a function that has it anyway (see needsCtxSlot), as trap
+// islands do, rather than use the function's own: that would otherwise stay live
+// around a loop whose check's slow path yields, and in a register from the header
+// on, which the body pays for with a reload on every way back. A function with no
+// slot keeps using its own rather than pay to set one up.
+func (m *machine) reloadYieldContexts() {
+	execOff, _ := m.EhCtxSlotOffsets()
+	for _, y := range m.yields {
+		ctx := m.c.AllocateVReg(ssa.TypeI64)
+		load := m.allocateInstr().asMov64MR(newOperandMem(m.newAmodeImmReg(uint32(execOff), rspVReg)), ctx)
+		linkInstr(linkInstr(y.prev, load), y)
+		y.op1 = newOperandMem(m.newAmodeImmReg(nativeapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(), ctx))
+	}
+}
+
 func (m *machine) lowerCall(si *ssa.Instruction) {
 	isDirectCall := si.Opcode() == ssa.OpcodeCall
 	indirectCalleePtr, directCallee, isMemmove, calleeABI, stackSlotSize := m.prepareCall(si, isDirectCall)
@@ -2191,6 +2374,7 @@ func (m *machine) lowerCall(si *ssa.Instruction) {
 	if isDirectCall {
 		call := m.allocateInstr().asCall(directCallee, calleeABI)
 		call.mayThrow = si.MayThrow()
+		call.b1 = si.InlinedCall()
 		m.insert(call)
 	} else {
 		ptrOp := m.getOperand_Mem_Reg(m.c.ValueDefinition(indirectCalleePtr))
@@ -2534,7 +2718,7 @@ func (m *machine) Encode(ctx context.Context) (err error) {
 	for i := range m.labelResolutionPends {
 		p := &m.labelResolutionPends[i]
 		switch p.instr.kind {
-		case jmp, jmpIf, lea, xmmUnaryRmR:
+		case jmp, jmpIf, lea, xmmUnaryRmR, xmmRmRVex:
 			target := p.instr.jmpLabel()
 			targetOffset := m.labelPositionPool.Get(int(target)).binaryOffset
 			imm32Offset := p.imm32Offset
@@ -2755,13 +2939,33 @@ func (m *machine) clobberedRegSlotSize() int64 {
 	return int64(len(m.clobberedRegs) * 16)
 }
 
+func (m *machine) lowerUmulhi(si *ssa.Instruction) {
+	x, y := si.Arg2()
+	rx := m.getOperand_Reg(m.c.ValueDefinition(x))
+	ry := m.getOperand_Reg(m.c.ValueDefinition(y))
+	m.copyTo(rx.reg(), raxVReg)
+	m.insert(m.allocateInstr().asMulHi(ry, false, true))
+	m.copyTo(rdxVReg, m.c.VRegOf(si.Return()))
+}
+
 func (m *machine) lowerIDivRem(si *ssa.Instruction, isDiv bool, signed bool) {
 	x, y, execCtx := si.Arg3()
 
 	dividend := m.getOperand_Reg(m.c.ValueDefinition(x))
 	divisor := m.getOperand_Reg(m.c.ValueDefinition(y))
-	ctxVReg := m.c.VRegOf(execCtx)
 	tmpGp := m.c.AllocateVReg(si.Return().Type())
+	// As for a bounds check, a division traps through the shared islands, which reload the execution
+	// context themselves, unless debug info wants each trap where it happened: then it needs the context
+	// in a register, which in a loop is one more value kept live, or reloaded, on every iteration.
+	ctxVReg := regalloc.VRegInvalid
+	if si.SourceOffset().Valid() {
+		ctxVReg = m.c.VRegOf(execCtx)
+	} else {
+		m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerDivisionByZero)
+		if signed && isDiv {
+			m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerOverflow)
+		}
+	}
 
 	m.copyTo(dividend.reg(), raxVReg)
 	m.insert(m.allocateInstr().asDefineUninitializedReg(rdxVReg))
@@ -2781,18 +2985,24 @@ func (m *machine) lowerIDivRemSequenceAfterRegAlloc(i *instruction) {
 
 	dividend := raxVReg
 
+	shared := !execCtx.Valid() // The traps go to the shared islands lowerIDivRem made.
+
 	// Ensure yr is not zero.
 	test := m.allocateInstr()
 	test.asCmpRmiR(false, newOperandReg(divisor), divisor, _64)
 	m.insert(test)
 
-	jnz := m.allocateInstr()
-	m.insert(jnz)
+	if shared {
+		m.insert(m.allocateInstr().asJmpIf(condZ, newOperandLabel(m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerDivisionByZero))))
+	} else {
+		jnz := m.allocateInstr()
+		m.insert(jnz)
 
-	nz := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerDivisionByZero)
+		nz := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerDivisionByZero)
 
-	// If not zero, we can proceed with the division.
-	jnz.asJmpIf(condNZ, newOperandLabel(nz))
+		// If not zero, we can proceed with the division.
+		jnz.asJmpIf(condNZ, newOperandLabel(nz))
+	}
 
 	var ifRemNeg1 *instruction
 	if signed {
@@ -2837,9 +3047,16 @@ func (m *machine) lowerIDivRemSequenceAfterRegAlloc(i *instruction) {
 			// Trap if we are trying to do (math.MinInt32 / -1) or (math.MinInt64 / -1),
 			// as that is the overflow in division as the result becomes 2^31 which is larger than
 			// the maximum of signed 32-bit int (2^31-1).
-			end := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerOverflow)
-			ifNotNeg1.asJmpIf(condNZ, newOperandLabel(end))
-			ifNotMinInt.asJmpIf(condNZ, newOperandLabel(end))
+			if shared {
+				cont, contLabel := m.allocateBrTarget()
+				ifNotNeg1.asJmpIf(condNZ, newOperandLabel(contLabel))
+				ifNotMinInt.asJmpIf(condZ, newOperandLabel(m.getOrCreateTrapIsland(nativeapi.ExitCodeIntegerOverflow)))
+				m.insert(cont)
+			} else {
+				end := m.lowerExitWithCode(execCtx, nativeapi.ExitCodeIntegerOverflow)
+				ifNotNeg1.asJmpIf(condNZ, newOperandLabel(end))
+				ifNotMinInt.asJmpIf(condNZ, newOperandLabel(end))
+			}
 		} else {
 			// If it is remainder, zeros DX register and compare the divisor to -1.
 			xor := m.allocateInstr().asZeros(rdxVReg)
@@ -3514,15 +3731,11 @@ func (m *machine) lowerFcvtFromUint(rn, rd operand, src64, dst64 bool) {
 }
 
 func (m *machine) lowerVanyTrue(instr *ssa.Instruction) {
-	x := instr.Arg()
-	rm := m.getOperand_Reg(m.c.ValueDefinition(x))
 	rd := m.c.VRegOf(instr.Return())
 
 	tmp := m.c.AllocateVReg(ssa.TypeI32)
 
-	cmp := m.allocateInstr()
-	cmp.asXmmCmpRmR(sseOpcodePtest, rm, rm.reg())
-	m.insert(cmp)
+	m.insertAnyTrueTest(instr.Arg())
 
 	setcc := m.allocateInstr()
 	setcc.asSetcc(condNZ, tmp)
@@ -3534,6 +3747,25 @@ func (m *machine) lowerVanyTrue(instr *ssa.Instruction) {
 	m.insert(and)
 
 	m.copyTo(tmp, rd)
+}
+
+// insertAnyTrueTest sets ZF exactly when no bit of the vector x is set. ptest ANDs its operands, so
+// for x = a & b, used nowhere else, it tests a and b without computing x.
+func (m *machine) insertAnyTrueTest(x ssa.Value) {
+	def := m.c.ValueDefinition(x)
+	a, b := x, x
+	if m.c.MatchInstr(def, ssa.OpcodeVband) {
+		a, b = def.Instr.Arg2()
+		def.Instr.MarkLowered()
+	}
+	rm := m.getOperand_Reg(m.c.ValueDefinition(a))
+	rb := rm
+	if b != a {
+		rb = m.getOperand_Reg(m.c.ValueDefinition(b))
+	}
+	cmp := m.allocateInstr()
+	cmp.asXmmCmpRmR(sseOpcodePtest, rb, rm.reg())
+	m.insert(cmp)
 }
 
 func (m *machine) lowerVallTrue(instr *ssa.Instruction) {
@@ -3578,6 +3810,21 @@ func (m *machine) lowerVallTrue(instr *ssa.Instruction) {
 	m.insert(and)
 
 	m.copyTo(tmp2, rd)
+}
+
+// lowerVIaddReduce adds the upper half of the vector onto the lower, then the second lane onto the first.
+func (m *machine) lowerVIaddReduce(instr *ssa.Instruction) {
+	x := m.c.VRegOf(instr.Arg())
+	// pshufd writes its destination without defining it, so each shuffles a copy in place.
+	halves := m.copyToTmp(x)
+	m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePshufd, 0b01_00_11_10, newOperandReg(halves), halves))
+	pairs := m.c.AllocateVReg(ssa.TypeV128)
+	m.insertXmmBinary(sseOpcodePaddd, newOperandReg(halves), x, pairs)
+	odd := m.copyToTmp(pairs)
+	m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePshufd, 0b10_11_00_01, newOperandReg(odd), odd))
+	sum := m.c.AllocateVReg(ssa.TypeV128)
+	m.insertXmmBinary(sseOpcodePaddd, newOperandReg(odd), pairs, sum)
+	m.insert(m.allocateInstr().asXmmToGpr(sseOpcodeMovd, sum, m.c.VRegOf(instr.Return()), false))
 }
 
 func (m *machine) lowerVhighBits(instr *ssa.Instruction) {
@@ -3707,6 +3954,47 @@ func (m *machine) lowerSplat(x, ret ssa.Value, lane ssa.VecLane) {
 }
 
 func (m *machine) lowerShuffle(x, y ssa.Value, lo, hi uint64, ret ssa.Value) {
+	var lanes [16]byte
+	for i := 0; i < 8; i++ {
+		lanes[i], lanes[8+i] = byte(lo>>(i*8)), byte(hi>>(i*8))
+	}
+	// Sixteen bytes in a row of x followed by y, a window sliding over the two, is one palignr.
+	window := true
+	for i, l := range lanes {
+		window = window && l == lanes[0]+byte(i)
+	}
+	if window && lanes[0] > 0 && lanes[0] < 16 {
+		xx := m.getOperand_Reg(m.c.ValueDefinition(x))
+		yy := m.getOperand_Reg(m.c.ValueDefinition(y))
+		tmp := m.copyToTmp(yy.reg())
+		m.insert(m.allocateInstr().asXmmRmRImm(sseOpcodePalignr, lanes[0], xx, tmp))
+		m.copyTo(tmp, m.c.VRegOf(ret))
+		return
+	}
+	// Every lane from one of the two is one pshufb.
+	fromX, fromY := true, true
+	for _, l := range lanes {
+		fromX, fromY = fromX && l < 16, fromY && l >= 16
+	}
+	if fromX || fromY {
+		src := x
+		var mask [2]uint64
+		for i, l := range lanes {
+			if fromY {
+				l -= 16
+			}
+			mask[i/8] |= uint64(l) << (i % 8 * 8)
+		}
+		if fromY {
+			src = y
+		}
+		ss := m.getOperand_Reg(m.c.ValueDefinition(src))
+		tmp := m.copyToTmp(ss.reg())
+		m.insert(m.allocateInstr().asXmmRmR(sseOpcodePshufb, newOperandReg(m.loadV128Const(mask[0], mask[1])), tmp))
+		m.copyTo(tmp, m.c.VRegOf(ret))
+		return
+	}
+
 	var xMask, yMask [2]uint64
 	for i := 0; i < 8; i++ {
 		loLane := byte(lo >> (i * 8))
@@ -3752,32 +4040,35 @@ func (m *machine) lowerShuffle(x, y ssa.Value, lo, hi uint64, ret ssa.Value) {
 	m.copyTo(tmpY, m.c.VRegOf(ret))
 }
 
+// loadV128Const loads a 16-byte constant from the constant pool into a new register: the pool is not
+// aligned, which a legacy SSE memory operand would need to be.
+func (m *machine) loadV128Const(lo, hi uint64) regalloc.VReg {
+	l, pos := m.allocateLabel()
+	m.consts = append(m.consts, _const{lo: lo, hi: hi, label: l, labelPos: pos})
+	tmp := m.c.AllocateVReg(ssa.TypeV128)
+	m.insert(m.allocateInstr().asXmmUnaryRmR(sseOpcodeMovdqu, newOperandMem(m.newAmodeRipRel(l)), tmp))
+	return tmp
+}
+
 func (m *machine) lowerVbBinOpUnaligned(op sseOpcode, x, y, ret ssa.Value) {
 	rn := m.getOperand_Reg(m.c.ValueDefinition(x))
 	rm := m.getOperand_Reg(m.c.ValueDefinition(y))
-	rd := m.c.VRegOf(ret)
-
-	tmp := m.copyToTmp(rn.reg())
-
-	binOp := m.allocateInstr()
-	binOp.asXmmRmR(op, rm, tmp)
-	m.insert(binOp)
-
-	m.copyTo(tmp, rd)
+	m.insertXmmBinary(op, rm, rn.reg(), m.c.VRegOf(ret))
 }
 
 func (m *machine) lowerVbBinOp(op sseOpcode, x, y, ret ssa.Value) {
 	rn := m.getOperand_Reg(m.c.ValueDefinition(x))
-	rm := m.getOperand_Mem_Reg(m.c.ValueDefinition(y))
-	rd := m.c.VRegOf(ret)
-
-	tmp := m.copyToTmp(rn.reg())
-
-	binOp := m.allocateInstr()
-	binOp.asXmmRmR(op, rm, tmp)
-	m.insert(binOp)
-
-	m.copyTo(tmp, rd)
+	yDef := m.c.ValueDefinition(y)
+	var rm operand
+	if m.cpuFeatures.Has(platform.CpuFeatureAmd64AVX) && hasVexForm(op) && m.c.MatchInstr(yDef, ssa.OpcodeLoad) {
+		// A VEX instruction's memory operand need not be aligned, so the load of a vector folds into it.
+		ptr, offset, _ := yDef.Instr.LoadData()
+		rm = newOperandMem(m.lowerToAddressMode(ptr, offset))
+		yDef.Instr.MarkLowered()
+	} else {
+		rm = m.getOperand_Mem_Reg(yDef)
+	}
+	m.insertXmmBinary(op, rm, rn.reg(), m.c.VRegOf(ret))
 }
 
 func (m *machine) lowerVFcmp(x, y ssa.Value, c ssa.FloatCmpCond, ret ssa.Value, lane ssa.VecLane) {

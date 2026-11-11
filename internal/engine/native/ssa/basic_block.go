@@ -82,6 +82,7 @@ type (
 		preds   []basicBlockPredecessorInfo
 		success []*basicBlock
 		// singlePred is the alias to preds[0] for fast lookup, and only set after Seal is called.
+		// A block whose other predecessor is a check's slow path has it too: see yieldJoin.
 		singlePred *basicBlock
 		// varDefsOff, varDefsLen locate this block's window in builder.varDefs, which holds
 		// the last definition of each Variable in this block. varDefsLen is zero until the
@@ -115,6 +116,10 @@ type (
 
 		// visited is used during various traversals.
 		visited int32
+
+		// unlikelySucc is the successor a branch hint says this block rarely goes to, or nil. See
+		// Builder.MarkUnlikelyEdge.
+		unlikelySucc *basicBlock
 
 		// child and sibling are the ones in the dominator tree.
 		child, sibling *basicBlock
@@ -273,6 +278,12 @@ func (bb *basicBlock) Root() *Instruction {
 	return bb.rootInstr
 }
 
+// yields reports whether bb opens with OpcodeYield: the slow path of a preemption
+// check.
+func (bb *basicBlock) yields() bool {
+	return bb.rootInstr != nil && bb.rootInstr.opcode == OpcodeYield
+}
+
 // Tail implements BasicBlock.Tail.
 func (bb *basicBlock) Tail() *Instruction {
 	return bb.currentInstr
@@ -290,6 +301,7 @@ func resetBasicBlock(bb *basicBlock) {
 	bb.varDefsOff, bb.varDefsLen = 0, 0
 	bb.reversePostOrder = -1
 	bb.visited = 0
+	bb.unlikelySucc = nil
 	bb.loopNestingForestChildren = basicBlockVarLengthNil
 	bb.loopHeader = false
 	bb.sibling = nil
@@ -362,8 +374,7 @@ func (bb *basicBlock) validate(b *builder) {
 	if len(bb.preds) > 0 {
 		for _, pred := range bb.preds {
 			if pred.branch.opcode != OpcodeBrTable {
-				blockID := int(pred.branch.rValue)
-				target := b.basicBlocksPool.View(blockID)
+				target := b.basicBlock(BasicBlockID(pred.branch.rValue))
 				if target != bb {
 					panic(fmt.Sprintf("BUG: '%s' is not branch to %s, but to %s",
 						pred.branch.Format(b), bb.Name(), target.Name()))
@@ -411,6 +422,10 @@ func (bb *basicBlock) LoopHeader() bool {
 // already available at that point, and the branch has to stay last.
 func (bb *basicBlock) insertBeforeTerminator(instr *Instruction) {
 	term := bb.currentInstr
+	// A block can end in a conditional branch followed by a jump; both are its terminator.
+	for term != nil && term.prev != nil && term.prev.IsBranching() {
+		term = term.prev
+	}
 	if term == nil {
 		instr.prev, instr.next = nil, nil
 		bb.rootInstr, bb.currentInstr = instr, instr

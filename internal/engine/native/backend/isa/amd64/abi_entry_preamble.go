@@ -52,14 +52,13 @@ func (m *machine) compileEntryPreamble(sig *ssa.Signature) *instruction {
 	// 		mov %goAllocatedStackPtr, %rsp
 	cur = m.move64(goAllocatedStackPtr, rspVReg, cur)
 
-	// Fill the termination-fuel counter for this entry into compiled code.
-	// 		mov $TerminationFuel, %fuel
+	// Load the address preemption checks read into the preempt register.
+	// 		mov PreemptWordAddress(%savedExecutionContextPtr), %preempt
 	//
-	// goAllocatedStackPtr IS the fuel register (see fuelVReg), which is why this
-	// has to come after the move above and not before it. Emitted unconditionally:
-	// the preamble is shared by every module, and one immediate move per entry into
-	// compiled code is not worth a second preamble to avoid when the option is off.
-	cur = linkInstr(cur, m.allocateInstr().asImm(fuelVReg, uint64(nativeapi.TerminationFuel), false))
+	// goAllocatedStackPtr IS the preempt register (see preemptVReg), which is why
+	// this has to come after the move above and not before it.
+	addr := newOperandMem(m.newAmodeImmReg(nativeapi.ExecutionContextOffsetPreemptWordAddress.U32(), savedExecutionContextPtr))
+	cur = linkInstr(cur, m.allocateInstr().asMov64MR(addr, preemptVReg))
 
 	if stackSlotSize := abi.AlignedArgResultStackSlotSize(); stackSlotSize > 0 {
 		// Allocate stack slots for the arguments and return values.
@@ -238,15 +237,25 @@ func (m *machine) goEntryPreamblePassResult(cur *instruction, resultSlicePtr reg
 		r = result.Reg
 	}
 
+	// A 32-bit result fills its whole 64-bit slot, zero-extended as api.EncodeI32 and api.EncodeF32 do:
+	// the slot held a parameter before.
+	switch result.Type {
+	case ssa.TypeI32:
+		if r != tmpIntReg {
+			cur = linkInstr(cur, m.allocateInstr().asMovzxRmR(extModeLQ, newOperandReg(r), tmpIntReg))
+			r = tmpIntReg
+		}
+	case ssa.TypeF32:
+		cur = linkInstr(cur, m.allocateInstr().asXmmToGpr(sseOpcodeMovd, r, tmpIntReg, false))
+		r = tmpIntReg
+	}
 	store := m.allocateInstr()
 	a := newOperandMem(m.newAmodeImmReg(offsetInResultSlice, resultSlicePtr))
 	switch result.Type {
-	case ssa.TypeI32:
-		store.asMovRM(r, a, 4)
+	case ssa.TypeI32, ssa.TypeF32:
+		store.asMovRM(r, a, 8)
 	case ssa.TypeI64:
 		store.asMovRM(r, a, 8)
-	case ssa.TypeF32:
-		store.asXmmMovRM(sseOpcodeMovss, r, a)
 	case ssa.TypeF64:
 		store.asXmmMovRM(sseOpcodeMovsd, r, a)
 	case ssa.TypeV128:

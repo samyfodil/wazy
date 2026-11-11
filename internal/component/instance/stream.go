@@ -288,6 +288,9 @@ type sharedStream struct {
 	// $Consumer imports the stream's readable end under its own local type
 	// index for $R.
 	elemIn *Instance
+	// elemResolve resolves elem's type indices: the creating instance's, or
+	// the host's for a host-created stream.
+	elemResolve abi.Resolver
 
 	dropped bool
 
@@ -635,8 +638,7 @@ func copyNotIdleTrapText(isFuture bool, side endSide, state copyState) string {
 // readable stream/future end crosses a canonical-ABI boundary as a value --
 // an argument being lifted into a callee, or a top-level export's RESULT
 // being lifted back out to the host -- see takeReadableStreamEnd/
-// takeReadableFutureEnd (arg/result-crossing callers) and instance.go's
-// liftResult (top-level result)). Only the readable side is ever lifted (a
+// takeReadableFutureEnd). Only the readable side is ever lifted (a
 // component-level stream<T>/future<T> type always denotes the readable
 // handle), so there is no writable-side case here; the DONE wording matches
 // trap-if-done.wast's "lift" scenarios specifically.
@@ -720,8 +722,9 @@ type sharedFuture struct {
 	align   uint32
 	numeric bool
 
-	// elemIn is sharedStream.elemIn's twin -- see its doc.
-	elemIn *Instance
+	// elemIn and elemResolve are sharedStream's twins -- see their docs.
+	elemIn      *Instance
+	elemResolve abi.Resolver
 
 	dropped bool
 
@@ -841,23 +844,17 @@ func (f *sharedFuture) drop() {
 	}
 }
 
-// peekReadableStreamEnd validates handle i the way lift_async_value does for
-// a stream (readable end, matching elem type, IDLE, not joined to a waitable
-// set) WITHOUT removing it from t -- the split takeReadableStreamEnd needs
-// (it DOES remove, for the arg/delegated-result crossings where ownership of
-// the table slot genuinely transfers to the other side) from what
-// instance.go's liftResult needs for a top-level export RESULT: per wazy's
-// existing convention for own<T>/borrow<T> top-level results (liftResult
-// never removes those either), a stream/future result handle stays valid in
-// the guest's OWN table for the host to manage explicitly afterward, so only
-// the validation -- not the removal -- applies there.
+// takeReadableStreamEnd transliterates lift_async_value for a stream: REMOVE
+// i from t, trapping unless it is a readable stream end of elem type
+// elemDesc, idle, and not joined to a waitable set. Returns the shared
+// object -- the lifted host-level value.
 //
-// in is the instance whose TypeSpace elemDesc's indices are relative to
-// (nil for a resources-only test harness with no owning Instance) -- passed
-// through to elemTypesCompatible so an own<R> element compares by resource
-// IDENTITY, not raw local type index (Feature 3, see elemTypesCompatible's
-// doc, composition.go).
-func peekReadableStreamEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, i uint32) (*streamEnd, error) {
+// resolve resolves elemDesc's type indices, and in is the instance whose
+// resources it names (nil for a resources-only test harness with no owning
+// Instance) -- both passed through to elemTypesCompatible, which compares
+// the element structurally and an own<R> by resource IDENTITY, not raw local
+// type index (Feature 3, see elemTypesCompatible's doc, composition.go).
+func takeReadableStreamEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, resolve abi.Resolver, i uint32) (*sharedStream, error) {
 	raw, ok := t.getEntry(i)
 	if !ok {
 		return nil, fmt.Errorf("unknown stream handle %d", i)
@@ -869,7 +866,7 @@ func peekReadableStreamEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 	if se.side != sideReadable {
 		return nil, fmt.Errorf("handle %d is not a READABLE stream end", i)
 	}
-	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
+	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, se.shared.elemResolve, in, elemDesc, resolve) {
 		return nil, fmt.Errorf("handle %d: stream element type mismatch", i)
 	}
 	if se.state != copyIdle {
@@ -878,24 +875,12 @@ func peekReadableStreamEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 	if se.inWaitableSet() {
 		return nil, fmt.Errorf("handle %d: cannot lift stream while it's in a waitable set", i)
 	}
-	return se, nil
-}
-
-// takeReadableStreamEnd transliterates lift_async_value for a stream: REMOVE
-// i from t, trapping unless it is a readable stream end of elem type
-// elemDesc, idle, and not joined to a waitable set. Returns the shared
-// object -- the lifted host-level value.
-func takeReadableStreamEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedStream, error) {
-	se, err := peekReadableStreamEnd(in, t, elemDesc, i)
-	if err != nil {
-		return nil, err
-	}
 	t.removeEntry(i)
 	return se.shared, nil
 }
 
-// peekReadableFutureEnd is peekReadableStreamEnd's future twin.
-func peekReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, i uint32) (*futureEnd, error) {
+// takeReadableFutureEnd is takeReadableStreamEnd's future twin.
+func takeReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, resolve abi.Resolver, i uint32) (*sharedFuture, error) {
 	raw, ok := t.getEntry(i)
 	if !ok {
 		return nil, fmt.Errorf("unknown future handle %d", i)
@@ -907,7 +892,7 @@ func peekReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 	if fe.side != sideReadable {
 		return nil, fmt.Errorf("handle %d is not a READABLE future end", i)
 	}
-	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
+	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, fe.shared.elemResolve, in, elemDesc, resolve) {
 		return nil, fmt.Errorf("handle %d: future element type mismatch", i)
 	}
 	if fe.state != copyIdle {
@@ -915,15 +900,6 @@ func peekReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 	}
 	if fe.inWaitableSet() {
 		return nil, fmt.Errorf("handle %d: cannot lift future while it's in a waitable set", i)
-	}
-	return fe, nil
-}
-
-// takeReadableFutureEnd is takeReadableStreamEnd's future twin.
-func takeReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDesc, i uint32) (*sharedFuture, error) {
-	fe, err := peekReadableFutureEnd(in, t, elemDesc, i)
-	if err != nil {
-		return nil, err
 	}
 	t.removeEntry(i)
 	return fe.shared, nil

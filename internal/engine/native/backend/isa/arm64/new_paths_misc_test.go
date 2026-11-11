@@ -140,8 +140,7 @@ func TestMachine_insertLoadConstant(t *testing.T) {
 			// The upper 32 bits are noise from a sign-extended constant and must be masked off
 			// before the value is materialized, so this must lower exactly like 0x80000001.
 			name: "i32 masks the high half", v: 0xffff_ffff_8000_0001, typ: ssa.TypeI32, vr: x1VReg,
-			exp: `movz w1, #0x1, lsl 0
-movk w1, #0x8000, lsl 16`,
+			exp: "orr w1, wzr, #0x80000001",
 		},
 		{
 			name: "i64 zero", v: 0, typ: ssa.TypeI64, vr: x1VReg,
@@ -157,16 +156,20 @@ movk w1, #0x8000, lsl 16`,
 		},
 		{
 			// 1.0f == 0x3f800000: one movz with a 16-bit-aligned immediate, then ins into lane 0.
-			name: "f32 via gpr", v: 0x3f80_0000, typ: ssa.TypeF32, vr: v1VReg,
-			exp: `movz w100?, #0x3f80, lsl 16
-ins v1.s[0], w100?`,
+			name: "f32 via gpr", v: 0x4280_0000, typ: ssa.TypeF32, vr: v1VReg,
+			exp: `movz w100?, #0x4280, lsl 16
+fmov s1, w100?`,
+		},
+		{
+			name: "f32 fmov immediate", v: 0x3f80_0000, typ: ssa.TypeF32, vr: v1VReg,
+			exp: "fmov s1, #1",
 		},
 		{
 			// Same masking rule as the i32 case: the bits above the type's width are discarded, so
-			// this must lower exactly like the clean 0x3f800000 above.
-			name: "f32 masks the high half", v: 0xdead_beef_3f80_0000, typ: ssa.TypeF32, vr: v1VReg,
-			exp: `movz w100?, #0x3f80, lsl 16
-ins v1.s[0], w100?`,
+			// this must lower exactly like the clean 0x42800000 above.
+			name: "f32 masks the high half", v: 0xdead_beef_4280_0000, typ: ssa.TypeF32, vr: v1VReg,
+			exp: `movz w100?, #0x4280, lsl 16
+fmov s1, w100?`,
 		},
 		{
 			name: "f64 zero", v: 0, typ: ssa.TypeF64, vr: v1VReg,
@@ -174,9 +177,13 @@ ins v1.s[0], w100?`,
 		},
 		{
 			// 2.0 == 0x4000000000000000: one movz at lsl 48, then ins into the low 64-bit lane.
-			name: "f64 via gpr", v: 0x4000_0000_0000_0000, typ: ssa.TypeF64, vr: v1VReg,
-			exp: `movz x100?, #0x4000, lsl 48
-ins v1.d[0], x100?`,
+			name: "f64 via gpr", v: 0x4050_0000_0000_0000, typ: ssa.TypeF64, vr: v1VReg,
+			exp: `movz x100?, #0x4050, lsl 48
+fmov d1, x100?`,
+		},
+		{
+			name: "f64 fmov immediate", v: 0x4000_0000_0000_0000, typ: ssa.TypeF64, vr: v1VReg,
+			exp: "fmov d1, #2",
 		},
 		{
 			name: "v128 zero", v: 0, typ: ssa.TypeV128, vr: v1VReg,
@@ -187,7 +194,7 @@ ins v1.d[0], x100?`,
 			// otherwise whatever the allocator left in v1 would leak into the value.
 			name: "v128 zero-extends the low lane", v: 0x2a, typ: ssa.TypeV128, vr: v1VReg,
 			exp: `movz x100?, #0x2a, lsl 0
-ins v1.d[0], x100?
+fmov d1, x100?
 ins v1.d[1], xzr`,
 		},
 		{

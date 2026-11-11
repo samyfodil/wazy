@@ -17,18 +17,19 @@ type regAllocFn struct {
 
 // PostOrderBlockIteratorBegin implements regalloc.Function.
 func (f *regAllocFn) PostOrderBlockIteratorBegin() *labelPosition {
-	f.blockIter = len(f.m.orderedSSABlockLabelPos) - 1
-	return f.PostOrderBlockIteratorNext()
+	return f.labelOf(f.ssaB.BlockIteratorPostOrderBegin())
 }
 
 // PostOrderBlockIteratorNext implements regalloc.Function.
 func (f *regAllocFn) PostOrderBlockIteratorNext() *labelPosition {
-	if f.blockIter < 0 {
+	return f.labelOf(f.ssaB.BlockIteratorPostOrderNext())
+}
+
+func (f *regAllocFn) labelOf(blk ssa.BasicBlock) *labelPosition {
+	if blk == nil {
 		return nil
 	}
-	b := f.m.orderedSSABlockLabelPos[f.blockIter]
-	f.blockIter--
-	return b
+	return f.m.getOrAllocateSSABlockLabelPosition(blk)
 }
 
 // ReversePostOrderBlockIteratorBegin implements regalloc.Function.
@@ -308,6 +309,9 @@ func (m *machine) insertStoreRegisterAt(v regalloc.VReg, instr *instruction, aft
 		cur, prevNext = instr.prev, instr
 	}
 
+	if _, ok := m.remat[v.ID()]; ok {
+		return linkInstr(cur, prevNext) // Its reload loads the constant again.
+	}
 	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), bits/8)
 	var amode *addressMode
 	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, bits, spVReg, true)
@@ -333,6 +337,31 @@ func (m *machine) insertReloadRegisterAt(v regalloc.VReg, instr *instruction, af
 		cur, prevNext = instr.prev, instr
 	}
 
+	if c, ok := m.remat[v.ID()]; ok {
+		if typ.IsInt() {
+			if typ == ssa.TypeI32 {
+				cur = m.lowerConstantI32AndInsert(cur, v, int32(c))
+			} else {
+				cur = m.lowerConstantI64AndInsert(cur, v, int64(c))
+			}
+			return linkInstr(cur, prevNext)
+		}
+		width := byte(typ.Bits())
+		if width < 64 {
+			c &= 1<<width - 1
+		}
+		load := m.allocateInstr()
+		switch {
+		case c != 0 && m.fpPoolingEnabled():
+			load.asLoadFpuConstPooled(v, c, 0, width, m.getOrAddFpConst(c, 0, width))
+		case width == 32:
+			load.asLoadFpuConst32(v, c)
+		default:
+			load.asLoadFpuConst64(v, c)
+		}
+		cur = linkInstr(cur, load)
+		return linkInstr(cur, prevNext)
+	}
 	offsetFromSP := m.getVRegSpillSlotOffsetFromSP(v.ID(), bits/8)
 	var amode *addressMode
 	cur, amode = m.resolveAddressModeForOffsetAndInsert(cur, offsetFromSP, bits, spVReg, true)

@@ -1,6 +1,7 @@
 package wit_test
 
 import (
+	_ "embed"
 	"fmt"
 	"maps"
 	"os"
@@ -616,5 +617,77 @@ world w {
 	}
 	if _, err := pkg.World("w").Imports[0].Func.Signature(nil); err == nil || err.Error() != "wit: make: result: no tag for resource local of world w" {
 		t.Errorf("world func: %v", err)
+	}
+}
+
+// testdata/component/app.wasm is world app { import a:b/kv; export run }
+// as a compiled component; FromComponent reads its WIT back as world root.
+//
+//go:embed testdata/component/app.wasm
+var appComponent []byte
+
+func TestFromComponent(t *testing.T) {
+	pkg, err := wit.FromComponent(appComponent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := pkg.World("root")
+	if w == nil || len(w.Imports) != 1 || w.Imports[0].Name != "a:b/kv" || len(w.Exports) != 1 || w.Exports[0].Name != "run" {
+		t.Fatalf("world root: %+v", w)
+	}
+	if pkg.Interface("a:b/kv").Func("get") == nil {
+		t.Error("no a:b/kv#get")
+	}
+	if _, err := wit.FromComponent([]byte("not wasm")); err == nil {
+		t.Error("garbage reads as a component")
+	}
+}
+
+// An interface's Types are every value type it defines, used by a func of it
+// or not, owned by it; a use of another's is not one, and resources are its
+// Resources.
+func TestInterfaceTypes(t *testing.T) {
+	pkg, err := wit.Parse("t.wit", `package a:b;
+interface base { record p { x: u32 } }
+interface i {
+  use base.{p};
+  record unused { a: list<p> }
+  type id = u32;
+  type ps = list<p>;
+  resource r;
+  record holder { h: r }
+  enum e { one }
+  f: func(x: e) -> r;
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := pkg.Interface("a:b/i").Types(wit.Tags{{Interface: "a:b/i", Name: "r"}: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, ref := range set.Refs {
+		if ref.TypeIndex == nil {
+			got = append(got, ref.Primitive)
+			continue
+		}
+		got = append(got, set.TypeNames[*ref.TypeIndex]+"@"+set.TypeOwners[*ref.TypeIndex])
+	}
+	want := []string{"unused@a:b/i", "u32", "ps@a:b/i", "holder@a:b/i", "e@a:b/i"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	sig, err := pkg.Interface("a:b/i").Func("f").Signature(wit.Tags{{Interface: "a:b/i", Name: "r"}: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for idx, owner := range sig.TypeOwners {
+		if owner != "a:b/i" {
+			t.Errorf("%s is owned by %q", sig.TypeNames[idx], owner)
+		}
+	}
+	if _, err := pkg.Interface("a:b/i").Types(nil); err == nil {
+		t.Error("a resource with no tag builds")
 	}
 }

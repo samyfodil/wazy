@@ -32,6 +32,8 @@ type (
 		// mayThrow is set on a call a caught exception resumes after; see
 		// ClobbersAllRegisters.
 		mayThrow bool
+		// inlinedCall is set on a call from a copy of a function's body; see InlinedCallMarker.
+		inlinedCall bool
 	}
 
 	// instructionKind represents the kind of instruction.
@@ -63,6 +65,7 @@ const (
 	defKindNone defKind = iota + 1
 	defKindRD
 	defKindCall
+	defKindVecMap
 )
 
 var defKinds = [numInstructionKinds]defKind{
@@ -122,6 +125,7 @@ var defKinds = [numInstructionKinds]defKind{
 	cSel:                 defKindRD,
 	fpuCSel:              defKindRD,
 	movToVec:             defKindRD,
+	fpuMovFromInt:        defKindRD,
 	movFromVec:           defKindRD,
 	movFromVecSigned:     defKindRD,
 	vecDup:               defKindRD,
@@ -139,6 +143,7 @@ var defKinds = [numInstructionKinds]defKind{
 	fpuToInt:             defKindRD,
 	intToFpu:             defKindRD,
 	cCmpImm:              defKindNone,
+	cCmpReg:              defKindNone,
 	movToFPSR:            defKindNone,
 	movFromFPSR:          defKindRD,
 	emitSourceOffsetInfo: defKindNone,
@@ -150,6 +155,8 @@ var defKinds = [numInstructionKinds]defKind{
 	loadConstBlockArg:    defKindRD,
 	tailCall:             defKindCall,
 	tailCallInd:          defKindCall,
+	yield:                defKindNone,
+	vecMap:               defKindVecMap,
 }
 
 // Defs returns the list of regalloc.VReg that are defined by the instruction.
@@ -168,6 +175,8 @@ func (i *instruction) Defs(regs *[]regalloc.VReg) []regalloc.VReg {
 		for i := byte(0); i < retFloatRealRegs; i++ {
 			*regs = append(*regs, regInfo.RealRegToVReg[floatParamResultRegs[i]])
 		}
+	case defKindVecMap:
+		i.vecMapResults(regs)
 	default:
 		panic(fmt.Sprintf("defKind for %v not defined", i))
 	}
@@ -200,6 +209,8 @@ const (
 	useKindAMode
 	useKindRNAMode
 	useKindCond
+	// useKindVecMap is the registers a vecMap reads or overwrites; see vecMapUses.
+	useKindVecMap
 	// useKindRDRewrite indicates an instruction where RD is used both as a source and destination.
 	// A temporary register for RD must be allocated explicitly with the source copied to this
 	// register before the instruction and the value copied from this register to the instruction
@@ -263,12 +274,14 @@ var useKinds = [numInstructionKinds]useKind{
 	cSel:                 useKindRNRM,
 	fpuCSel:              useKindRNRM,
 	movToVec:             useKindRN,
+	fpuMovFromInt:        useKindRN,
 	movFromVec:           useKindRN,
 	movFromVecSigned:     useKindRN,
 	vecDup:               useKindRN,
 	vecDupElement:        useKindRN,
 	vecExtract:           useKindRNRM,
 	cCmpImm:              useKindRN,
+	cCmpReg:              useKindRNRM,
 	vecMisc:              useKindRN,
 	vecMovElement:        useKindRN,
 	vecLanes:             useKindRN,
@@ -292,6 +305,8 @@ var useKinds = [numInstructionKinds]useKind{
 	dmb:                  useKindNone,
 	tailCall:             useKindCall,
 	tailCallInd:          useKindCallInd,
+	yield:                useKindRN,
+	vecMap:               useKindVecMap,
 }
 
 // Uses returns the list of regalloc.VReg that are used by the instruction.
@@ -300,6 +315,8 @@ func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
 	*regs = (*regs)[:0]
 	switch useKinds[i.kind] {
 	case useKindNone:
+	case useKindVecMap:
+		i.vecMapUses(regs)
 	case useKindRN:
 		if rn := i.rn.reg(); rn.Valid() {
 			*regs = append(*regs, rn)
@@ -467,6 +484,8 @@ func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 			i.u1 = uint64(registerAsRegZeroCond(reg))
 		case condKindRegisterNotZero:
 			i.u1 = uint64(registerAsRegNotZeroCond(reg))
+		case condKindRegisterSignBit:
+			i.u1 = uint64(registerAsSignBitCond(reg, c.signBitSet()))
 		}
 	case useKindCall:
 		panic("BUG: call instructions shouldn't be assigned")
@@ -483,6 +502,11 @@ func (i *instruction) asCall(ref ssa.FuncRef, abi *backend.FunctionABI) {
 	if abi != nil {
 		i.u2 = abi.ABIInfoAsUint64()
 	}
+}
+
+func (i *instruction) asYield(execCtx regalloc.VReg) {
+	i.kind = yield
+	i.rn = operandNR(execCtx)
 }
 
 func (i *instruction) asCallIndirect(ptr regalloc.VReg, abi *backend.FunctionABI) {
@@ -707,6 +731,24 @@ func (i *instruction) asBrTableSequence(indexReg regalloc.VReg, targetIndex, tar
 	i.u2 = uint64(targetCounts)
 }
 
+// asBoundedBrTableSequence is asBrTableSequence for an index it bounds itself: one past the last
+// target but the default, which is the last, goes to the default. See encodeBrTableSequence.
+func (i *instruction) asBoundedBrTableSequence(indexReg regalloc.VReg, targetIndex, targetCounts int) {
+	i.asBrTableSequence(indexReg, targetIndex, targetCounts)
+	i.u2 |= 1 << 32
+}
+
+// brTableBounded reports whether the br_table sequence bounds its index.
+func (i *instruction) brTableBounded() bool { return i.u2>>32 != 0 }
+
+// brTableBegin is where the br_table sequence's offset table begins, from its start.
+func (i *instruction) brTableBegin() int64 {
+	if i.brTableBounded() {
+		return brTableSequenceOffsetTableBegin + brTableBoundsCheckSize
+	}
+	return brTableSequenceOffsetTableBegin
+}
+
 func (i *instruction) brTableSequenceOffsetsResolved() {
 	i.rm.data = 1 // indicate that the offsets are resolved, for debugging.
 }
@@ -842,6 +884,18 @@ func (i *instruction) asFpuCmp(rn, rm operand, is64bit bool) {
 	i.rn, i.rm = rn, rm
 	if is64bit {
 		i.u1 = 1
+	}
+}
+
+// asCCmpReg makes ccmp rn, rm, #flag, c: the flags of comparing rn with rm where c holds, and flag where
+// it does not.
+func (i *instruction) asCCmpReg(rn, rm operand, c condFlag, flag byte, is64bit bool) {
+	i.kind = cCmpReg
+	i.rn, i.rm = rn, rm
+	i.u1 = uint64(c)
+	i.u2 = uint64(flag)
+	if is64bit {
+		i.u2 |= 1 << 32
 	}
 }
 
@@ -990,6 +1044,16 @@ func (i *instruction) asMovToVec(rd regalloc.VReg, rn operand, arr vecArrangemen
 	i.u1, i.u2 = uint64(arr), uint64(index)
 }
 
+// asFpuMovFromInt moves the 32 or 64 bits of rn into the low bits of rd, zeroing the rest of rd.
+func (i *instruction) asFpuMovFromInt(rd regalloc.VReg, rn operand, _64bit bool) {
+	i.kind = fpuMovFromInt
+	i.rd = rd
+	i.rn = rn
+	if _64bit {
+		i.u1 = 1
+	}
+}
+
 func (i *instruction) asMovFromVec(rd regalloc.VReg, rn operand, arr vecArrangement, index vecIndex, signed bool) {
 	if signed {
 		i.kind = movFromVecSigned
@@ -1124,6 +1188,16 @@ func (i *instruction) String() (str string) {
 			i.rm.format(size))
 	case aluRRRR:
 		size := is64SizeBitToSize(i.u1 >> 32)
+		if op := aluOp(i.u1); op == aluOpSMulH || op == aluOpUMulH {
+			// These have no addend: their Ra field is fixed (see encodeAluRRRR).
+			str = fmt.Sprintf("%s %s, %s, %s", op.String(), formatVRegSized(i.rd, 64), formatVRegSized(i.rn.nr(), 64), formatVRegSized(i.rm.nr(), 64))
+			break
+		}
+		if op := aluOp(i.u1); op >= aluOpSMAddL && op <= aluOpUMSubL {
+			str = fmt.Sprintf("%s %s, %s, %s, %s", op.String(),
+				formatVRegSized(i.rd, 64), formatVRegSized(i.rn.nr(), 32), formatVRegSized(i.rm.nr(), 32), formatVRegSized(regalloc.VReg(i.u2), 64))
+			break
+		}
 		str = fmt.Sprintf("%s %s, %s, %s, %s", aluOp(i.u1).String(),
 			formatVRegSized(i.rd, size), formatVRegSized(i.rn.nr(), size), formatVRegSized(i.rm.nr(), size), formatVRegSized(regalloc.VReg(i.u2), size))
 	case aluRRImm12:
@@ -1140,6 +1214,10 @@ func (i *instruction) String() (str string) {
 		}
 	case aluRRImmShift:
 		size := is64SizeBitToSize(i.u2 >> 32)
+		if op := aluOp(i.u1); op == aluOpUbfx || op == aluOpSbfx {
+			str = fmt.Sprintf("%s %s, %s, #%d, #%d", op, formatVRegSized(i.rd, size), formatVRegSized(i.rn.nr(), size), byte(i.rm.data), byte(i.rm.data>>8))
+			break
+		}
 		str = fmt.Sprintf("%s %s, %s, %#x",
 			aluOp(i.u1).String(),
 			formatVRegSized(i.rd, size),
@@ -1259,6 +1337,12 @@ func (i *instruction) String() (str string) {
 		} else {
 			str = fmt.Sprintf("cset %s, %s", formatVRegSized(i.rd, 64), condFlag(i.u1))
 		}
+	case cCmpReg:
+		size := is64SizeBitToSize(i.u2 >> 32)
+		str = fmt.Sprintf("ccmp %s, %s, #%#x, %s",
+			formatVRegSized(i.rn.nr(), size), formatVRegSized(i.rm.nr(), size),
+			i.u2&0b1111,
+			condFlag(i.u1))
 	case cCmpImm:
 		size := is64SizeBitToSize(i.u2 >> 32)
 		str = fmt.Sprintf("ccmp %s, #%#x, #%#x, %s",
@@ -1330,9 +1414,17 @@ func (i *instruction) String() (str string) {
 	case fpuStore128:
 		str = fmt.Sprintf("str %s, %s", formatVRegSized(i.rn.nr(), 128), i.getAmode().format(64))
 	case loadFpuConst32:
-		str = fmt.Sprintf("ldr %s, #8; b 8; data.f32 %f", formatVRegSized(i.rd, 32), math.Float32frombits(uint32(i.u1)))
+		if _, ok := fpImm8(i.u1, 32); ok {
+			str = fmt.Sprintf("fmov %s, #%g", formatVRegSized(i.rd, 32), math.Float32frombits(uint32(i.u1)))
+		} else {
+			str = fmt.Sprintf("ldr %s, #8; b 8; data.f32 %f", formatVRegSized(i.rd, 32), math.Float32frombits(uint32(i.u1)))
+		}
 	case loadFpuConst64:
-		str = fmt.Sprintf("ldr %s, #8; b 16; data.f64 %f", formatVRegSized(i.rd, 64), math.Float64frombits(i.u1))
+		if _, ok := fpImm8(i.u1, 64); ok {
+			str = fmt.Sprintf("fmov %s, #%g", formatVRegSized(i.rd, 64), math.Float64frombits(i.u1))
+		} else {
+			str = fmt.Sprintf("ldr %s, #8; b 16; data.f64 %f", formatVRegSized(i.rd, 64), math.Float64frombits(i.u1))
+		}
 	case loadFpuConst128:
 		str = fmt.Sprintf("ldr %s, #8; b 32; data.v128  %016x %016x",
 			formatVRegSized(i.rd, 128), i.u1, i.u2)
@@ -1386,6 +1478,12 @@ func (i *instruction) String() (str string) {
 			formatVRegSized(i.rm.nr(), size),
 			condFlag(i.u1),
 		)
+	case fpuMovFromInt:
+		if i.u1 == 1 {
+			str = fmt.Sprintf("fmov %s, %s", formatVRegSized(i.rd, 64), formatVRegSized(i.rn.nr(), 64))
+		} else {
+			str = fmt.Sprintf("fmov %s, %s", formatVRegSized(i.rd, 32), formatVRegSized(i.rn.nr(), 32))
+		}
 	case movToVec:
 		var size byte
 		arr := vecArrangement(i.u1)
@@ -1554,6 +1652,9 @@ func (i *instruction) String() (str string) {
 		str = fmt.Sprintf("mrs %s fpsr", formatVRegSized(i.rd, 64))
 	case call:
 		str = fmt.Sprintf("bl %s", ssa.FuncRef(i.u1))
+		if i.inlinedCall {
+			str += "; orr xzr, x19, x23, lsl #42"
+		}
 	case callInd:
 		str = fmt.Sprintf("bl %s", formatVRegSized(i.rn.nr(), 64))
 	case ret:
@@ -1582,6 +1683,16 @@ func (i *instruction) String() (str string) {
 			} else {
 				str = fmt.Sprintf("cbnz %s, %s", formatVRegSized(c.register(), size), target.String())
 			}
+		case condKindRegisterSignBit:
+			op := "tbz"
+			if c.signBitSet() {
+				op = "tbnz"
+			}
+			if offset := i.condBrOffset(); offset != 0 {
+				str = fmt.Sprintf("%s %s, #63, #%#x (%s)", op, formatVRegSized(c.register(), 64), offset, target.String())
+			} else {
+				str = fmt.Sprintf("%s %s, #63, %s", op, formatVRegSized(c.register(), 64), target.String())
+			}
 		case condKindCondFlagSet:
 			if offset := i.condBrOffset(); offset != 0 {
 				if target == labelInvalid {
@@ -1598,6 +1709,9 @@ func (i *instruction) String() (str string) {
 	case brTableSequence:
 		targetIndex := i.u1
 		str = fmt.Sprintf("br_table_sequence %s, table_index=%d", formatVRegSized(i.rn.nr(), 64), targetIndex)
+		if i.brTableBounded() {
+			str = fmt.Sprintf("br_table_sequence %s, table_index=%d, bounded", formatVRegSized(i.rn.nr(), 32), targetIndex)
+		}
 	case exitSequence:
 		str = fmt.Sprintf("exit_sequence %s", formatVRegSized(i.rn.nr(), 64))
 	case atomicRmw:
@@ -1654,6 +1768,10 @@ func (i *instruction) String() (str string) {
 		str = fmt.Sprintf("b %s", ssa.FuncRef(i.u1))
 	case tailCallInd:
 		str = fmt.Sprintf("b %s", formatVRegSized(i.rn.nr(), 64))
+	case yield:
+		str = fmt.Sprintf("yield %s", formatVRegSized(i.rn.nr(), 64))
+	case vecMap:
+		str = i.vecMapString()
 	case udf:
 		str = "udf"
 	case emitSourceOffsetInfo:
@@ -1787,6 +1905,8 @@ const (
 	cSet
 	// cCmpImm represents a conditional comparison with an immediate.
 	cCmpImm
+	// cCmpReg represents a conditional comparison of two registers.
+	cCmpReg
 	// fpuMov64 represents a FPU move. Distinct from a vector-register move; moving just 64 bits appears to be significantly faster.
 	fpuMov64
 	// fpuMov128 represents a vector register move.
@@ -1846,6 +1966,9 @@ const (
 	fpuCSel
 	// movToVec represents a move to a vector element from a GPR.
 	movToVec
+	// fpuMovFromInt represents FMOV (general) from a GPR to a scalar FP register. Unlike movToVec into lane
+	// 0, it writes the whole register, so it does not wait on whatever wrote the register last.
+	fpuMovFromInt
 	// movFromVec represents an unsigned move from a vector element to a GPR.
 	movFromVec
 	// movFromVecSigned represents a signed move from a vector element to a GPR.
@@ -1926,10 +2049,25 @@ const (
 	udf
 	// loadConstBlockArg represents a load of a constant block argument.
 	loadConstBlockArg
+	// yield is the slow path of a preemption check: it calls the yield trampoline,
+	// whose address the execution context in rn holds, with that context in x27 and
+	// the lr it overwrites saved in it:
+	//
+	//	mov x27, rn
+	//	str x30, [x27, #yieldSavedLR]
+	//	ldr x30, [x27, #checkModuleExitCodeTrampolineAddress]
+	//	blr x30
+	//
+	// The trampoline preserves every register, lr included, so to the allocator this
+	// is no call. See ssa.OpcodeYield.
+	yield
 
 	// emitSourceOffsetInfo is a dummy instruction to emit source offset info.
 	// The existence of this instruction does not affect the execution.
 	emitSourceOffsetInfo
+
+	// vecMap is an OpcodeVecMap until expandVecMaps turns it into its loop; see lowerVecMap.
+	vecMap
 
 	// ------------------- do not define below this line -------------------
 	numInstructionKinds
@@ -2019,6 +2157,14 @@ func (a aluOp) String() string {
 		return "ands"
 	case aluOpBic:
 		return "bic"
+	case aluOpBics:
+		return "bics"
+	case aluOpEon:
+		return "eon"
+	case aluOpUbfx:
+		return "ubfx"
+	case aluOpSbfx:
+		return "sbfx"
 	case aluOpEor:
 		return "eor"
 	case aluOpAddS:
@@ -2026,9 +2172,9 @@ func (a aluOp) String() string {
 	case aluOpSubS:
 		return "subs"
 	case aluOpSMulH:
-		return "sMulH"
+		return "smulh"
 	case aluOpUMulH:
-		return "uMulH"
+		return "umulh"
 	case aluOpSDiv:
 		return "sdiv"
 	case aluOpUDiv:
@@ -2045,6 +2191,14 @@ func (a aluOp) String() string {
 		return "madd"
 	case aluOpMSub:
 		return "msub"
+	case aluOpSMAddL:
+		return "smaddl"
+	case aluOpSMSubL:
+		return "smsubl"
+	case aluOpUMAddL:
+		return "umaddl"
+	case aluOpUMSubL:
+		return "umsubl"
 	}
 	panic(int(a))
 }
@@ -2090,6 +2244,21 @@ const (
 	// MAdd and MSub are only applicable for aluRRRR.
 	aluOpMAdd
 	aluOpMSub
+
+	// 32/64-bit Bitwise AND NOT, setting flags.
+	aluOpBics
+	// 32/64-bit Bitwise XOR NOT.
+	aluOpEon
+	// 32/64-bit Unsigned and signed bitfield extract, only for aluRRImmShift: see operandBitfield.
+	aluOpUbfx
+	aluOpSbfx
+
+	// Signed and unsigned 32x32->64-bit multiply-add and multiply-subtract, only for aluRRRR: smull and
+	// umull are these with the zero register to add.
+	aluOpSMAddL
+	aluOpSMSubL
+	aluOpUMAddL
+	aluOpUMSubL
 )
 
 // vecOp determines the type of vector operation. Instructions whose kind is one of
@@ -2235,6 +2404,10 @@ func (b vecOp) String() string {
 		return "trn1"
 	case vecOpTrn2:
 		return "trn2"
+	case vecOpUshr:
+		return "ushr"
+	case vecOpShl:
+		return "shl"
 	case vecOpFmin:
 		return "fmin"
 	case vecOpFmax:
@@ -2243,6 +2416,10 @@ func (b vecOp) String() string {
 		return "smull"
 	case vecOpSmull2:
 		return "smull2"
+	case vecOpUmull:
+		return "umull"
+	case vecOpUadalp:
+		return "uadalp"
 	}
 	panic(int(b))
 }
@@ -2319,12 +2496,17 @@ const (
 	vecOpZip1
 	vecOpSmull
 	vecOpSmull2
+	vecOpUmull
+	vecOpUadalp
 	// The rest of the "Advanced SIMD permute" family that zip1 belongs to.
 	vecOpZip2
 	vecOpUzp1
 	vecOpUzp2
 	vecOpTrn1
 	vecOpTrn2
+	// vecOpUshr and vecOpShl shift each lane right, unsigned, or left, by an immediate.
+	vecOpUshr
+	vecOpShl
 )
 
 // bitOp determines the type of bitwise operation, i.e. which member of the
@@ -2637,6 +2819,11 @@ const exitSequenceSize = 6 * 4 // 6 instructions as in encodeExitSequence.
 // size returns the size of the instruction in encoded bytes.
 func (i *instruction) size() int64 {
 	switch i.kind {
+	case call:
+		if i.inlinedCall {
+			return 8
+		}
+		return 4
 	case exitSequence:
 		return exitSequenceSize // 5 instructions as in encodeExitSequence.
 	case nop0, loadConstBlockArg:
@@ -2644,13 +2831,13 @@ func (i *instruction) size() int64 {
 	case emitSourceOffsetInfo:
 		return 0
 	case loadFpuConst32:
-		if i.u1 == 0 {
-			return 4 // zero loading can be encoded as a single instruction.
+		if _, ok := fpImm8(i.u1, 32); ok || i.u1 == 0 {
+			return 4 // zero, or an fmov immediate, is a single instruction.
 		}
 		return 4 + 4 + 4
 	case loadFpuConst64:
-		if i.u1 == 0 {
-			return 4 // zero loading can be encoded as a single instruction.
+		if _, ok := fpImm8(i.u1, 64); ok || i.u1 == 0 {
+			return 4 // zero, or an fmov immediate, is a single instruction.
 		}
 		return 4 + 4 + 8
 	case loadFpuConst128:
@@ -2663,7 +2850,12 @@ func (i *instruction) size() int64 {
 	case fpuConstPoolData:
 		return int64(i.fpuConstPoolDataWidth()) / 8 // 4, 8 or 16 bytes of raw data.
 	case brTableSequence:
+		if i.brTableBounded() {
+			return i.brTableBegin() + int64(uint32(i.u2))*4 + 4
+		}
 		return 4*4 + int64(i.u2)*4
+	case yield:
+		return 4 * 4
 	default:
 		return 4
 	}

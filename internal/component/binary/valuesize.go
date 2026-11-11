@@ -3,6 +3,8 @@ package binary
 import (
 	"fmt"
 	"sync"
+
+	"github.com/samyfodil/wazy/internal/u32"
 )
 
 // maxValueSize bounds every value type: Binary.md requires that, for every
@@ -156,7 +158,7 @@ func (v *sizeCheck) check(sp int, d TypeDesc) error {
 func (v *sizeCheck) resolve(sp int, idx uint32) (TypeDesc, bool) {
 	s := &v.spaces[sp]
 	if s.local {
-		if int(idx) < len(s.types) && s.types[idx] != nil {
+		if !u32.OutOfRange(idx, len(s.types)) && s.types[idx] != nil {
 			return s.types[idx], true
 		}
 		return nil, false
@@ -191,7 +193,7 @@ func (v *sizeCheck) fallback(sp int, idx uint32, depth int) layout64 {
 // not follow when the instance type itself aliases it from the component.
 func (v *sizeCheck) importedExportLayout(sp int, idx uint32, depth int) layout64 {
 	c := v.comp
-	if int(idx) >= len(c.TypeSpace) || c.TypeSpace[idx].Kind != TypeSpaceAlias {
+	if u32.OutOfRange(idx, len(c.TypeSpace)) || c.TypeSpace[idx].Kind != TypeSpaceAlias {
 		return layout64{}
 	}
 	al := c.Aliases[c.TypeSpace[idx].Alias]

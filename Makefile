@@ -202,10 +202,7 @@ spec_version_tail_call := 88e97b0f742f4c3ee01fea683da130f344dd7b02
 
 spectest_extended_const_dir := $(spectest_base_dir)/extended-const
 spectest_extended_const_testdata_dir := $(spectest_extended_const_dir)/testdata
-# These stay committed: they are a trimmed copy, inherited from wazero, of the proposal's data.wast, elem.wast
-# and global.wast (WebAssembly/testsuite@0a394e3c proposals/extended-const), which exists nowhere upstream.
-# The untrimmed files also assert 2.0's rule that a constant expression reads only imported globals, and
-# wazy, with extended-const enabled, accepts a module-defined one.
+spec_version_extended_const := 0a394e3cc9e08e0bcc3fc550916ccc9b1c71f981
 
 spectest_exception_handling_dir := $(spectest_base_dir)/exception-handling
 spectest_exception_handling_testdata_dir := $(spectest_exception_handling_dir)/testdata
@@ -368,9 +365,13 @@ build.spectest.threads: $(wast2json) $(spectest_testsuite_dir)/binary.wast
 
 .PHONY: build.spectest.extended_const
 build.spectest.extended_const: $(wast2json)
+	@$(call clean_fetched,$(spectest_extended_const_testdata_dir))
+	@cd $(spectest_extended_const_testdata_dir) \
+		&& $(gh_api_curl) 'https://api.github.com/repos/WebAssembly/testsuite/contents/proposals/extended-const?ref=$(spec_version_extended_const)' | jq -r '.[]| .download_url' | grep -E ".wast" | xargs -Iurl curl -sJL url -O
 	@cd $(spectest_extended_const_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		$(wast2json) --enable-extended-const --debug-names $$f; \
 	done
+	@rm -f $(spectest_extended_const_testdata_dir)/*.wast
 
 .PHONY: build.spectest.tail_call
 build.spectest.tail_call: $(wast2json)

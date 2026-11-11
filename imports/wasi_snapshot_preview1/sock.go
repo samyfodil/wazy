@@ -167,7 +167,7 @@ func sockShutdownFn(_ context.Context, mod api.Module, params []uint64) sys.Errn
 	if e, ok := fsc.LookupFile(fd); !ok {
 		return sys.EBADF // Not open
 	} else if conn, ok = e.File.(socketapi.TCPConn); !ok {
-		return sys.EBADF // Not a conn
+		return sys.ENOTSOCK
 	}
 
 	sysHow := 0

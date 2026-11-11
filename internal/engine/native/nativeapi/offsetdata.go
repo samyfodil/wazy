@@ -20,12 +20,11 @@ const (
 const (
 	// ExecutionContextOffsetExitCodeOffset is an offset of `exitCode` field in native.executionContext
 	ExecutionContextOffsetExitCodeOffset Offset = 0
-	// ExecutionContextOffsetGCPause is the flag a loop header polls so a collection can stop the world: the
-	// collector writes 1 into it and compiled code calls the GC trampoline when it sees one. It sits in the
-	// padding after the exit code, and the safepoint reuses the GC trampoline rather than adding a second
-	// address field, so the collector costs this struct nothing at all -- which matters because it is
-	// embedded in the per-call callEngine, close enough to a Go size class boundary that eight bytes would
-	// cost 256 per call. See wasm.GCSafepoint.
+	// ExecutionContextOffsetGCPause is the flag the collector writes 1 into to stop the world, which a call reads
+	// where it can park (see callEngine.parkIfPaused). It sits in the padding
+	// after the exit code, so the collector costs this struct nothing at all -- which matters because it is
+	// embedded in the per-call callEngine, close enough to a Go size class boundary that eight bytes would cost
+	// 256 per call.
 	ExecutionContextOffsetGCPause Offset = 4
 	// ExecutionContextOffsetCallerModuleContextPtr is an offset of `callerModuleContextPtr` field in native.executionContext
 	ExecutionContextOffsetCallerModuleContextPtr Offset = 8
@@ -104,6 +103,12 @@ const (
 	// ExecutionContextOffsetMemclrAddress is the offset of `memclrAddress`, the entry PC of
 	// the Go runtime's memclrNoHeapPointers, called by the memory.fill lowering.
 	ExecutionContextOffsetMemclrAddress Offset = 728
+	// ExecutionContextOffsetPreemptWordAddress is the offset of `preemptWordAddress`, the address
+	// of the calling goroutine's g.stackguard0. See StackPreempt.
+	ExecutionContextOffsetPreemptWordAddress Offset = 736
+	// ExecutionContextOffsetYieldSavedLR is the offset of `yieldSavedLR`, where arm64 code keeps
+	// the link register while it yields from a preemption check. See ssa.OpcodeYield.
+	ExecutionContextOffsetYieldSavedLR Offset = 744
 )
 
 // AssertSavedRegistersFit panics if a save/restore layout that ends at absolute offset end
@@ -296,8 +301,3 @@ func align16(o Offset) Offset {
 func align8(o Offset) Offset {
 	return (o + 7) &^ 7
 }
-
-// GCRootsMissing is the count a GC safepoint writes into the root region's header in place of the number of
-// words it spilled, when the region is too small to hold them. The collector then cannot see that call's roots
-// and reclaims nothing. See frontend's materializeGCRoots and callEngine.ScanGCRoots.
-const GCRootsMissing = 0xffff_ffff

@@ -1,0 +1,23 @@
+package example:store@1.0.0;
+
+interface kv {
+  /// A named bucket of key/value pairs, owned by the host.
+  resource bucket {
+    constructor(name: string);
+    put: func(key: string, value: list<u8>);
+    get: func(key: string) -> option<list<u8>>;
+  }
+
+  variant error {
+    no-such-bucket,
+    denied(string),
+  }
+
+  /// Returns every key in the bucket, or why it could not.
+  list-keys: func(b: borrow<bucket>) -> result<list<string>, error>;
+}
+
+world app {
+  import kv;
+  export run: func() -> string;
+}

@@ -99,6 +99,10 @@ func Test_pollOneoff_NoClockSubscription(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, nsubscriptions, nevents)
 	require.Zero(t, len(slept))
+	// stdout is writable, which wasi-testsuite's poll_oneoff_stdio checks.
+	errno, ok := mod.Memory().ReadUint16Le(out + 8)
+	require.True(t, ok)
+	require.Equal(t, uint16(wasip1.ErrnoSuccess), errno)
 }
 
 func Test_pollOneoff_Errors(t *testing.T) {
@@ -143,6 +147,20 @@ func Test_pollOneoff_Errors(t *testing.T) {
 			expectedErrno:  wasip1.ErrnoFault,
 			expectedLog: `
 ==> wasi_snapshot_preview1.poll_oneoff(in=0,out=0,nsubscriptions=1)
+<== (nevents=,errno=EFAULT)
+`,
+		},
+		{
+			// 0x20000001*48 and 0x20000001*32 wrap to 48 and 32 in 32 bits:
+			// room for one subscription, which the loop would index past.
+			name:           "nsubscriptions overflows 32 bits",
+			nsubscriptions: 0x20000001,
+			mem:            clockNsSub(0),
+			out:            128, // past in
+			resultNevents:  512, // past out
+			expectedErrno:  wasip1.ErrnoFault,
+			expectedLog: `
+==> wasi_snapshot_preview1.poll_oneoff(in=0,out=128,nsubscriptions=536870913)
 <== (nevents=,errno=EFAULT)
 `,
 		},
@@ -230,12 +248,12 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 `,
 		},
 		{
-			name:            "20ms timeout, fdread on tty (buffer ready): only the fd event, the clock has not expired",
+			name:            "1m timeout, fdread on tty (buffer ready): only the fd event, the clock has not expired",
 			nsubscriptions:  2,
 			expectedNevents: 1,
 			stdin:           &ttyStdinFile{StdinFile: sys.StdinFile{Reader: strings.NewReader("test")}},
 			mem: concat(
-				clockNsSub(20*1000*1000),
+				clockNsSub(60*1000*1000*1000), // a minute: a short clock could expire on a loaded machine
 				fdReadSub,
 			),
 			expectedErrno: wasip1.ErrnoSuccess,
@@ -331,12 +349,12 @@ func Test_pollOneoff_Stdin(t *testing.T) {
 `,
 		},
 		{
-			name:            "20ms timeout, fdread on regular file: only the fd event, the clock has not expired",
+			name:            "1m timeout, fdread on regular file: only the fd event, the clock has not expired",
 			nsubscriptions:  2,
 			expectedNevents: 1,
 			stdin:           &sys.StdinFile{Reader: strings.NewReader("test")},
 			mem: concat(
-				clockNsSub(20*1000*1000),
+				clockNsSub(60*1000*1000*1000), // a minute: a short clock could expire on a loaded machine
 				fdReadSub,
 			),
 			expectedErrno: wasip1.ErrnoSuccess,
@@ -500,12 +518,13 @@ func Test_pollOneoff_Zero(t *testing.T) {
 
 	mod.Memory().Write(0,
 		concat(
-			clockNsSub(20*1000*1000),
+			clockNsSub(60*1000*1000*1000),
 			fdReadSub,
 		),
 	)
 
-	// The fd is ready; the 20ms clock has not expired, so it is not reported.
+	// The fd is ready; the minute's clock has not expired, so it is not reported. A short clock could
+	// have expired by the time a loaded machine gets to check it.
 	expectedMem := []byte{
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // userdata
 		byte(wasip1.ErrnoSuccess), 0x0, // errno is 16 bit

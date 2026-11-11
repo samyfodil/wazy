@@ -25,7 +25,7 @@ const (
 	entrySubtask                // *subtask, itself a Waitable (async-lowered call in flight)
 	entryStreamEnd              // *streamEnd (Phase 2)
 	entryFutureEnd              // *futureEnd (Phase 2)
-	entryErrorContext           // *errorContext (Phase 2)
+	entryErrorContext           // *ErrorContext (Phase 2)
 )
 
 // tableEntry is anything a handleTable slot can hold. resourceEntry is the

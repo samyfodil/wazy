@@ -1,8 +1,8 @@
 package sysfs
 
 import (
-	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -33,10 +33,8 @@ func TestDirFS(t *testing.T) {
 		arg0 := os.Args[0] // should be safe in scratch tests which don't have the source mounted.
 
 		testFS := DirFS(arg0)
-		d, errno := testFS.OpenFile(".", sys.O_RDONLY, 0)
-		require.EqualErrno(t, 0, errno)
-		_, errno = d.Readdir(-1)
-		require.EqualErrno(t, sys.EBADF, errno)
+		_, errno := testFS.OpenFile(".", sys.O_RDONLY, 0)
+		require.EqualErrno(t, sys.ENOTDIR, errno)
 	})
 }
 
@@ -581,7 +579,7 @@ func TestDirFS_Utimesns(t *testing.T) {
 				require.NoError(t, errno)
 
 				link := file + "-link"
-				require.NoError(t, os.Symlink(file, link))
+				require.NoError(t, os.Symlink("file", link))
 
 				dir := path.Join(tmpDir, "dir")
 				errno = os.Mkdir(dir, 0o700)
@@ -644,11 +642,9 @@ func TestDirFS_OpenFile(t *testing.T) {
 
 	testOpen_O_RDWR(t, tmpDir, testFS)
 
-	t.Run("path outside root valid", func(t *testing.T) {
-		_, err := testFS.OpenFile("../foo", sys.O_RDONLY, 0)
-
-		// sys.FS allows relative path lookups
-		require.True(t, errors.Is(err, fs.ErrNotExist))
+	t.Run("path outside root", func(t *testing.T) {
+		_, errno := testFS.OpenFile("../foo", sys.O_RDONLY, 0)
+		require.EqualErrno(t, sys.EPERM, errno)
 	})
 }
 
@@ -756,6 +752,12 @@ func TestDirFS_Link(t *testing.T) {
 	require.EqualErrno(t, testFS.Link("sub/test.txt", ""), sys.EEXIST)
 	require.EqualErrno(t, testFS.Link("sub/test.txt", "/"), sys.EEXIST)
 	require.EqualErrno(t, 0, testFS.Link("sub/test.txt", "foo"))
+	// A directory cannot be hard linked, which Windows reports as access
+	// denied.
+	require.EqualErrno(t, sys.EPERM, testFS.Link("sub", "sub-link"))
+	// A trailing slash names a directory, which a link never makes.
+	require.EqualErrno(t, sys.ENOENT, testFS.Link("sub/test.txt", "bar/"))
+	require.EqualErrno(t, sys.EEXIST, testFS.Link("sub/test.txt", "sub/"))
 }
 
 func TestDirFS_Symlink(t *testing.T) {
@@ -771,7 +773,10 @@ func TestDirFS_Symlink(t *testing.T) {
 	require.EqualErrno(t, sys.EEXIST, testFS.Symlink("sub/test.txt", "sub/test.txt"))
 	// Non-existing old name is allowed.
 	require.EqualErrno(t, 0, testFS.Symlink("non-existing", "aa"))
+	// A dangling symlink still exists.
+	require.EqualErrno(t, sys.EEXIST, testFS.Symlink("non-existing", "aa"))
 	require.EqualErrno(t, 0, testFS.Symlink("sub/", "symlinked-subdir"))
+	require.EqualErrno(t, sys.EEXIST, testFS.Symlink("sub/", "symlinked-subdir"))
 
 	st, err := os.Lstat(path.Join(tmpDir, "aa"))
 	require.NoError(t, err)
@@ -790,4 +795,420 @@ func TestDirFS_Readlink(t *testing.T) {
 
 	testFS := DirFS(tmpDir)
 	testReadlink(t, testFS, testFS)
+}
+
+// forBinding runs test once with a DirFS and once with one BindFS bound for a
+// module instance, which resolves deeper names another way on Linux.
+func forBinding(t *testing.T, test func(t *testing.T, mount func(dir string) sys.FS)) {
+	t.Run("unbound", func(t *testing.T) { test(t, DirFS) })
+	t.Run("bound", func(t *testing.T) {
+		test(t, func(dir string) sys.FS {
+			fs, closer := BindFS(DirFS(dir))
+			t.Cleanup(func() { require.NoError(t, closer.Close()) })
+			return fs
+		})
+	})
+}
+
+// TestDirFS_confined checks that no path leads outside the mounted directory,
+// through ".." in a symlink the guest made or in one already on the host.
+func TestDirFS_confined(t *testing.T) {
+	t.Parallel()
+	forBinding(t, testConfined)
+}
+
+func testConfined(t *testing.T, mount func(dir string) sys.FS) {
+	tmpDir := t.TempDir()
+	outside := path.Join(tmpDir, "outside")
+	require.NoError(t, os.Mkdir(outside, 0o700))
+	secret := path.Join(outside, "secret")
+	require.NoError(t, os.WriteFile(secret, []byte("secret"), 0o600))
+	mnt := path.Join(tmpDir, "mnt")
+	require.NoError(t, os.Mkdir(mnt, 0o700))
+	require.NoError(t, os.WriteFile(path.Join(mnt, "inside"), []byte("inside"), 0o600))
+	require.NoError(t, os.Symlink(secret, path.Join(mnt, "host-link")))
+	// An absolute symlink is refused even where it names a file inside, as
+	// one the guest makes is.
+	require.NoError(t, os.Symlink(path.Join(mnt, "inside"), path.Join(mnt, "absolute-link")))
+	require.NoError(t, os.Mkdir(path.Join(mnt, "sub"), 0o700))
+
+	testFS := mount(mnt)
+	require.EqualErrno(t, 0, testFS.Symlink("../outside/secret", "file-link"))
+	require.EqualErrno(t, 0, testFS.Symlink("../outside", "dir-link"))
+	require.EqualErrno(t, 0, testFS.Symlink("inside", "inside-link"))
+	require.EqualErrno(t, 0, testFS.Symlink("../../outside/secret", "sub/file-link"))
+	require.EqualErrno(t, 0, testFS.Symlink("../inside", "sub/inside-link"))
+
+	for _, name := range []string{"file-link", "dir-link/secret", "host-link", "absolute-link", "sub/file-link", "sub/../file-link"} {
+		t.Run(name, func(t *testing.T) {
+			_, errno := testFS.OpenFile(name, sys.O_RDONLY, 0)
+			require.EqualErrno(t, sys.EPERM, errno)
+			_, errno = testFS.OpenFile(name, sys.O_WRONLY|sys.O_TRUNC, 0)
+			require.EqualErrno(t, sys.EPERM, errno)
+			_, errno = testFS.Stat(name)
+			require.EqualErrno(t, sys.EPERM, errno)
+			require.EqualErrno(t, sys.EPERM, testFS.Utimens(name, 0, 0))
+		})
+	}
+
+	_, errno := testFS.Lstat("dir-link/secret")
+	require.EqualErrno(t, sys.EPERM, errno)
+	_, errno = testFS.Readlink("dir-link/secret")
+	require.EqualErrno(t, sys.EPERM, errno)
+	require.EqualErrno(t, sys.EPERM, testFS.Unlink("dir-link/secret"))
+	require.EqualErrno(t, sys.EPERM, testFS.Rename("dir-link/secret", "stolen"))
+	require.EqualErrno(t, sys.EPERM, testFS.Rename("inside", "dir-link/planted"))
+	require.EqualErrno(t, sys.EPERM, testFS.Link("dir-link/secret", "hard-link"))
+	require.EqualErrno(t, sys.EPERM, testFS.Mkdir("dir-link/new", 0o700))
+	require.EqualErrno(t, sys.EPERM, testFS.Symlink("x", "dir-link/new-link"))
+
+	b, err := os.ReadFile(secret)
+	require.NoError(t, err)
+	require.Equal(t, "secret", string(b))
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(entries))
+
+	// A symlink that stays inside the directory still resolves.
+	for _, name := range []string{"inside-link", "sub/inside-link", "sub/../inside-link"} {
+		f, errno := testFS.OpenFile(name, sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno, name)
+		require.EqualErrno(t, 0, f.Close())
+		st, errno := testFS.Stat(name)
+		require.EqualErrno(t, 0, errno, name)
+		require.Equal(t, int64(len("inside")), st.Size)
+		st, errno = testFS.Lstat(name)
+		require.EqualErrno(t, 0, errno, name)
+		require.Equal(t, fs.ModeSymlink, st.Mode.Type())
+	}
+	// The links themselves are inside, so they can be read and removed.
+	link, errno := testFS.Readlink("file-link")
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, "../outside/secret", link)
+	require.EqualErrno(t, 0, testFS.Unlink("file-link"))
+}
+
+func TestDirFS_OpenFile_noFollow(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "sub", "dir"), 0o700))
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "sub", "file"), nil, 0o600))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("dir", "sub/dir-link"))
+		require.EqualErrno(t, 0, testFS.Symlink("file", "sub/file-link"))
+
+		// Through the root itself and through a directory in it, which takes
+		// a walk.
+		for _, prefix := range []string{"", "sub/../"} {
+			if prefix == "" {
+				require.EqualErrno(t, 0, testFS.Symlink("sub/dir", "dir-link"))
+				require.EqualErrno(t, 0, testFS.Symlink("sub/file", "file-link"))
+			} else {
+				prefix = "sub/"
+			}
+			_, errno := testFS.OpenFile(prefix+"file-link", sys.O_RDONLY|sys.O_NOFOLLOW, 0)
+			require.EqualErrno(t, sys.ELOOP, errno)
+			_, errno = testFS.OpenFile(prefix+"dir-link", sys.O_RDONLY|sys.O_NOFOLLOW, 0)
+			require.EqualErrno(t, sys.ELOOP, errno)
+			_, errno = testFS.OpenFile(prefix+"dir-link", sys.O_RDONLY|sys.O_DIRECTORY|sys.O_NOFOLLOW, 0)
+			require.EqualErrno(t, sys.ENOTDIR, errno)
+
+			f, errno := testFS.OpenFile(prefix+"file-link", sys.O_RDONLY, 0)
+			require.EqualErrno(t, 0, errno)
+			require.EqualErrno(t, 0, f.Close())
+		}
+	})
+}
+
+func TestBindFS(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := path.Join(tmpDir, "dir")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	require.NoError(t, os.WriteFile(path.Join(dir, "f"), nil, 0o600))
+
+	t.Run("DirFS", func(t *testing.T) {
+		bound, closer := BindFS(DirFS(dir))
+		require.NotNil(t, closer)
+		_, errno := bound.Stat("f")
+		require.EqualErrno(t, 0, errno)
+
+		// The directory it opened is the one it keeps using. Windows refuses
+		// to rename a directory while it is open.
+		if runtime.GOOS != "windows" {
+			require.NoError(t, os.Rename(dir, dir+"-moved"))
+			defer func() { require.NoError(t, os.Rename(dir+"-moved", dir)) }()
+			_, errno = bound.Stat("f")
+			require.EqualErrno(t, 0, errno)
+		}
+		require.NoError(t, closer.Close())
+	})
+
+	t.Run("ReadFS", func(t *testing.T) {
+		bound, closer := BindFS(&ReadFS{FS: DirFS(dir)})
+		require.NotNil(t, closer)
+		_, ok := bound.(*ReadFS)
+		require.True(t, ok)
+		require.EqualErrno(t, sys.EROFS, bound.Mkdir("new", 0o700))
+		require.NoError(t, closer.Close())
+	})
+
+	t.Run("other", func(t *testing.T) {
+		adapted := &AdaptFS{FS: os.DirFS(dir)}
+		bound, closer := BindFS(adapted)
+		require.Nil(t, closer)
+		require.Equal(t, sys.FS(adapted), bound)
+	})
+}
+
+// TestDirFS_dotElems checks that a path ending in "." or ".." names the
+// directory it reached, which unlink, rmdir and rename refuse to act on as
+// POSIX does. Windows acts on that directory.
+func TestDirFS_dotElems(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "sub", "empty"), 0o700))
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "f"), nil, 0o600))
+		testFS := mount(tmpDir)
+
+		require.EqualErrno(t, sys.EINVAL, testFS.Rmdir("."))
+		require.EqualErrno(t, sys.EINVAL, testFS.Rmdir("sub/empty/."))
+		require.EqualErrno(t, sys.ENOTEMPTY, testFS.Rmdir("sub/empty/.."))
+		require.EqualErrno(t, sys.EISDIR, testFS.Unlink("sub/empty/."))
+		require.EqualErrno(t, sys.EISDIR, testFS.Unlink("sub/.."))
+		require.EqualErrno(t, sys.EINVAL, testFS.Rename("sub/empty/.", "moved"))
+		require.EqualErrno(t, sys.EINVAL, testFS.Rename("f", "sub/empty/."))
+		require.EqualErrno(t, sys.EINVAL, testFS.Rename("sub/empty/..", "moved"))
+
+		for _, dir := range []string{tmpDir, path.Join(tmpDir, "sub"), path.Join(tmpDir, "sub", "empty")} {
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			require.True(t, info.IsDir())
+		}
+	})
+}
+
+// TestDirFS_notDir checks that a path through a file reports ENOTDIR, and one
+// through a missing directory ENOENT. Windows reports both the same way.
+func TestDirFS_notDir(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "f"), nil, 0o600))
+		testFS := mount(tmpDir)
+
+		for _, name := range []string{"f/x", "f/x/y"} {
+			_, errno := testFS.OpenFile(name, sys.O_RDONLY, 0)
+			require.EqualErrno(t, sys.ENOTDIR, errno, name)
+			_, errno = testFS.OpenFile(name, sys.O_WRONLY|sys.O_CREAT, 0o600)
+			require.EqualErrno(t, sys.ENOTDIR, errno, name)
+			_, errno = testFS.Stat(name)
+			require.EqualErrno(t, sys.ENOTDIR, errno, name)
+		}
+		for _, name := range []string{"missing/x", "missing/x/y"} {
+			_, errno := testFS.OpenFile(name, sys.O_RDONLY, 0)
+			require.EqualErrno(t, sys.ENOENT, errno, name)
+			_, errno = testFS.Stat(name)
+			require.EqualErrno(t, sys.ENOENT, errno, name)
+		}
+	})
+}
+
+// TestDirFS_Rename_caseOnly checks that renaming a directory to a name that
+// differs only in case renames it, where on a case-insensitive filesystem
+// the new name already reaches the directory itself.
+func TestDirFS_Rename_caseOnly(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.Mkdir(path.Join(tmpDir, "renameFROM"), 0o700))
+		testFS := mount(tmpDir)
+
+		require.EqualErrno(t, 0, testFS.Rename("renameFROM", "RENAMEfrom"))
+		entries, err := os.ReadDir(tmpDir)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(entries))
+		require.Equal(t, "RENAMEfrom", entries[0].Name())
+	})
+}
+
+// TestDirFS_Rename_overSymlink checks that renaming onto a symlink replaces
+// the symlink, even one to a directory, as rename(2) does.
+func TestDirFS_Rename_overSymlink(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.Mkdir(path.Join(tmpDir, "dir"), 0o700))
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "f"), []byte("f"), 0o600))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("dir", "dir-link"))
+
+		require.EqualErrno(t, 0, testFS.Rename("f", "dir-link"))
+		st, errno := testFS.Lstat("dir-link")
+		require.EqualErrno(t, 0, errno)
+		require.True(t, st.Mode.IsRegular())
+		info, err := os.Stat(path.Join(tmpDir, "dir"))
+		require.NoError(t, err)
+		require.True(t, info.IsDir())
+	})
+}
+
+// TestDirFS_Link_dirSymlink checks that linking a symlink to a directory
+// links the symlink, which NTFS cannot hard link.
+func TestDirFS_Link_dirSymlink(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "sub", "dir"), 0o700))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("../sub/dir", "sub/link"))
+
+		require.EqualErrno(t, 0, testFS.Link("sub/link", "sub/copy"))
+		require.EqualErrno(t, sys.EEXIST, testFS.Link("sub/link", "sub/copy"))
+		require.EqualErrno(t, sys.EEXIST, testFS.Link("sub/link", "sub/dir"))
+		dst, errno := testFS.Readlink("sub/copy")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, "../sub/dir", dst)
+		st, errno := testFS.Stat("sub/copy")
+		require.EqualErrno(t, 0, errno)
+		require.True(t, st.Mode.IsDir())
+	})
+}
+
+// TestDirFS_Mkdir_overSymlink checks that mkdir on a symlink reports that it
+// exists, also where the link's target has "/" separators, which Windows
+// does not read in a symlink target.
+func TestDirFS_Mkdir_overSymlink(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "a", "b"), 0o700))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("a/../a/b", "link"))
+
+		require.EqualErrno(t, sys.EEXIST, testFS.Mkdir("link", 0o700))
+		dst, errno := testFS.Readlink("link")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, "a/../a/b", dst)
+		st, errno := testFS.Stat("link/")
+		require.EqualErrno(t, 0, errno)
+		require.True(t, st.Mode.IsDir())
+	})
+}
+
+// TestDirFS_backslash checks that a backslash is part of a name, not the
+// separator Windows takes it for.
+func TestDirFS_backslash(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.Mkdir(path.Join(tmpDir, "dir"), 0o700))
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, "dir", "x"), nil, 0o600))
+	testFS := DirFS(tmpDir)
+
+	_, errno := testFS.OpenFile(`dir\x`, sys.O_RDONLY, 0)
+	require.EqualErrno(t, sys.ENOENT, errno)
+	_, errno = testFS.Stat(`dir\x`)
+	require.EqualErrno(t, sys.ENOENT, errno)
+	require.EqualErrno(t, sys.ENOENT, testFS.Unlink(`dir\x`))
+}
+
+// TestOsFile_DirFS checks that a directory opened through a bound DirFS
+// resolves paths through itself, so they reach it after a rename.
+func TestOsFile_DirFS(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.Mkdir(path.Join(tmpDir, "a"), 0o700))
+	testFS, closer := BindFS(DirFS(tmpDir))
+	defer closer.Close()
+
+	d, errno := testFS.OpenFile("a", sys.O_RDONLY|sys.O_DIRECTORY, 0)
+	require.EqualErrno(t, 0, errno)
+	defer d.Close()
+
+	require.EqualErrno(t, 0, testFS.Rename("a", "b"))
+	name := "b"
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, name, "f"), []byte("hello"), 0o600))
+
+	dirFS, errno := d.(DirHandle).DirFS()
+	require.EqualErrno(t, 0, errno)
+	f, errno := dirFS.OpenFile("f", sys.O_RDONLY, 0)
+	require.EqualErrno(t, 0, errno)
+	defer f.Close()
+	buf := make([]byte, 5)
+	n, errno := f.Read(buf)
+	require.EqualErrno(t, 0, errno)
+	require.Equal(t, "hello", string(buf[:n]))
+	// It stays inside the directory.
+	_, errno = dirFS.Stat("../" + name)
+	require.EqualErrno(t, sys.EPERM, errno)
+
+	t.Run("unbound", func(t *testing.T) {
+		d, errno := DirFS(tmpDir).OpenFile(name, sys.O_RDONLY|sys.O_DIRECTORY, 0)
+		require.EqualErrno(t, 0, errno)
+		defer d.Close()
+		_, errno = d.(DirHandle).DirFS()
+		require.EqualErrno(t, sys.ENOSYS, errno)
+	})
+	t.Run("file", func(t *testing.T) {
+		f, errno := testFS.OpenFile(name+"/f", sys.O_RDONLY, 0)
+		require.EqualErrno(t, 0, errno)
+		defer f.Close()
+		_, errno = f.(DirHandle).DirFS()
+		require.EqualErrno(t, sys.ENOTDIR, errno)
+	})
+}
+
+// TestDirFS_Lutimens checks the times of a symlink itself are set, and those
+// of what it points to are left alone.
+func TestDirFS_Lutimens(t *testing.T) {
+	t.Parallel()
+	forBinding(t, func(t *testing.T, mount func(dir string) sys.FS) {
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(path.Join(tmpDir, "sub"), 0o700))
+		require.NoError(t, os.WriteFile(path.Join(tmpDir, "sub", "file"), nil, 0o600))
+		testFS := mount(tmpDir)
+		require.EqualErrno(t, 0, testFS.Symlink("file", "sub/link"))
+
+		fileSt, errno := testFS.Stat("sub/file")
+		require.EqualErrno(t, 0, errno)
+		linkSt, errno := testFS.Lstat("sub/link")
+		require.EqualErrno(t, 0, errno)
+
+		mtim := linkSt.Mtim - int64(200*time.Second)
+		require.EqualErrno(t, 0, testFS.(LutimensFS).Lutimens("sub/link", sys.UTIME_OMIT, mtim))
+
+		linkSt, errno = testFS.Lstat("sub/link")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, mtim, linkSt.Mtim)
+		after, errno := testFS.Stat("sub/file")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, fileSt.Mtim, after.Mtim)
+
+		// A file that is not a symlink has its own times set as well.
+		require.EqualErrno(t, 0, testFS.(LutimensFS).Lutimens("sub/file", sys.UTIME_OMIT, mtim))
+		after, errno = testFS.Stat("sub/file")
+		require.EqualErrno(t, 0, errno)
+		require.Equal(t, mtim, after.Mtim)
+	})
+}
+
+// TestDirFS_OpenFile_appendTruncate checks a file opened to append and
+// truncate appends, which on Windows takes reopening it after truncating.
+func TestDirFS_OpenFile_appendTruncate(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, "f"), []byte("old content"), 0o600))
+	testFS := DirFS(tmpDir)
+
+	f, errno := testFS.OpenFile("f", sys.O_WRONLY|sys.O_CREAT|sys.O_TRUNC|sys.O_APPEND, 0o600)
+	require.EqualErrno(t, 0, errno)
+	defer f.Close()
+	_, errno = f.Write([]byte("ab"))
+	require.EqualErrno(t, 0, errno)
+	_, errno = f.Seek(0, io.SeekStart)
+	require.EqualErrno(t, 0, errno)
+	_, errno = f.Write([]byte("cd"))
+	require.EqualErrno(t, 0, errno)
+
+	b, err := os.ReadFile(path.Join(tmpDir, "f"))
+	require.NoError(t, err)
+	require.Equal(t, "abcd", string(b))
 }
