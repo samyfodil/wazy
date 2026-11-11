@@ -235,9 +235,6 @@ def run_scenario(sc):
         current_task = ref.current_task()
         current_task.state = ref.Task.State.RESOLVED
 
-    def cx_of(o):
-        return ref.LiftLowerContext(o, inst)
-
     def mem_write(ptr, data):
         mem[ptr:ptr + len(data)] = data
 

@@ -86,7 +86,7 @@ def make_context():
     opts.string_encoding = "utf8"
     allocator = BumpAllocator()
     opts.realloc = allocator
-    cx = Ctx(opts, None, None)
+    cx = Ctx("lower", opts, None, None)
     return cx, mem, allocator
 
 def build_type(spec, by_name):
@@ -229,7 +229,7 @@ def load_oracle_flat():
 def core_vals_to_dicts(flat_vals, flat_types):
     """Convert core values (int/float) to {kind, bits} dicts, using flat_types to determine sizes."""
     result = []
-    for fv, ft in zip(flat_vals, flat_types):
+    for fv, ft in zip(flat_vals, flat_types, strict=True):
         if ft == 'f32':
             bits = struct.unpack('<I', struct.pack('<f', float(fv)))[0]
             result.append({"kind": "f32", "bits": bits})
@@ -240,6 +240,8 @@ def core_vals_to_dicts(flat_vals, flat_types):
             result.append({"kind": "i32", "bits": int(fv) & 0xFFFFFFFF})
         elif ft == 'i64':
             result.append({"kind": "i64", "bits": int(fv) & 0xFFFFFFFFFFFFFFFF})
+        else:
+            raise SystemExit(f"unknown core type {ft!r}")
     return result
 
 def main():
@@ -269,34 +271,30 @@ def main():
         # pointers are reproducible and independent of iteration order.
         cx, mem, allocator = make_context()
 
-        try:
-            # Lower the value to flat
-            flat_vals = ref.lower_flat(cx, v, t)
+        # No try: a value the reference cannot lower is a battery or harness
+        # bug, and a golden that silently drops it tests less than it says.
+        flat_vals = ref.lower_flat(cx, v, t)
+        flat_types = ref.flatten_type(cx, t)
+        if len(flat_vals) != len(flat_types):
+            raise SystemExit(f"{value_name} ({type_name}): lowered to {len(flat_vals)} core values, but the type flattens to {len(flat_types)}")
+        core_vals = core_vals_to_dicts(flat_vals, flat_types)
 
-            # Get the flat types for proper kind inference
-            flat_types = ref.flatten_type(t, cx.opts)
+        # Capture the bytes written into linear memory by this lowering
+        # (if any). watermark is where the bump allocator would hand out
+        # the *next* pointer, i.e. one past the last byte written.
+        watermark = allocator.next_free
+        mem_hex = bytes(mem.bytes[BASE_PTR:watermark]).hex()
 
-            # Convert core values to dicts
-            core_vals = core_vals_to_dicts(flat_vals, flat_types)
+        golden.append({
+            "name": value_name,
+            "type": type_name,
+            "core_vals": core_vals,
+            "mem_base": BASE_PTR,
+            "mem_hex": mem_hex,
+        })
 
-            # Capture the bytes written into linear memory by this lowering
-            # (if any). watermark is where the bump allocator would hand out
-            # the *next* pointer, i.e. one past the last byte written.
-            watermark = allocator.next_free
-            mem_hex = bytes(mem.bytes[BASE_PTR:watermark]).hex()
-
-            golden.append({
-                "name": value_name,
-                "type": type_name,
-                "core_vals": core_vals,
-                "mem_base": BASE_PTR,
-                "mem_hex": mem_hex,
-            })
-        except Exception as e:
-            print(f"Error lowering {value_name} ({type_name}): {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
-            pass
+    if len(golden) != len(oracle["values"]):
+        raise SystemExit(f"{len(golden)} golden entries for {len(oracle['values'])} values")
 
     # Write golden file
     output_path = os.path.join(HERE, 'oracle_flat_golden.json')
