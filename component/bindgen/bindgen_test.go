@@ -1,52 +1,66 @@
 package bindgen
 
 import (
+	"embed"
 	"go/ast"
+	"go/build"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/samyfodil/wazy/component/wit"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
+// The fixtures' WIT and their committed bindings, embedded: a scratch or
+// BSD builder runs the test binary without the source tree.
+//
+//go:embed internal/kitchen/guest/wit internal/kitchen/bindings.go
+//go:embed internal/convtest/conv.wit internal/convtest/bindings.go
+//go:embed internal/storebind/store.wit internal/storebind/bindings.go
+var fixtures embed.FS
+
 // The committed bindings of each fixture are what Generate writes today: a
 // change to the generator shows up as a diff in them, and their packages'
 // tests then run the new output against real guests.
 func TestGolden(t *testing.T) {
 	for _, c := range []struct{ wit, world, pkg string }{
-		{"../../examples/custom-wit/testdata/store.wit", "app", "storebind"},
+		{"internal/storebind/store.wit", "app", "storebind"},
 		{"internal/kitchen/guest/wit", "kitchen", "kitchen"},
 		{"internal/convtest/conv.wit", "conv", "convtest"},
 	} {
 		t.Run(c.pkg, func(t *testing.T) {
 			got, err := generate(c.wit, Options{Package: c.pkg, World: c.world})
 			require.NoError(t, err)
-			want, err := os.ReadFile("internal/" + c.pkg + "/bindings.go")
+			want, err := fixtures.ReadFile("internal/" + c.pkg + "/bindings.go")
 			require.NoError(t, err)
 			if string(want) != string(got) {
 				t.Fatalf("internal/%s/bindings.go is stale: regenerate it with\n"+
-					"  go run ./cmd/wazy-bindgen -wit %s -world %s -package %s -o component/bindgen/internal/%s/bindings.go",
+					"  go run ./cmd/wazy-bindgen -wit component/bindgen/%s -world %s -package %s -o component/bindgen/internal/%s/bindings.go",
 					c.pkg, c.wit, c.world, c.pkg, c.pkg)
 			}
 		})
 	}
 }
 
+// generate parses the fixture WIT at path, a file or a directory of them.
 func generate(path string, opts Options) ([]byte, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
 	var pkg *wit.Package
-	if fi.IsDir() {
-		pkg, err = wit.ParseDir(path)
+	var err error
+	if strings.HasSuffix(path, ".wit") {
+		var src []byte
+		if src, err = fixtures.ReadFile(path); err == nil {
+			pkg, err = wit.Parse(path, string(src))
+		}
 	} else {
-		pkg, err = wit.ParseFile(path)
+		pkg, err = wit.ParseFS(fixtures, path)
 	}
 	if err != nil {
 		return nil, err
@@ -74,12 +88,35 @@ func genSrc(t *testing.T, src string, opts Options) (string, error) {
 // srcImporter is shared so each check reuses the packages the last imported.
 var (
 	srcFset     = token.NewFileSet()
-	srcImporter = importer.ForCompiler(srcFset, "source", nil)
+	srcImporter = sourceImporter()
 )
 
+var haveToolchain = sync.OnceValue(func() bool {
+	_, err := os.Stat(filepath.Join(build.Default.GOROOT, "src", "context"))
+	if err != nil {
+		return false
+	}
+	_, err = exec.LookPath(filepath.Join(build.Default.GOROOT, "bin", "go"))
+	return err == nil
+})
+
+// sourceImporter type-checks imports from source with cgo off, so net and
+// the rest need no C toolchain, which the 386, scratch and BSD builders lack.
+func sourceImporter() types.Importer {
+	build.Default.CgoEnabled = false
+	return importer.ForCompiler(srcFset, "source", nil)
+}
+
 // typecheck fails t unless src is a Go package that compiles against wazy.
+// It needs the toolchain and its sources, as it type-checks the imports from
+// source: a scratch image ships the test binary alone, and the generated
+// code is checked on every builder that has them.
 func typecheck(t *testing.T, src []byte) {
 	t.Helper()
+	if !haveToolchain() {
+		t.Log("no Go toolchain to type-check the generated code against")
+		return
+	}
 	f, err := parser.ParseFile(srcFset, "bindings.go", src, 0)
 	require.NoError(t, err)
 	conf := types.Config{Importer: srcImporter}

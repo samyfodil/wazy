@@ -338,7 +338,7 @@ func (w *FutureWriter) Set(v abi.Value, onDone func(res CopyResult)) {
 	w.state = copyCopying
 	err := w.shared.write(nil, buf, func(res copyResult) {
 		w.state = copyDone // a future is one-shot: completed or dropped, both terminal
-		w.in.inHostCall++ // a host call: see Write
+		w.in.inHostCall++  // a host call: see Write
 		onDone(CopyResult(res))
 		w.in.inHostCall--
 	})
