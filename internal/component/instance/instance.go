@@ -448,6 +448,10 @@ type Instance struct {
 	// §3.2). Phase 2 addition; always 0 for a component with no async host
 	// import in flight.
 	inHostCall int
+
+	// lateErr is the trap of a task that ran after its call returned, driven
+	// by a host stream op (see settle): the next call reports it.
+	lateErr error
 }
 
 // CoreModuleCount returns the number of embedded core modules (real,
@@ -1054,7 +1058,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if in.isGuestResource == nil || !in.isGuestResource(rt) {
 			return in.lendHostBorrow(v, rt, scope)
 		}
-		return resolveHandleArg(in, in.resources, in.resCanon, t, v)
+		return resolveHandleArg(in, in.resources, in.resCanon, in.resolve, t, v)
 
 	case binary.StreamDesc:
 		// A stream<T> Call/CallAsync arg arrives as the *sharedStream
@@ -1062,16 +1066,26 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		// takeReadableStreamEnd) -- mint a fresh READABLE end for it in
 		// THIS (the callee's) table, mirroring lower_stream
 		// (docs/component-model-async-phase2-design.md §2.1/§3.1).
-		shared, ok := v.(*sharedStream)
-		if !ok {
-			return nil, fmt.Errorf("stream arg: expected a *sharedStream (from NewStream or a transferred readable end), got %T", v)
+		var shared *sharedStream
+		switch sv := v.(type) {
+		case *sharedStream:
+			shared = sv
+		case *StreamReader:
+			shared = sv.shared
+		default:
+			return nil, fmt.Errorf("stream arg: expected a *sharedStream (from NewStream or a transferred readable end) or *StreamReader, got %T", v)
 		}
 		return in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
 
 	case binary.FutureDesc:
-		shared, ok := v.(*sharedFuture)
-		if !ok {
-			return nil, fmt.Errorf("future arg: expected a *sharedFuture (from NewFuture or a transferred readable end), got %T", v)
+		var shared *sharedFuture
+		switch sv := v.(type) {
+		case *sharedFuture:
+			shared = sv
+		case *FutureReader:
+			shared = sv.shared
+		default:
+			return nil, fmt.Errorf("future arg: expected a *sharedFuture (from NewFuture or a transferred readable end) or *FutureReader, got %T", v)
 		}
 		return in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
 
@@ -1079,16 +1093,16 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if d.Prim != "error-context" {
 			return v, nil
 		}
-		// An error-context arg arrives either as an existing *errorContext
+		// An error-context arg arrives either as an existing *ErrorContext
 		// (copy semantics: mint a second handle sharing it) or a bare string
 		// (host-authored message: wrap it fresh).
 		switch ev := v.(type) {
-		case *errorContext:
+		case *ErrorContext:
 			return in.resources.addEntry(ev), nil
 		case string:
-			return in.resources.addEntry(&errorContext{debugMessage: ev}), nil
+			return in.resources.addEntry(&ErrorContext{debugMessage: ev}), nil
 		default:
-			return nil, fmt.Errorf("error-context arg: expected a *errorContext or string, got %T", v)
+			return nil, fmt.Errorf("error-context arg: expected a *ErrorContext or string, got %T", v)
 		}
 
 	case binary.ListDesc:
@@ -1826,7 +1840,7 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	// poisoned instance refuses entry outright, independent of whether this
 	// particular call would otherwise even be well-formed.
 	if target.poisoned {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 	fd := be.fd
 	if len(args) != len(fd.Params) {
@@ -2130,7 +2144,7 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q result: load spilled result: %w", exportName, err)
 		}
-		if err := in.validateLiftedStreamFutureResult(rt, val, exportName); err != nil {
+		if val, err = in.takeAsyncResult(rt, val, exportName); err != nil {
 			return nil, err
 		}
 		return []abi.Value{val}, nil
@@ -2162,61 +2176,68 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q result: lift: %w", exportName, err)
 	}
-	if err := in.validateLiftedStreamFutureResult(rt, val, exportName); err != nil {
+	if val, err = in.takeAsyncResult(rt, val, exportName); err != nil {
 		return nil, err
 	}
 	return []abi.Value{val}, nil
 }
 
-// validateLiftedStreamFutureResult applies lift_async_value's trap_if(state
-// != IDLE)/trap_if(in_waitable_set()) checks (definitions.py ~1519) to a
-// top-level export's RESULT when its declared type is a bare stream<T>/
-// future<T> -- the one crossing liftResult's generic flat/spilled lift paths
-// above don't otherwise validate (they treat StreamDesc/FutureDesc exactly
-// like OwnDesc/BorrowDesc: an opaque i32, per abi.liftFlatImpl). Unlike
-// takeReadableStreamEnd/takeReadableFutureEnd (used for the arg-crossing and
-// guest<->guest delegated-result paths, composition.go/host_import.go, where
-// ownership of the table slot genuinely transfers to the other side), this
-// does NOT remove the handle from the guest's own table -- matching wazy's
-// existing convention for a top-level own<T> result (also left in the table,
-// for the host to manage explicitly via DropResource/ResourceRep-style
-// accessors) rather than the reference's unconditional handles.remove(i).
-func (in *Instance) validateLiftedStreamFutureResult(rt binary.TypeDesc, val abi.Value, exportName string) error {
+// takeAsyncResult lifts a top-level stream, future or error-context result
+// out of the guest's table for its caller, at lift time, as lift_async_value
+// and lift_error_context do (definitions.py ~1519): a readable end is
+// removed (trapping unless it is idle, not in a waitable set, and of the
+// declared element type) and becomes the caller's *StreamReader or
+// *FutureReader; an error context is read, the guest keeping its handle. At
+// lift time, because the guest may drop that handle as soon as it has
+// returned. The abi's generic lift paths read all three as an opaque i32,
+// like own<T>/borrow<T>; unlike those, the caller cannot do anything with the
+// bare index.
+func (in *Instance) takeAsyncResult(rt binary.TypeDesc, val abi.Value, exportName string) (abi.Value, error) {
+	var elem *binary.TypeRef
 	switch d := rt.(type) {
 	case binary.StreamDesc:
-		h, ok := val.(uint32)
-		if !ok {
-			return nil // not a handle-shaped value (shouldn't happen; let the caller's own bookkeeping catch it)
-		}
-		var elemDesc binary.TypeDesc
-		if d.Element != nil {
-			ed, err := resolveTypeRef(d.Element, in.resolve)
-			if err != nil {
-				return fmt.Errorf("component/instance: export %q result: stream element type: %w", exportName, err)
-			}
-			elemDesc = ed
-		}
-		if _, err := peekReadableStreamEnd(in, in.resources, elemDesc, h); err != nil {
-			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
-		}
+		elem = d.Element
 	case binary.FutureDesc:
-		h, ok := val.(uint32)
-		if !ok {
-			return nil
+		elem = d.Element
+	case binary.PrimitiveDesc:
+		if d.Prim != "error-context" {
+			return val, nil
 		}
-		var elemDesc binary.TypeDesc
-		if d.Element != nil {
-			ed, err := resolveTypeRef(d.Element, in.resolve)
-			if err != nil {
-				return fmt.Errorf("component/instance: export %q result: future element type: %w", exportName, err)
-			}
-			elemDesc = ed
-		}
-		if _, err := peekReadableFutureEnd(in, in.resources, elemDesc, h); err != nil {
-			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
-		}
+	default:
+		return val, nil
 	}
-	return nil
+	h, ok := val.(uint32)
+	if !ok {
+		return nil, fmt.Errorf("component/instance: export %q result: expected a uint32 handle, got %T", exportName, val)
+	}
+	var elemDesc binary.TypeDesc
+	if elem != nil {
+		ed, err := resolveTypeRef(elem, in.resolve)
+		if err != nil {
+			return nil, fmt.Errorf("component/instance: export %q result: element type: %w", exportName, err)
+		}
+		elemDesc = ed
+	}
+	switch rt.(type) {
+	case binary.StreamDesc:
+		shared, err := takeReadableStreamEnd(in, in.resources, elemDesc, in.resolve, h)
+		if err != nil {
+			return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+		}
+		return &StreamReader{in: in, shared: shared, state: copyIdle}, nil
+	case binary.FutureDesc:
+		shared, err := takeReadableFutureEnd(in, in.resources, elemDesc, in.resolve, h)
+		if err != nil {
+			return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+		}
+		return &FutureReader{in: in, shared: shared, state: copyIdle}, nil
+	}
+	raw, _ := in.resources.getEntry(h)
+	ec, ok := raw.(*ErrorContext)
+	if !ok {
+		return nil, fmt.Errorf("component/instance: export %q result: handle %d is not an error-context", exportName, h)
+	}
+	return ec, nil
 }
 
 // DropResource drops an own<resource> handle the host received from a guest

@@ -1058,7 +1058,7 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -1108,7 +1108,7 @@ func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.T
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -1136,7 +1136,9 @@ type lentHandle struct {
 // instance's scheduler it belongs to (requireSchedulable, stream_host.go).
 // nil is safe: requireSchedulable treats a nil Instance as unchecked, which
 // only pure resource-handle unit tests (no stream/future args) ever hit.
-func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) uint32, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
+// resolve is the resolver pt came from -- the host's, for an import declared
+// with its own type table -- and resolves a stream/future's element type.
+func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) uint32, resolve abi.Resolver, pt binary.TypeDesc, v abi.Value) (abi.Value, error) {
 	tag := func(rt uint32) uint32 {
 		if canon != nil {
 			return canon(rt)
@@ -1181,15 +1183,11 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 		var elemDesc binary.TypeDesc
 		if d.Element != nil {
 			var eerr error
-			var resolveFn abi.Resolver
-			if in != nil {
-				resolveFn = in.resolve
-			}
-			if elemDesc, eerr = resolveTypeRef(d.Element, resolveFn); eerr != nil {
+			if elemDesc, eerr = resolveTypeRef(d.Element, resolve); eerr != nil {
 				return nil, fmt.Errorf("stream arg: element type: %w", eerr)
 			}
 		}
-		shared, err := takeReadableStreamEnd(in, resources, elemDesc, h)
+		shared, err := takeReadableStreamEnd(in, resources, elemDesc, resolve, h)
 		if err != nil {
 			return nil, fmt.Errorf("stream arg: %w", err)
 		}
@@ -1203,15 +1201,11 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 		var elemDesc binary.TypeDesc
 		if d.Element != nil {
 			var eerr error
-			var resolveFn abi.Resolver
-			if in != nil {
-				resolveFn = in.resolve
-			}
-			if elemDesc, eerr = resolveTypeRef(d.Element, resolveFn); eerr != nil {
+			if elemDesc, eerr = resolveTypeRef(d.Element, resolve); eerr != nil {
 				return nil, fmt.Errorf("future arg: element type: %w", eerr)
 			}
 		}
-		shared, err := takeReadableFutureEnd(in, resources, elemDesc, h)
+		shared, err := takeReadableFutureEnd(in, resources, elemDesc, resolve, h)
 		if err != nil {
 			return nil, fmt.Errorf("future arg: %w", err)
 		}
@@ -1227,7 +1221,7 @@ func resolveHandleArg(in *Instance, resources *handleTable, canon func(uint32) u
 		}
 		// Lift is a GET, not a remove: the sender keeps its own handle.
 		raw, ok2 := resources.getEntry(h)
-		ec, isEC := raw.(*errorContext)
+		ec, isEC := raw.(*ErrorContext)
 		if !ok2 || !isEC {
 			return nil, fmt.Errorf("error-context arg: handle %d is not an error-context", h)
 		}
@@ -1292,12 +1286,12 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 			return v, nil
 		}
 		switch ev := v.(type) {
-		case *errorContext:
+		case *ErrorContext:
 			return resources.addEntry(ev), nil
 		case string:
-			return resources.addEntry(&errorContext{debugMessage: ev}), nil
+			return resources.addEntry(&ErrorContext{debugMessage: ev}), nil
 		default:
-			return nil, fmt.Errorf("error-context result: expected a *errorContext or string, got %T", v)
+			return nil, fmt.Errorf("error-context result: expected a *ErrorContext or string, got %T", v)
 		}
 
 	default:

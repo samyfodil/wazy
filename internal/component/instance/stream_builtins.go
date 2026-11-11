@@ -356,7 +356,7 @@ func requireStreamEnd(in *Instance, name string, i uint32, side endSide, elemDes
 	if se.side != side {
 		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s stream end", name, i, sideName(side)))
 	}
-	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, in, elemDesc) {
+	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, se.shared.elemResolve, in, elemDesc, in.resolve) {
 		panic(fmt.Errorf("component/instance: %s: handle %d: stream element type mismatch", name, i))
 	}
 	return se
@@ -372,7 +372,7 @@ func requireFutureEnd(in *Instance, name string, i uint32, side endSide, elemDes
 	if fe.side != side {
 		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s future end", name, i, sideName(side)))
 	}
-	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, in, elemDesc) {
+	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, fe.shared.elemResolve, in, elemDesc, in.resolve) {
 		panic(fmt.Errorf("component/instance: %s: handle %d: future element type mismatch", name, i))
 	}
 	return fe
@@ -394,7 +394,7 @@ func wrapSchedErr(name string, err error) error {
 func streamNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uint32, numeric bool) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "stream.new")
-		shared := &sharedStream{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in}
+		shared := &sharedStream{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in, elemResolve: in.resolve}
 		ri := in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared})
 		wi := in.resources.addEntry(&streamEnd{side: sideWritable, state: copyIdle, shared: shared})
 		stack[0] = uint64(ri) | uint64(wi)<<32
@@ -407,7 +407,7 @@ func streamNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 func futureNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uint32, numeric bool) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "future.new")
-		shared := &sharedFuture{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in}
+		shared := &sharedFuture{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in, elemResolve: in.resolve}
 		ri := in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared})
 		wi := in.resources.addEntry(&futureEnd{side: sideWritable, state: copyIdle, shared: shared})
 		stack[0] = uint64(ri) | uint64(wi)<<32

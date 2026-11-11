@@ -84,11 +84,12 @@ func (ac *AsyncCall) Resolve(results []abi.Value) {
 	if ac.resolved {
 		panic(fmt.Errorf("component/instance: async import: Resolve called twice"))
 	}
-	if !ac.inCall.Load() && !ac.in.sched.pumping {
+	if !ac.inCall.Load() && !ac.in.sched.pumping && ac.in.inHostCall == 0 {
 		// Structural single-threadedness guard, no goroutine-ID hacks: the
 		// only legal Resolve call sites are inside the import call itself,
-		// or inside a scheduler thunk -- both provably on the driving
-		// goroutine.
+		// inside a scheduler thunk, or inside another host call (an import,
+		// or a stream/future completion callback) -- all provably on the
+		// driving goroutine.
 		panic(fmt.Errorf("component/instance: async import: Resolve called outside the instance scheduler; external completion requires CallAsync (not yet implemented)"))
 	}
 	ac.resolved = true
@@ -132,7 +133,7 @@ func (ac *AsyncCall) ResolveCancelled() {
 	if ac.resolved {
 		panic(fmt.Errorf("component/instance: async import: Resolve/ResolveCancelled called twice"))
 	}
-	if !ac.inCall.Load() && !ac.in.sched.pumping {
+	if !ac.inCall.Load() && !ac.in.sched.pumping && ac.in.inHostCall == 0 {
 		panic(fmt.Errorf("component/instance: async import: ResolveCancelled called outside the instance scheduler; external completion requires CallAsync (not yet implemented)"))
 	}
 	if !ac.st.cancellationRequested {
@@ -579,7 +580,7 @@ func liftAsyncHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc bin
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -628,7 +629,7 @@ func liftAsyncHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.R
 				}
 			}
 		}
-		v, err = resolveHandleArg(in, resources, nil, pp.pt, v)
+		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}

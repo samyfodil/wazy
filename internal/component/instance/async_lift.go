@@ -2,7 +2,6 @@ package instance
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -84,7 +83,7 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	// every later entry is refused permanently, matching the reference's
 	// Store poisoning invariant.
 	if in.poisoned || !in.mayEnter {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 
 	// t.onResolve/gt.onStart are left nil: task.returnValues/cancelResolve
@@ -105,12 +104,21 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 		in.reapParkedGoroutines() // a trap may strand OTHER parked promoted segments (delegated callees)
 		return nil, err
 	}
-	if err := in.sched.drive(func() bool { return gt.done }); err != nil {
+	done, err := in.sched.driveToQuiescence(func() bool { return gt.done })
+	if err != nil {
 		in.reapParkedGoroutines()
-		if errors.Is(err, errAsyncDeadlock) {
+		return nil, err
+	}
+	if !done {
+		if t.state != taskResolved {
+			in.reapParkedGoroutines()
 			return nil, fmt.Errorf("component/instance: export %q: deadlock: the async task is suspended but the run queue is empty and no parked task is ready; an import resolved externally requires CallAsync (not yet implemented)", exportName)
 		}
-		return nil, err
+		// The task returned, and is parked on work after it: writing a stream
+		// it returned, say. The call is over -- Store.lift returns at
+		// task.return -- and the task resumes when the scheduler is next
+		// driven: by a later call, or a host stream op (see settle).
+		return t.result, nil
 	}
 	if gt.err != nil {
 		in.reapParkedGoroutines()
@@ -147,7 +155,7 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, be.flattenErr)
 	}
 	if in.poisoned || !in.mayEnter { // Store.lift's prologue: trap_if(!may_enter_from)
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 
 	t := &task{inst: in, be: be}
@@ -161,12 +169,18 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 		in.reapParkedGoroutines() // a trap may strand OTHER parked tasks (delegated callees)
 		return nil, err
 	}
-	if err := in.sched.drive(func() bool { return st.done }); err != nil {
+	done, err := in.sched.driveToQuiescence(func() bool { return st.done })
+	if err != nil {
 		in.reapParkedGoroutines()
-		if errors.Is(err, errAsyncDeadlock) {
+		return nil, err
+	}
+	if !done {
+		if t.state != taskResolved {
+			in.reapParkedGoroutines()
 			return nil, fmt.Errorf("component/instance: export %q: wasm trap: deadlock detected: event loop cannot make further progress", exportName)
 		}
-		return nil, err
+		// See invokeAsyncCallback: returned, with work parked after it.
+		return t.result, nil
 	}
 	if st.err != nil {
 		in.reapParkedGoroutines()
@@ -212,7 +226,7 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 	// instance unless this instance IS the caller re-entering itself --
 	// exactly the case mayEnter guards), kept as a real trap for parity.
 	if in.poisoned || !in.mayEnter {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 	fr := &callbackFrame{}
 	t, gt := &fr.t, &fr.gt
@@ -261,7 +275,7 @@ func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
 ) (calleeTask *task, err error) {
 	if in.poisoned || !in.mayEnter {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 	t := &task{inst: in, be: be}
 	t.onResolve = func(vals []abi.Value, cancelled bool) {

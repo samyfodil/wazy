@@ -192,7 +192,9 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // callback-lift implicit thread is a genuine Thread that can itself call a
 // blocking wait builtin and suspend, so this is legal from callback code
 // too, not just from a would-be sync/stackful task), write its (p1,p2) at
-// ptr/ptr+4, and return the event code.
+// ptr/ptr+4, and return the event code. The event goes to memMod, the
+// canon's memory, rather than the calling module's: that may be a trampoline
+// with no memory of its own (see canonMemoryAndRealloc).
 //
 // canon carries the cancellable:bool payload finally threaded through here
 // (Phase 3, docs/component-model-async-phase3-design.md §2.3): when
@@ -205,10 +207,13 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // it -- see task.go's requestCancellation doc); it is instead a genuinely
 // PENDING_CANCEL task whose own drive predicate below picks the
 // cancellation up at the next scheduler check.
-func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module) hostFuncDef {
 	in.syncTaskNeeded = true
 	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		if memMod != nil {
+			mod = memMod
+		}
 		requireMayLeave(in, "waitable-set.wait")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
@@ -265,10 +270,13 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
 // instead of driving the scheduler. The poll(cancellable) prologue (~834):
 // if cancellable and a cancellation is deliverable, TASK_CANCELLED is
 // returned immediately, before even checking the set.
-func waitableSetPollHostFunc(in *Instance, canon binary.Canon) hostFuncDef {
+func waitableSetPollHostFunc(in *Instance, canon binary.Canon, memMod api.Module) hostFuncDef {
 	in.syncTaskNeeded = true
 	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		if memMod != nil {
+			mod = memMod
+		}
 		requireMayLeave(in, "waitable-set.poll")
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
@@ -590,6 +598,15 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 			}
 		}
 
+		if resultType != nil && t.onResolve == nil {
+			// The host is the caller: it gets the result as lifted. A guest
+			// caller's onResolve moves the handles between tables itself.
+			v, err := in.takeAsyncResult(resultType, result[0], "task.return")
+			if err != nil {
+				panic(err)
+			}
+			result[0] = v
+		}
 		if err := t.returnValues(result); err != nil {
 			panic(fmt.Errorf("component/instance: %w", err))
 		}
