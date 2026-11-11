@@ -248,17 +248,30 @@ func (t *handleTable) dtorFor(typeIdx uint32) func(ctx context.Context, rep uint
 	return t.dtors[typeIdx]
 }
 
+// guestDtor is a resource's destructor: the core func its definer names,
+// resolved lazily, and that definer, whose task the destructor runs as.
+type guestDtor struct {
+	owner   *Instance
+	resolve func() api.Function
+}
+
 // resourceDtor wraps a lazily-resolved guest destructor core func as a dtor
 // callback. resolve is called at drop time (its module is up by then); a nil
 // resolution means the dtor can't run, so the drop just removes the entry.
-func resourceDtor(resolve func() api.Function) func(context.Context, uint32) error {
+//
+// canon_resource_drop calls the destructor through a sync lift in its
+// definer, so it runs as a fresh task of the definer's: its context.get reads
+// zero even when the definer is mid-call, or the destructor reenters itself.
+func resourceDtor(d guestDtor) func(context.Context, uint32) error {
 	return func(ctx context.Context, rep uint32) error {
-		fn := resolve()
+		fn := d.resolve()
 		if fn == nil {
 			return nil
 		}
-		_, err := fn.Call(ctx, uint64(rep))
-		return err
+		return d.owner.callAsSyncTask("resource destructor", func() error {
+			_, err := fn.Call(ctx, uint64(rep))
+			return err
+		})
 	}
 }
 
@@ -415,9 +428,57 @@ func (t *handleTable) lookup(typeIdx, h uint32) (*resourceEntry, error) {
 		return nil, fmt.Errorf("handle %d is not a resource handle (expected %s)", h, t.typeNameLocked(typeIdx))
 	}
 	if e.typeIdx != typeIdx {
-		return nil, fmt.Errorf("handle %d belongs to %s, not %s", h, t.typeNameLocked(e.typeIdx), t.typeNameLocked(typeIdx))
+		return nil, t.wrongTypeLocked(h, typeIdx, e.typeIdx)
 	}
 	return e, nil
+}
+
+// wrongTypeLocked is the trap for handle h, of resource tag got, used as one
+// of resource tag want. A resource the embedder named (setResourceNames) is
+// the host's; any other, a component's.
+func (t *handleTable) wrongTypeLocked(h, want, got uint32) error {
+	definer := func(tag uint32) string {
+		if _, ok := t.names[tag]; ok {
+			return "host-defined resource"
+		}
+		return "guest-defined resource"
+	}
+	found := definer(got)
+	if found == definer(want) {
+		found = "a different " + found
+	}
+	return fmt.Errorf("handle index %d used with the wrong type, expected %s but found %s (%s, not %s)", h, definer(want), found, t.typeNameLocked(got), t.typeNameLocked(want))
+}
+
+// errBorrowed is the trap for removing own handle h while lendCount borrows
+// of it are outstanding.
+func errBorrowed(h uint32, lendCount int) error {
+	return fmt.Errorf("cannot remove owned resource while borrowed: handle %d has %d outstanding borrow(s)", h, lendCount)
+}
+
+// checkOwn is lift_own's checks without its removal: h names an own handle,
+// of the resource defOf maps to want, that nothing borrows.
+func (t *handleTable) checkOwn(h, want uint32, defOf func(uint32) uint32) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	raw, ok := t.entryAt(h)
+	if !ok {
+		return fmt.Errorf("unknown handle index %d", h)
+	}
+	e, ok := raw.(*resourceEntry)
+	if !ok {
+		return fmt.Errorf("handle index %d used with the wrong type: it is not a resource handle", h)
+	}
+	if got := defOf(e.typeIdx); got != want {
+		return t.wrongTypeLocked(h, want, got)
+	}
+	if !e.own {
+		return fmt.Errorf("handle index %d is a borrow, where an own handle is required", h)
+	}
+	if e.lendCount > 0 {
+		return errBorrowed(h, e.lendCount)
+	}
+	return nil
 }
 
 // Rep returns the host representation handle h refers to, without consuming
@@ -451,7 +512,7 @@ func (t *handleTable) TakeOwn(typeIdx, h uint32) (uint32, error) {
 		return 0, fmt.Errorf("handle %d is a borrow, not an own handle", h)
 	}
 	if e.lendCount != 0 {
-		return 0, fmt.Errorf("handle %d has %d outstanding borrow(s)", h, e.lendCount)
+		return 0, errBorrowed(h, e.lendCount)
 	}
 	delete(t.entries, h)
 	t.free = append(t.free, h)
@@ -479,7 +540,7 @@ func (t *handleTable) Drop(typeIdx, h uint32) error {
 		return err
 	}
 	if e.lendCount != 0 {
-		return fmt.Errorf("handle %d has %d outstanding borrow(s), cannot drop", h, e.lendCount)
+		return errBorrowed(h, e.lendCount)
 	}
 	if !e.own {
 		if e.borrowScope == nil {
@@ -530,7 +591,7 @@ func (t *handleTable) DropOwned(h uint32) (rep uint32, err error) {
 		return 0, fmt.Errorf("handle %d is a borrow, not an own handle", h)
 	}
 	if e.lendCount != 0 {
-		return 0, fmt.Errorf("handle %d has %d outstanding borrow(s), cannot drop", h, e.lendCount)
+		return 0, errBorrowed(h, e.lendCount)
 	}
 	delete(t.entries, h)
 	t.free = append(t.free, h)

@@ -72,10 +72,9 @@ type stackfulTask struct {
 	yieldCh  chan struct{}   // goroutine -> driver: suspended-or-done
 	spawned  bool
 
-	park        stackfulParkKind
-	parkReady   func() bool // sparkBlock only: the blocking site's predicate
-	cancellable bool        // is the current park a cancellable suspension?
-	cancelWake  bool        // requestCancellation resumed us with Cancelled.TRUE
+	park       stackfulParkKind
+	parkReady  func() bool // sparkBlock only: the blocking site's predicate
+	cancelWake bool        // requestCancellation resumed us with Cancelled.TRUE
 
 	onStart func() ([]abi.Value, error) // lazy caller-arg lift (delegated calls); nil => args
 	args    []abi.Value
@@ -91,7 +90,7 @@ type stackfulTask struct {
 // at sparkEntry (no goroutine yet) under backpressure, else spawn + first run.
 func (st *stackfulTask) startTask() error {
 	if !st.in.tryEnter(st.t) {
-		st.park, st.cancellable = sparkEntry, true
+		st.park = sparkEntry
 		st.in.numWaitingToEnter++
 		st.in.sched.park(st)
 		return nil
@@ -121,7 +120,10 @@ func (st *stackfulTask) main() {
 	if mode == resumeAbort {
 		return // reaped before ever running (only via reap of a just-spawned task)
 	}
+	// Restore the caller's current thread afterwards, as guestTask.firstRunAsCaller does.
+	prevThread := st.in.activeThread
 	st.err = st.run()
+	st.in.activeThread = prevThread
 }
 
 // run is canon_lift's no-callback body (~2144-2171): guestTask.firstRun's
@@ -138,28 +140,28 @@ func (st *stackfulTask) run() error {
 	if st.onStart != nil {
 		var err error
 		if args, err = st.onStart(); err != nil {
-			in.leaveRun()
+			in.leaveRunOf(t)
 			return st.fail(err)
 		}
 	}
 
-	mem, memAvailable := memoryBytesOf(be.mod)
-	realloc := cachedReallocOf(st.ctx, be)
+	mem, memAvailable := memoryBytesOf(be.memMod)
+	realloc := cachedReallocOf(st.ctx, st.in, be)
 
 	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
 	*coreArgsPtr = (*coreArgsPtr)[:0]
 	t.state = taskStarted
 	scope := t
-	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, st.exportName, *coreArgsPtr, &scope)
+	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, &realloc, st.exportName, *coreArgsPtr, &scope)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
-		in.leaveRun()
+		in.leaveRunOf(t)
 		return st.fail(err)
 	}
 	*coreArgsPtr = coreArgs
 	if len(coreArgs) != len(be.coreParamsWant) {
 		putCoreValueSlice(coreArgsPtr)
-		in.leaveRun()
+		in.leaveRunOf(t)
 		return st.fail(fmt.Errorf("component/instance: export %q: parameter list flattens to %d core value(s) but the core signature expects %d; whole-parameter-list spilling to memory is not supported by this milestone", st.exportName, len(coreArgs), len(be.coreParamsWant)))
 	}
 
@@ -177,8 +179,8 @@ func (st *stackfulTask) run() error {
 
 	if err := be.coreFn.CallWithStack(st.ctx, stack); err != nil {
 		putUint64Slice(stackPtr)
-		in.leaveRun()
-		in.poisoned = true // guest code actually ran and trapped -- see fail's doc
+		in.leaveRunOf(t)
+		in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc
 		return st.fail(fmt.Errorf("component/instance: export %q: call core func %q: %w", st.exportName, be.funcName, err))
 	}
 
@@ -187,9 +189,9 @@ func (st *stackfulTask) run() error {
 		// trap_if(state != RESOLVED) (~522), same text as guestTask's
 		// finishExit.
 		putUint64Slice(stackPtr)
-		in.leaveRun()
-		if t.state != taskResolved {
-			return st.fail(fmt.Errorf("component/instance: export %q: stackful async export returned before task.return resolved the task", st.exportName))
+		in.leaveRunOf(t)
+		if t.state != taskResolved && t.liveThreads == 0 {
+			return st.fail(fmt.Errorf("component/instance: export %q: stackful async export returned before task.return resolved the task: %w", st.exportName, errExitUnresolved))
 		}
 		st.finishOK()
 		return nil
@@ -201,40 +203,40 @@ func (st *stackfulTask) run() error {
 	// ran, replacing the backing array (and possibly pooling the old one), so
 	// the pre-call slice can no longer be trusted for lifting. Same reasoning
 	// as invoke's re-fetch in instance.go.
-	mem, memAvailable = memoryBytesOf(be.mod)
+	mem, memAvailable = memoryBytesOf(be.memMod)
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, st.exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)
-		in.leaveRun()
+		in.leaveRunOf(t)
 		return st.fail(err)
 	}
 	if err := t.returnValues(results); err != nil { // traps if guest already resolved
 		putUint64Slice(stackPtr)
-		in.leaveRun()
+		in.leaveRunOf(t)
 		return st.fail(fmt.Errorf("component/instance: export %q: %w", st.exportName, err))
 	}
 	if be.postReturnFuncName != "" {
 		if be.postReturnFn == nil {
 			putUint64Slice(stackPtr)
-			in.leaveRun()
+			in.leaveRunOf(t)
 			return st.fail(fmt.Errorf("component/instance: export %q: post-return core func %q not found", st.exportName, be.postReturnFuncName))
 		}
-		if err := be.postReturnFn.CallWithStack(st.ctx, rawResults); err != nil {
+		if err := in.callPostReturn(st.ctx, be, rawResults); err != nil {
 			putUint64Slice(stackPtr)
-			in.leaveRun()
-			in.poisoned = true // guest code actually ran and trapped -- see fail's doc
+			in.leaveRunOf(t)
+			in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc
 			return st.fail(fmt.Errorf("component/instance: export %q: post-return %q: %w", st.exportName, be.postReturnFuncName, err))
 		}
 	}
 	putUint64Slice(stackPtr)
-	in.leaveRun()
+	in.leaveRunOf(t)
 	st.finishOK()
 	return nil
 }
 
 // fail records a trap. Like guestTask.fail, it does NOT itself poison st.in
 // -- see that doc; only run's be.coreFn.CallWithStack and be.postReturnFn.
-// CallWithStack (guest code that actually ran) set st.in.poisoned = true.
+// CallWithStack (guest code that actually ran) set st.in.sched.lockdown = true.
 func (st *stackfulTask) fail(err error) error {
 	st.err = err
 	if st.finish != nil {
@@ -253,11 +255,20 @@ func (st *stackfulTask) finishOK() {
 // cancel wake). It is Thread.suspend/wait_until (~396-409) with the lock
 // handoff replaced by the baton channels. MUST be called with the baton held
 // (i.e. from a builtin invoked by this task's guest code, ON the goroutine).
-func (st *stackfulTask) block(ready func() bool, cancellable bool) (cancelled bool) {
-	if st.t.deliverPendingCancel(cancellable) { // wait_until's prologue (~404)
-		return true
-	}
-	st.park, st.parkReady, st.cancellable = sparkBlock, ready, cancellable
+func (st *stackfulTask) block(ready func() bool) (cancelled bool) {
+	// No cancellation delivery here. The reference's Thread.wait_until (~353)
+	// does not deliver: delivery happens at exactly four sites, all of them in
+	// the callback dispatch loop or async entry -- the loop top, its YIELD and
+	// WAIT dispositions (WaitableSet.wait_from_callback, ~803), and
+	// Task.enter_implicit_thread's backpressure wait (~441). An older revision
+	// delivered in wait_until's prologue, which is where this used to be; the
+	// re-vendor to 07afb8145b80 dropped it, and cancel-delivery.wast asserts
+	// the difference directly ("a pending cancellation is not reported by the
+	// thread.yield and waitable-set.poll built-ins ... it survives them and is
+	// delivered at the event loop"). Every builtin that parks through here --
+	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
+	// -- must leave a PENDING_CANCEL pending.
+	st.park, st.parkReady = sparkBlock, ready
 	st.in.suspendRun()       // activeTask=nil, mayEnter=true; exclusive KEPT
 	st.in.sched.park(st)     // safe: we hold the baton
 	st.yieldCh <- struct{}{} // baton -> driver
@@ -265,10 +276,12 @@ func (st *stackfulTask) block(ready func() bool, cancellable bool) (cancelled bo
 	if mode == resumeAbort {
 		panic(errStackfulAbort)
 	}
-	st.park, st.parkReady, st.cancellable = sparkNone, nil, false
+	st.park, st.parkReady = sparkNone, nil
 	st.in.enterRun(st.t) // re-establish running brackets
 	return mode == resumeCancelled
 }
+
+func (st *stackfulTask) instance() *Instance { return st.in }
 
 // ready mirrors guestTask.ready (guest_task.go ~69) for the two park kinds.
 // No !exclusiveHeld conjunct at sparkBlock: a sync-opts stackful task HOLDS
@@ -279,12 +292,34 @@ func (st *stackfulTask) block(ready func() bool, cancellable bool) (cancelled bo
 func (st *stackfulTask) ready() bool {
 	switch st.park {
 	case sparkEntry:
-		return !st.in.hasBackpressure()
+		return !st.in.hasBackpressure(st.t)
 	case sparkBlock:
-		return st.cancelWake || st.t.cancelDeliverable() || st.parkReady()
+		// See guestTask.ready's parkBlocked arm for why there is no
+		// cancellation disjunct here. A nil parkReady is the reference's
+		// ready_func of None: SUSPENDED, so never ready (see suspendedState).
+		return st.cancelWake || (st.parkReady != nil && st.parkReady())
 	}
 	return false
 }
+
+// suspendedState/startWaiting/stopWaiting make a stackful task's implicit
+// thread a first-class Thread for the switch built-ins (§4.5): the reference
+// draws no distinction between a task's implicit thread and a spawned one, so
+// thread.{resume-later,suspend-then-resume,yield-then-resume,*-then-promote}
+// may target either. SUSPENDED is "parked mid-call with ready_func None" --
+// exactly what a thread.suspend leaves behind, since it installs no predicate
+// (Thread.suspend is a bare block(), definitions.py ~347) -- which is what
+// during-sync-scheduling-candidates and reentrance's outer-sync/inner-async
+// cases resume.
+func (st *stackfulTask) suspendedState() bool {
+	return st.park == sparkBlock && st.parkReady == nil
+}
+
+// startWaiting is Thread.start_waiting(ready_func = lambda: True), the body of
+// resume_later; stopWaiting is Thread.stop_waiting, which clears ready_func and
+// so makes the thread SUSPENDED again.
+func (st *stackfulTask) startWaiting() { st.parkReady = alwaysReady }
+func (st *stackfulTask) stopWaiting()  { st.parkReady = nil }
 
 // resumeReady is called only with st in sched.parked (goroutine at
 // <-resumeCh, or not yet spawned for sparkEntry), by sched.step/pumpSnapshot
@@ -321,6 +356,17 @@ func (st *stackfulTask) resumeReady() error {
 
 // handoff gives the baton to the goroutine and waits for it back.
 func (st *stackfulTask) handoff(mode resumeMode) error {
+	// The baton is strictly nested: this call blocks until it comes back, so
+	// whoever we hand it to (and anything IT hands it to) runs entirely inside
+	// this frame. Save and restore our own current-thread identity around that,
+	// or a spawned thread that merely runs and exits -- guestThread.run clears
+	// activeThread on the way out -- leaves the instance with no current thread
+	// at all, and the next builtin on THIS thread resolves the wrong blocker.
+	// during-sync-call-may-block-if-other-ready-threads arms exactly such a
+	// short-lived thread before blocking, and its switch back then parked the
+	// sync task's implicit thread instead of itself.
+	prevThread := st.in.activeThread
+	defer func() { st.in.activeThread = prevThread }()
 	st.resumeCh <- mode
 	<-st.yieldCh
 	if st.done {

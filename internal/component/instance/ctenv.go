@@ -1085,7 +1085,7 @@ func ctExportNames(c *binary.Component) []string {
 // resource.rep, which see its representation.
 func (e *ctEnv) checkResourceCanon(cn binary.Canon) error {
 	switch cn.Kind {
-	case binary.CanonKindResourceNew, binary.CanonKindResourceRep, binary.CanonKindResourceDrop, binary.CanonKindResourceDropAsync:
+	case binary.CanonKindResourceNew, binary.CanonKindResourceRep, binary.CanonKindResourceDrop:
 	default:
 		return nil
 	}

@@ -385,6 +385,17 @@ type Instance struct {
 	// WAITs only) never pay a goroutine.
 	mayBlockSync bool
 
+	// mayThreadSwitch is set at graph-bind time when this instance binds any
+	// cooperative-thread canon (thread.yield, thread.suspend, the four
+	// switch/promote built-ins, thread.new-indirect). Only those can make a
+	// NON-async-typed call's implicit thread the target of a resume, and only
+	// then does that thread have to be an independently resumable continuation
+	// rather than frames sitting inline on the caller's goroutine -- see
+	// runSyncCore, which spawns a goroutine for exactly this case. An instance
+	// that binds none (every sync component, wasi included) keeps calling
+	// straight through with no goroutine and no scheduler.
+	mayThreadSwitch bool
+
 	// syncTaskNeeded is set at graph-bind time when this instance wires any
 	// canon builtin that resolves the CURRENT TASK at call time (task.return,
 	// task.cancel, context.get/set, backpressure.inc/dec, waitable-set.wait/
@@ -425,20 +436,6 @@ type Instance struct {
 	// as activeTask itself (task.go's enterRun/suspendRun).
 	activeThread *guestThread
 
-	// poisoned is true once an unhandled trap has ever escaped a call into
-	// this instance (any error surfacing from guest code actually running --
-	// a core `unreachable`, or a canonical-ABI trap_if failing mid-call, from
-	// EITHER the plain sync invoke() path or an async task's fail() --
-	// permanently blocking every later entry with "cannot enter component
-	// instance", per the spec's Store poisoning invariant. Unlike mayEnter
-	// (which enterRun/leaveRun/suspendRun toggle back and forth as a task
-	// merely runs/parks/resumes), poisoned is sticky: nothing ever resets it
-	// back to false once set -- see invokeEntered's defer,
-	// guestTask.fail/stackfulTask.fail, and every mayEnter check in
-	// async_lift.go, all of which now check poisoned first. Initialized
-	// false; never true for an instance that has never had a call fail.
-	poisoned bool
-
 	// inHostCall counts nested host-import invocations currently on the Go
 	// call stack (bracketed by buildHostWrapper/buildAsyncHostWrapper). Along
 	// with sched.pumping, it is how requireSchedulable (stream_host.go)
@@ -471,9 +468,11 @@ func (in *Instance) WASICalls() []string { return in.wasiCalls }
 // it and to the module that provides the linear memory / cabi_realloc used to
 // lower parameters and lift results across the call.
 type boundExport struct {
-	mod      api.Module      // exports funcName; its Memory() backs lower/lift
+	mod      api.Module      // exports funcName
+	memMod   api.Module      // holds the memory lowering and lifting use; mod unless the lift names another
 	funcName string          // core export name to call
 	fd       binary.FuncDesc // component-level func type (lift signature)
+	enc      abi.Encoding    // the lift's string-encoding
 
 	// resolve is the type resolver fd's own TypeRefs were resolved through at
 	// bind time (finalizeBoundExport) -- i.e. the DEFINING component's own
@@ -644,7 +643,7 @@ type boundExport struct {
 	// cachedReallocOf must stay a plain struct literal with no closure
 	// allocation on the hot lowering path.
 	//
-	// It is built from be.mod, NEVER from be.reallocMod. When a canon lift's
+	// It is built from be.memMod, NEVER from be.reallocMod. When a canon lift's
 	// realloc option targets a different core instance (see reallocMod's doc,
 	// cross-abi-calls.wast's $Memory/$Core split) the realloc lives on one
 	// module and the MEMORY being written on another; taking the accessor from
@@ -698,6 +697,7 @@ type boundExport struct {
 	resultFlatKinds  []string
 	resultStep       abi.LiftStep // compiled result-lift plan (see abi.CompileLift)
 	resultNest       *asyncNest   // the streams, futures and error contexts nested in the result
+	resultHasOwn     bool         // the result contains an own<T>, which liftResult checks
 	resultErr        error
 }
 
@@ -739,6 +739,7 @@ type boundExportABI struct {
 	resultFlatKinds  []string
 	resultStep       abi.LiftStep
 	resultNest       *asyncNest
+	resultHasOwn     bool
 	resultErr        error
 }
 
@@ -746,7 +747,7 @@ type boundExportABI struct {
 // to do inline. Pure (no per-instance state); resolution/flatten errors are
 // recorded in the returned struct rather than surfaced, preserving
 // finalizeBoundExport's deliberate "never fails, surfaces at call time" contract.
-func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExportABI {
+func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver, enc abi.Encoding) *boundExportABI {
 	m := &boundExportABI{}
 	m.coreParamsWant, m.coreResultsWant, m.flattenErr = abi.FlattenFunc(fd, resolve, "lift")
 
@@ -818,13 +819,14 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 		m.resultType = rt
 		m.resultNest = newAsyncNest(rt, resolve)
 		m.resultUsesMemory = usesMemory(rt, resolve)
+		m.resultHasOwn = typeContainsResource(rt, resolve, 0)
 		flatKinds, err := abi.Flatten(rt, resolve)
 		if err != nil {
 			m.resultErr = err
 			return m
 		}
 		m.resultFlatKinds = flatKinds
-		step, err := abi.CompileLift(rt, resolve)
+		step, err := abi.CompileLift(rt, resolve, enc)
 		if err != nil {
 			m.resultErr = err
 			return m
@@ -1063,7 +1065,10 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		default:
 			return nil, fmt.Errorf("stream arg: expected a *sharedStream (from NewStream or a transferred readable end) or *StreamReader, got %T", v)
 		}
-		return in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+		e := &streamEnd{side: sideReadable, state: copyIdle, shared: shared}
+		idx := in.resources.addEntry(e)
+		registerStreamEnd(e, idx)
+		return idx, nil
 
 	case binary.FutureDesc:
 		var shared *sharedFuture
@@ -1075,7 +1080,10 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		default:
 			return nil, fmt.Errorf("future arg: expected a *sharedFuture (from NewFuture or a transferred readable end) or *FutureReader, got %T", v)
 		}
-		return in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+		e := &futureEnd{side: sideReadable, state: copyIdle, shared: shared}
+		idx := in.resources.addEntry(e)
+		registerFutureEnd(e, idx)
+		return idx, nil
 
 	case binary.PrimitiveDesc:
 		if d.Prim != "error-context" {
@@ -1255,16 +1263,19 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	}
 	be.reallocFn = rmod.ExportedFunction(reallocName)
 	be.reallocCall = coreReallocCall(be.reallocFn)
-	be.memFn = memAccessorOf(be.mod) // be.mod, not rmod -- see memFn's doc
+	if be.memMod == nil {
+		be.memMod = be.mod
+	}
+	be.memFn = memAccessorOf(be.memMod) // not rmod -- see memFn's doc
 	if be.coreFn != nil {
 		be.coreResultCount = len(be.coreFn.Definition().ResultTypes())
 	}
 
 	var m *boundExportABI
 	if abiCache != nil && comp != nil {
-		m = abiCache.abiFor(comp, funcIdx, func() *boundExportABI { return computeBoundExportABI(be.fd, resolve) })
+		m = abiCache.abiFor(comp, funcIdx, func() *boundExportABI { return computeBoundExportABI(be.fd, resolve, be.enc) })
 	} else {
-		m = computeBoundExportABI(be.fd, resolve)
+		m = computeBoundExportABI(be.fd, resolve, be.enc)
 	}
 
 	be.coreParamsWant, be.coreResultsWant, be.flattenErr = m.coreParamsWant, m.coreResultsWant, m.flattenErr
@@ -1283,7 +1294,7 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	be.paramsSpill, be.paramTuple = m.paramsSpill, m.paramTuple
 
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
-	be.resultStep, be.resultNest = m.resultStep, m.resultNest
+	be.resultStep, be.resultNest, be.resultHasOwn = m.resultStep, m.resultNest, m.resultHasOwn
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
@@ -1320,6 +1331,9 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 	// registered at all must still fail with THIS text, not "only instance
 	// imports are supported".
 	if err := validateAsyncCanonOptsAgreeWithTypes(comp); err != nil {
+		return nil, err
+	}
+	if err := validateCanonTypes(comp); err != nil {
 		return nil, err
 	}
 	// The other one: every instantiation's arguments against what the
@@ -1416,6 +1430,11 @@ func needsImportPath(comp *binary.Component) bool {
 	if len(comp.Instances) > 0 {
 		return true
 	}
+	for _, exp := range comp.Exports {
+		if exp.ExternType != ctSortFunc && exp.ExternType != ctSortType {
+			return true
+		}
+	}
 	for _, cn := range comp.Canons {
 		if cn.Kind != 0x00 { // anything other than canon lift needs the general wiring path
 			return true
@@ -1462,7 +1481,11 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		return nil, err
 	}
 
-	core, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig())
+	// Anonymous, as the graph path's are: a component's core modules never
+	// enter the runtime's namespace, so two components embedding modules of
+	// one name coexist. And with no start functions but the module's own
+	// start section, which is all the component model runs.
+	core, err := r.InstantiateWithConfig(ctx, coreBytes, wazy.NewModuleConfig().WithName("").WithStartFunctions())
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: instantiate embedded core module: %w", coreLinkError(comp, 0, err))
 	}
@@ -1504,6 +1527,7 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 			mod:      core,
 			funcName: coreFuncIdx[canon.CoreFuncIdx],
 			fd:       td.(binary.FuncDesc), // validated by validateCanons
+			enc:      canonEncoding(canon),
 		}
 		finalizeBoundExport(be, resolve, nil, nil, 0) // trivial path: no CompileCache
 		exports[name] = be
@@ -1656,6 +1680,48 @@ func validateAsyncCanonOptsAgreeWithTypes(comp *binary.Component) error {
 	return nil
 }
 
+// validateCanonTypes rejects, in comp or any component nested in it, a canon
+// built-in whose type immediate is not one it takes: a task.return result
+// holding a borrow anywhere, since a borrow cannot outlive the call that lent
+// it and task.return's value outlives the task (validate-task-return.wast),
+// or a stream or future built-in naming anything but a stream or future type
+// (forward.wast). A type that does not resolve here is left to the bind.
+func validateCanonTypes(comp *binary.Component) error {
+	var resolve abi.Resolver
+	for i, cn := range comp.Canons {
+		switch {
+		case cn.Kind == binary.CanonKindTaskReturn:
+			if resolve == nil {
+				resolve = typeResolver(comp)
+			}
+			for _, ref := range funcResultTypeRefs(binary.FuncDesc{Results: cn.TaskReturnResult}) {
+				if elemRefContainsBorrowHandle(&ref, resolve, 0) {
+					return fmt.Errorf("component/instance: canon[%d]: `task.return` result cannot contain a `borrow` type", i)
+				}
+			}
+		case isStreamCanonKind(cn.Kind) || isFutureCanonKind(cn.Kind):
+			td, err := comp.ResolveType(cn.TypeIdx)
+			if err != nil {
+				continue
+			}
+			_, isFuture := td.(binary.FutureDesc)
+			_, isStream := td.(binary.StreamDesc)
+			if isFutureCanonKind(cn.Kind) && !isFuture {
+				return fmt.Errorf("component/instance: canon[%d]: `%s` requires a future type", i, binary.CanonKindName(cn.Kind))
+			}
+			if isStreamCanonKind(cn.Kind) && !isStream {
+				return fmt.Errorf("component/instance: canon[%d]: `%s` requires a stream type", i, binary.CanonKindName(cn.Kind))
+			}
+		}
+	}
+	for _, nested := range comp.NestedComponents {
+		if err := validateCanonTypes(nested); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateCanons checks that every canon in a no-import component is a
 // supported "canon lift" whose core func index and type index are in range.
 func validateCanons(comp *binary.Component, coreFuncIdx []string) error {
@@ -1684,8 +1750,11 @@ func validateCanons(comp *binary.Component, coreFuncIdx []string) error {
 func buildExportIndex(comp *binary.Component) (map[string]int, error) {
 	canonForExport := make(map[string]int, len(comp.Exports))
 	for _, exp := range comp.Exports {
-		if exp.ExternType != 0x01 { // func
-			return nil, fmt.Errorf("component/instance: export %q has extern kind %s (%#x); only func exports are supported by this milestone", exp.Name, api.ExternTypeName(exp.ExternType), exp.ExternType)
+		if exp.ExternType == ctSortType { // a type export binds nothing
+			continue
+		}
+		if exp.ExternType != ctSortFunc {
+			return nil, fmt.Errorf("component/instance: export %q is a %s; a component with no imports exports only funcs and types here", exp.Name, ctSortDesc(exp.ExternType))
 		}
 		if u32.OutOfRange(exp.ExternIndex, len(comp.Canons)) {
 			return nil, fmt.Errorf("component/instance: export %q references func index %d, out of range of the %d-entry component func index space", exp.Name, exp.ExternIndex, len(comp.Canons))
@@ -1805,7 +1874,7 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	// (be.home's doc) -- run the call against THAT Instance, not against
 	// whichever component republished the export. Everything below this point
 	// reads per-Instance state the definer owns and the republisher does not:
-	// the async dispatch paths' runtime state, poisoning, and (through
+	// the async dispatch paths' runtime state and (through
 	// invokeEntered) the syncImplicit task plus the handle table, resource
 	// tags and resolver lowerParams/liftResult work in.
 	target := in
@@ -1818,16 +1887,16 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	if be.stackful {
 		return target.invokeStackful(ctx, be, exportName, args)
 	}
-	// target.poisoned mirrors the async paths' own check (async_lift.go) --
+	// target.sched.lockdown mirrors the async paths' own check (async_lift.go) --
 	// a sync export gets no enterRun/leaveRun bracketing (mayEnter never
 	// applies to it), but it still must stay permanently un-enterable once
 	// ANY earlier call (sync or async) has let a trap escape target, per the
-	// spec's Store poisoning invariant (see Instance.poisoned's doc). Placed
+	// spec's Store lockdown invariant (see sched.lockdown's doc). Placed
 	// before the param-count/bind-shape checks below, same as async_lift.go's
-	// mayEnter/poisoned check precedes ITS own param-count check -- a
-	// poisoned instance refuses entry outright, independent of whether this
+	// mayEnter/lockdown check precedes ITS own param-count check -- a
+	// locked-down store refuses entry outright, independent of whether this
 	// particular call would otherwise even be well-formed.
-	if target.poisoned {
+	if target.sched.lockdown {
 		return nil, in.cannotEnter(exportName)
 	}
 	fd := be.fd
@@ -1872,7 +1941,7 @@ func wrapUnreachableTrap(err error) error {
 }
 
 // invokeEntered is invoke's actual call body, split out purely for
-// readability at the poisoning boundary (see the two explicit in.poisoned =
+// readability at the poisoning boundary (see the two explicit in.sched.lockdown =
 // true sites below, at the ONLY two points this export's own guest code
 // actually runs: be.coreFn.CallWithStack and be.postReturnFn.CallWithStack).
 //
@@ -1892,6 +1961,11 @@ func wrapUnreachableTrap(err error) error {
 // surface AS be.coreFn.CallWithStack failing, so this narrower rule still
 // covers everything that suite (or the spec) requires here.
 func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportName string, args []abi.Value) ([]abi.Value, error) {
+	// syncTask is this call's own Task, when the instance needs one: runSyncCore
+	// below runs the core call as that task's implicit thread. nil means this
+	// instance never needed task tracking at all, and the core call runs
+	// straight through.
+	var syncTask *task
 	if in.syncTaskNeeded {
 		// The reference's canon_lift constructs a Task for EVERY call,
 		// including a not-opts.async_ sync lift (definitions.py:2144-2202);
@@ -1904,12 +1978,19 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 		// task is restored on return -- including through the two poisoning
 		// error returns below, via defer.
 		t := &task{inst: in, be: be, state: taskStarted, syncImplicit: true}
-		prevActive, prevBase := in.activeTask, in.syncBase
+		syncTask = t
+		prevActive, prevBase, prevThread := in.activeTask, in.syncBase, in.activeThread
 		in.activeTask, in.syncBase = t, t
-		defer func() { in.activeTask, in.syncBase = prevActive, prevBase }()
+		// This sync call's own implicit thread is current for its duration --
+		// see enterRun. A reentrant sync call nested inside a spawned thread's
+		// frames must not report that thread as current.
+		in.activeThread = nil
+		defer func() {
+			in.activeTask, in.syncBase, in.activeThread = prevActive, prevBase, prevThread
+		}()
 	}
-	mem, memAvailable := memoryBytesOf(be.mod)
-	realloc := cachedReallocOf(ctx, be)
+	mem, memAvailable := memoryBytesOf(be.memMod)
+	realloc := cachedReallocOf(ctx, in, be)
 
 	// coreArgsPtr's buffer, like stack below, is pure scratch local to this
 	// call (lowerParams only ever appends into it; nothing downstream of
@@ -1922,7 +2003,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	if in.syncBase != nil && in.activeTask == in.syncBase {
 		scope = in.syncBase
 	}
-	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName, *coreArgsPtr, &scope)
+	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, &realloc, exportName, *coreArgsPtr, &scope)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
 		return nil, err
@@ -1958,9 +2039,24 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	}
 	putCoreValueSlice(coreArgsPtr) // coreArgs' bits are now copied into stack; done with it
 
-	if err := be.coreFn.CallWithStack(ctx, stack); err != nil {
+	// The gate is tested BEFORE the closure is built, not inside runSyncCore:
+	// `func() error { ... }` captures ctx, be and stack, so building it
+	// unconditionally puts a heap allocation on every synchronous component
+	// call -- the one path that has none to spare (BenchmarkCallAdd went from
+	// 2 allocs/op to 3 when this read as a single call).
+	var callErr error
+	if syncTask != nil && in.mayThreadSwitch {
+		// This call's implicit thread has to be a real, independently resumable
+		// continuation -- see runSyncCore.
+		callErr = in.runSyncCore(syncTask, exportName, func() error {
+			return be.coreFn.CallWithStack(ctx, stack)
+		})
+	} else {
+		callErr = be.coreFn.CallWithStack(ctx, stack)
+	}
+	if err := callErr; err != nil {
 		putUint64Slice(stackPtr)
-		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
+		in.sched.lockdown = true // guest code actually ran and trapped -- see this func's doc
 		err = wrapUnreachableTrap(err)
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
 	}
@@ -1968,7 +2064,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	// resource lent to the call must have been dropped by now.
 	if scope != nil && scope.numBorrows > 0 {
 		putUint64Slice(stackPtr)
-		in.poisoned = true
+		in.sched.lockdown = true
 		return nil, fmt.Errorf("component/instance: export %q: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
 	}
 	// rawResults ALIASES the pooled stack, so stack must not be returned to the
@@ -1979,7 +2075,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	// call, which replaces the backing array -- and the old one may already
 	// have gone back to the buffer pool, so lifting through the pre-call
 	// slice can read a buffer that now belongs to a different module.
-	mem, memAvailable = memoryBytesOf(be.mod)
+	mem, memAvailable = memoryBytesOf(be.memMod)
 	results, err := in.liftResult(be, rawResults, mem, memAvailable, exportName)
 	if err != nil {
 		putUint64Slice(stackPtr)
@@ -1997,9 +2093,9 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 		}
 		// post-return takes the same flat results as params; CallWithStack lets
 		// it reuse rawResults' own buffer (the guest reads params, writes none).
-		if err := be.postReturnFn.CallWithStack(ctx, rawResults); err != nil {
+		if err := in.callPostReturn(ctx, be, rawResults); err != nil {
 			putUint64Slice(stackPtr)
-			in.poisoned = true // guest code actually ran and trapped -- see this func's doc
+			in.sched.lockdown = true // guest code actually ran and trapped -- see this func's doc
 			return nil, fmt.Errorf("component/instance: export %q: post-return %q: %w", exportName, be.postReturnFuncName, err)
 		}
 	}
@@ -2019,7 +2115,7 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 //
 // scope is the call's borrow scope: the task's, or created when a host
 // resource is first lent (see lendHostBorrow).
-func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue, scope **task) ([]abi.CoreValue, error) {
+func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc *abi.Realloc, exportName string, dst []abi.CoreValue, scope **task) ([]abi.CoreValue, error) {
 	coreArgs := dst
 	var err error
 
@@ -2045,7 +2141,7 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 				}
 			}
 		}
-		ptr, err := abi.SpillValue(tupleVal, be.paramTuple, mem, in.resolve, realloc)
+		ptr, err := abi.SpillValue(tupleVal, be.paramTuple, mem, in.resolve, *realloc)
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q: spill parameter list: %w", exportName, err)
 		}
@@ -2128,12 +2224,17 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		if len(rawResults) != 1 {
 			return nil, fmt.Errorf("component/instance: export %q: core func returned %d value(s) for a spilled (pointer) result, expected 1", exportName, len(rawResults))
 		}
-		val, err := abi.Load(mem, uint32(rawResults[0]), rt, in.resolve)
+		val, err := abi.LoadEnc(mem, uint32(rawResults[0]), rt, in.resolve, be.enc)
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q result: load spilled result: %w", exportName, err)
 		}
 		if val, err = in.takeAsyncResult(rt, val, be.resultNest, exportName); err != nil {
 			return nil, err
+		}
+		if be.resultHasOwn {
+			if err := in.checkOwnResult(val, rt, be.resolve, 0); err != nil {
+				return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+			}
 		}
 		return []abi.Value{val}, nil
 	}
@@ -2167,7 +2268,101 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 	if val, err = in.takeAsyncResult(rt, val, be.resultNest, exportName); err != nil {
 		return nil, err
 	}
+	if be.resultHasOwn {
+		if err := in.checkOwnResult(val, rt, be.resolve, 0); err != nil {
+			return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+		}
+	}
 	return []abi.Value{val}, nil
+}
+
+// callPostReturn runs be's post-return function on the lift's flat results,
+// with leaving the instance forbidden while it runs, as canon_lift does: an
+// import, or any built-in that checks may_leave, traps.
+func (in *Instance) callPostReturn(ctx context.Context, be *boundExport, results []uint64) error {
+	in.mayLeave = false
+	err := be.postReturnFn.CallWithStack(ctx, results)
+	in.mayLeave = true
+	return err
+}
+
+// checkOwnResult is lift_own's checks on every own<T> in an export's result:
+// the handle names a live own of resource T that nothing borrows. The host
+// keeps the handle in this table, to drop through DropResource, so unlike
+// lift_own nothing is removed. Only a guest-defined T is checked: a host
+// resource's handle carries the tag the host minted it under, which no
+// component index names.
+func (in *Instance) checkOwnResult(v abi.Value, t binary.TypeDesc, resolve abi.Resolver, depth int) error {
+	if depth > maxResourceWalkDepth {
+		return nil
+	}
+	sub := func(v abi.Value, ref *binary.TypeRef) error {
+		et, err := resolveTypeRef(ref, resolve)
+		if err != nil {
+			return err
+		}
+		return in.checkOwnResult(v, et, resolve, depth+1)
+	}
+	switch d := t.(type) {
+	case binary.OwnDesc:
+		h, ok := v.(uint32)
+		if !ok || in.comp == nil || in.isGuestResource == nil || !in.isGuestResource(d.ResourceType) {
+			return nil
+		}
+		return in.resources.checkOwn(h, in.canonTag(in.comp.ResourceDefIndex(d.ResourceType)), func(tag uint32) uint32 {
+			return in.canonTag(in.comp.ResourceDefIndex(tag))
+		})
+	case binary.ListDesc:
+		list, _ := v.([]abi.Value)
+		for _, e := range list {
+			if err := sub(e, &d.Element); err != nil {
+				return err
+			}
+		}
+	case binary.RecordDesc:
+		fields, _ := v.([]abi.Value)
+		for i := range d.Fields {
+			if i < len(fields) {
+				if err := sub(fields[i], &d.Fields[i].Type); err != nil {
+					return err
+				}
+			}
+		}
+	case binary.TupleDesc:
+		elems, _ := v.([]abi.Value)
+		for i := range d.Elements {
+			if i < len(elems) {
+				if err := sub(elems[i], &d.Elements[i]); err != nil {
+					return err
+				}
+			}
+		}
+	case binary.OptionDesc:
+		if s, ok := v.(abi.Some); ok {
+			v = s.Value
+		}
+		if v != nil {
+			return sub(v, &d.Element)
+		}
+	case binary.ResultDesc:
+		rv, ok := v.(abi.ResultValue)
+		if !ok || rv.Payload == nil {
+			return nil
+		}
+		ref := d.Ok
+		if rv.IsErr {
+			ref = d.Err
+		}
+		if ref != nil {
+			return sub(rv.Payload, ref)
+		}
+	case binary.VariantDesc:
+		vv, ok := v.(abi.VariantValue)
+		if ok && !u32.OutOfRange(vv.Disc, len(d.Cases)) && d.Cases[vv.Disc].Type != nil && vv.Payload != nil {
+			return sub(vv.Payload, d.Cases[vv.Disc].Type)
+		}
+	}
+	return nil
 }
 
 // takeAsyncResult lifts the streams, futures and error contexts in an
@@ -2361,8 +2556,8 @@ func reallocOf(ctx context.Context, mod api.Module) abi.Realloc {
 // so this per-invoke construction is a stack struct literal -- no closure
 // allocation on the hot lowering path. A nil be.reallocCall (module exports no
 // cabi_realloc) makes Realloc.grow fail loud, matching reallocOf.
-func cachedReallocOf(ctx context.Context, be *boundExport) abi.Realloc {
-	return abi.Realloc{Ctx: ctx, Call: be.reallocCall, Mem: be.memFn}
+func cachedReallocOf(ctx context.Context, in *Instance, be *boundExport) abi.Realloc {
+	return abi.Realloc{Ctx: ctx, Call: be.reallocCall, Mem: be.memFn, Encoding: be.enc, MayLeave: &in.mayLeave}
 }
 
 // coreReallocCall wraps an already-resolved cabi_realloc api.Function as the

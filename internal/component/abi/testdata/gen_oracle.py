@@ -31,6 +31,10 @@ def load_definitions():
     whose introspection needs to find the module in sys.modules by name, so we
     register it there before exec_module runs.
     """
+    if sys.version_info < (3, 14):
+        # Its annotations name classes it defines further down, which only
+        # deferred evaluation of annotations (PEP 649) allows.
+        raise SystemExit("definitions.py needs Python 3.14 or later")
     path = os.path.join(HERE, "definitions.py")
     spec = importlib.util.spec_from_file_location("refabi", path)
     mod = importlib.util.module_from_spec(spec)
@@ -48,11 +52,15 @@ PTR_TYPE = "i32"
 
 class Opts:
     """Minimal stand-in for CanonicalOptions, just enough for flatten_functype
-    and alignment/elem_size (which only need memory.ptr_type() and async_)."""
+    and alignment/elem_size (which only need the memory's pointer type and
+    async_)."""
 
     class _Mem:
         def ptr_type(self_inner):
             return PTR_TYPE
+
+        def ptr_size(self_inner):
+            return ref.ptr_size(PTR_TYPE)
 
     def __init__(self):
         self.memory = Opts._Mem()
@@ -62,9 +70,16 @@ class Opts:
 
 OPTS = Opts()
 
-# A dummy ResourceType for own/borrow: alignment/elem_size/flatten never
-# dereference rt.impl, so None is a safe stand-in.
-DUMMY_RESOURCE = ref.ResourceType(impl=None)
+# The instance a type's layout is computed in, and the one a resource
+# belongs to. They differ, so a borrow is a handle, not its rep: the
+# reference passes the rep only when lowering a borrow into the resource's
+# own instance (pass_rep_not_handle), which no battery entry models.
+CX_INST = object()
+DUMMY_RESOURCE = ref.ResourceType(impl_inst=object(), rep=PTR_TYPE)
+
+
+def cx(direction):
+    return ref.LiftLowerContext(direction, OPTS, CX_INST)
 
 
 def build_type(spec, by_name):
@@ -179,8 +194,8 @@ def main():
 
         if spec["kind"] == "func":
             ft = FuncTypeSpec(spec, by_name)
-            lift = ref.flatten_functype(OPTS, ft, "lift")
-            lower = ref.flatten_functype(OPTS, ft, "lower")
+            lift = ref.flatten_functype(cx("lift"), ft)
+            lower = ref.flatten_functype(cx("lower"), ft)
             golden[name] = {
                 "kind": "func",
                 "lift": {
@@ -198,9 +213,9 @@ def main():
         t = build_type(spec, by_name)
         by_name[name] = t
 
-        size = ref.elem_size(t, PTR_TYPE)
-        align = ref.alignment(t, PTR_TYPE)
-        flat = ref.flatten_type(t, OPTS)
+        size = ref.elem_size(cx("lift"), t)
+        align = ref.alignment(cx("lift"), t)
+        flat = ref.flatten_type(cx("lift"), t)
 
         golden[name] = {
             "kind": "value",
@@ -208,6 +223,9 @@ def main():
             "alignment": align,
             "flatten": core_type_names(flat),
         }
+
+    if len(golden) != len(battery):
+        raise SystemExit(f"{len(golden)} golden entries for {len(battery)} battery entries: names collide")
 
     with open(golden_path, "w") as f:
         json.dump(golden, f, indent=2, sort_keys=True)

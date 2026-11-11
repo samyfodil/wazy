@@ -13,5 +13,5 @@ what `wasm-tools parse` (1.253.0) encodes.
   shim, and passes the same func aliased back out of the bundle as a bare
   func arg; both reach the sibling the shim was given.
   `bundle_arg_parent_lift` is the same shape around this component's own
-  lift, which the nested component may not call. These two are encoded by
-  1.262.0.
+  lift, which the nested component calls into its parent. These two are
+  encoded by 1.262.0.

@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -258,7 +259,7 @@ func TestStreamNewHostFunc_ReadableAddedFirst(t *testing.T) {
 func TestStreamCopy_EndNotIdleTraps(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareStreamEnds(in)
-	readFn := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true /*async*/, nil, nil)
+	readFn := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true /*async*/, nil, nil, abi.UTF8)
 	// Async read on an empty stream parks (BLOCKED).
 	out := callBuiltin(readFn, uint64(r), 0, 5)
 	if uint32(out[0]) != blockedSentinel {
@@ -274,21 +275,21 @@ func TestStreamCopy_SyncOnJoinedSetTraps(t *testing.T) {
 	r, _ := newBareStreamEnds(in)
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(r), uint64(set))
-	syncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, false /*async*/, nil, nil)
+	syncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, false /*async*/, nil, nil, abi.UTF8)
 	requirePanicContains(t, "waitable cannot be used synchronously while added to a waitable set", func() { callBuiltin(syncRead, uint64(r), 0, 1) })
 }
 
 func TestStreamCopy_DeadlockOnEmptyRunq(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareStreamEnds(in)
-	syncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, false, nil, nil)
+	syncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, false, nil, nil, abi.UTF8)
 	requirePanicContains(t, "deadlock", func() { callBuiltin(syncRead, uint64(r), 0, 1) })
 }
 
 func TestStreamCopy_BlockedSentinelAsync(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareStreamEnds(in)
-	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
+	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	out := callBuiltin(asyncRead, uint64(r), 0, 1)
 	if uint32(out[0]) != blockedSentinel {
 		t.Fatalf("got %#x, want BLOCKED (%#x)", out[0], uint32(blockedSentinel))
@@ -307,7 +308,7 @@ func TestStreamCopy_BlockedSentinelAsync(t *testing.T) {
 func TestStreamDrop_UndeliveredCompletion_TrapsCopyingNotAssert(t *testing.T) {
 	in := newAsyncInst()
 	r, w := newBareStreamEnds(in)
-	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
+	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	out := callBuiltin(asyncRead, uint64(r), 0, 3)
 	if uint32(out[0]) != blockedSentinel {
 		t.Fatalf("read did not park: %#x", out[0])
@@ -361,13 +362,21 @@ func TestStreamDrop_UndeliveredCompletion_TrapsCopyingNotAssert(t *testing.T) {
 	_ = w
 }
 
-// TestStreamCancel_RacingCompletionDeliversCompleted proves the second half
-// of §1.3: a cancel that races a completion must deliver COMPLETED (not
-// CANCELLED) because the already-pending event is what gets delivered.
-func TestStreamCancel_RacingCompletionDeliversCompleted(t *testing.T) {
+// TestStreamCancel_RacingCompletionDeliversCancelledWithProgress replaces a test
+// asserting the opposite.
+//
+// A cancel that races a completion delivers CANCELLED -- carrying the progress
+// the completion already made. StreamEnd.notify stores a closure that reads
+// self.state when the event is DELIVERED (definitions.py ~1008-1024), and
+// cancel_copy flips the state to CANCELLING_COPY before delivering, so the
+// already-pending event comes out as CANCELLED | progress<<4 rather than
+// COMPLETED. cancel-stream.wast's cancel-read-after-completion asserts the
+// exact packing, and goes on to require the end to be IDLE and reusable
+// afterwards.
+func TestStreamCancel_RacingCompletionDeliversCancelledWithProgress(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareStreamEnds(in)
-	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
+	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	callBuiltin(asyncRead, uint64(r), 0, 2)
 
 	re, _ := in.resources.getEntry(r)
@@ -383,9 +392,8 @@ func TestStreamCancel_RacingCompletionDeliversCompleted(t *testing.T) {
 
 	cancelFn := cancelCopyHostFunc(in, false, sideReadable, eventStreamRead, nil, true)
 	out := callBuiltin(cancelFn, uint64(r))
-	res := copyResult(uint32(out[0]) & 0xf)
-	if res != copyCompleted {
-		t.Fatalf("cancel racing a completion delivered %v, want COMPLETED (the race was lost)", res)
+	if got, want := uint32(out[0]), packCopyResult(copyCancelled, 2); got != want {
+		t.Fatalf("cancel racing a completion delivered %#x, want %#x (CANCELLED with the 2 items already copied)", got, want)
 	}
 	if se.state != copyIdle {
 		t.Fatalf("state after delivering the raced completion = %v, want copyIdle", se.state)
@@ -400,7 +408,7 @@ func TestStreamCancel_RacingCompletionDeliversCompleted(t *testing.T) {
 func TestStreamCancel_ParkedNeverMatched(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareStreamEnds(in)
-	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
+	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	callBuiltin(asyncRead, uint64(r), 0, 4)
 
 	cancelFn := cancelCopyHostFunc(in, false, sideReadable, eventStreamRead, nil, true)
@@ -440,8 +448,12 @@ func TestStreamDrop_WrongSideAndKindTrap(t *testing.T) {
 	requirePanicContains(t, "not a readable stream end", func() {
 		callBuiltin(streamDropHostFunc(in, sideReadable, nil), uint64(w))
 	})
-	requirePanicContains(t, "not a stream end", func() {
+	requirePanicContains(t, "unknown handle index 999", func() {
 		callBuiltin(streamDropHostFunc(in, sideReadable, nil), uint64(999))
+	})
+	fr, _ := newBareFutureEnds(in)
+	requirePanicContains(t, fmt.Sprintf("handle index %d used with the wrong type: not a stream end", fr), func() {
+		callBuiltin(streamDropHostFunc(in, sideReadable, nil), uint64(fr))
 	})
 	_ = r
 }
@@ -459,7 +471,7 @@ func TestFutureCopy_WriteDroppedAfterReaderClose(t *testing.T) {
 	// Drop the readable end first (simulating a reader that gave up).
 	callBuiltin(futureDropHostFunc(in, sideReadable, nil), uint64(r))
 
-	writeFn := futureCopyHostFunc(in, sideWritable, eventFutureWrite, nil, 0, 0, true, true, nil, nil)
+	writeFn := futureCopyHostFunc(in, sideWritable, eventFutureWrite, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	out := callBuiltin(writeFn, uint64(w), 0)
 	res := copyResult(uint32(out[0]))
 	if res != copyDropped {
@@ -472,7 +484,7 @@ func TestFutureCopy_WriteDroppedAfterReaderClose(t *testing.T) {
 func TestFutureCopy_ElemTypeMismatchTraps(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareFutureEnds(in) // bare (nil) element
-	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, binary.PrimitiveDesc{Prim: "u32"}, 4, 4, true, true, nil, nil)
+	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, binary.PrimitiveDesc{Prim: "u32"}, 4, 4, true, true, nil, nil, abi.UTF8)
 	requirePanicContains(t, "element type mismatch", func() { callBuiltin(readFn, uint64(r), 0) })
 }
 
@@ -491,7 +503,7 @@ func TestTakeReadableStreamEnd_Traps(t *testing.T) {
 		t.Fatal("expected an element-type-mismatch trap")
 	}
 	// A COPYING (in-flight) readable end cannot be transferred.
-	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
+	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	callBuiltin(asyncRead, uint64(r), 0, 1)
 	if _, err := takeReadableStreamEnd(in, in.resources, nil, in.resolve, r); err == nil {
 		t.Fatal("expected a trap transferring a COPYING readable end")
@@ -532,7 +544,7 @@ func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 		t.Fatal("write failed")
 	}
 
-	newFn := errorContextNewHostFunc(in, nil)
+	newFn := errorContextNewHostFunc(in, nil, abi.UTF8)
 	stack := []uint64{0, uint64(len(msg)), 0, 0}
 	newFn.fn.Call(ctx, mod, stack)
 	h := uint32(stack[0])
@@ -547,7 +559,7 @@ func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 	}
 
 	// debug-message stores [ptr:4][len:4] at the given out-pointer.
-	dmFn := errorContextDebugMessageHostFunc(in, nil, nil)
+	dmFn := errorContextDebugMessageHostFunc(in, nil, nil, abi.UTF8)
 	outPtr := uint32(64)
 	dmFn.fn.Call(ctx, mod, []uint64{uint64(h), uint64(outPtr), 0, 0})
 	b, ok := mem.Read(outPtr, 8)

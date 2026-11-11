@@ -242,11 +242,23 @@ func hasAsyncOpt(canon binary.Canon) bool {
 	return false
 }
 
+func isStreamCanonKind(k byte) bool {
+	switch k {
+	case binary.CanonKindStreamNew, binary.CanonKindStreamRead, binary.CanonKindStreamWrite,
+		binary.CanonKindStreamCancelRead, binary.CanonKindStreamCancelWrite,
+		binary.CanonKindStreamDropReadable, binary.CanonKindStreamDropWritable,
+		binary.CanonKindStreamForward:
+		return true
+	}
+	return false
+}
+
 func isFutureCanonKind(k byte) bool {
 	switch k {
 	case binary.CanonKindFutureNew, binary.CanonKindFutureRead, binary.CanonKindFutureWrite,
 		binary.CanonKindFutureCancelRead, binary.CanonKindFutureCancelWrite,
-		binary.CanonKindFutureDropReadable, binary.CanonKindFutureDropWritable:
+		binary.CanonKindFutureDropReadable, binary.CanonKindFutureDropWritable,
+		binary.CanonKindFutureForward:
 		return true
 	}
 	return false
@@ -269,7 +281,7 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		return futureNewHostFunc(in, elemDesc, elemSz, align, numeric), nil
 
 	case binary.CanonKindStreamRead, binary.CanonKindStreamWrite:
-		memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		memMod, reallocFn, enc, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 		if merr != nil {
 			return hostFuncDef{}, merr
 		}
@@ -286,10 +298,10 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 			// nested-driving. See guestTask.promoted.
 			in.mayBlockSync = true
 		}
-		return streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn), nil
+		return streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn, enc), nil
 
 	case binary.CanonKindFutureRead, binary.CanonKindFutureWrite:
-		memMod, reallocFn, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
+		memMod, reallocFn, enc, merr := canonMemoryAndRealloc(canon, coreMemTarget, coreFuncTarget)
 		if merr != nil {
 			return hostFuncDef{}, merr
 		}
@@ -301,7 +313,7 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		if !async {
 			in.mayBlockSync = true // see the stream.read/write case above
 		}
-		return futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn), nil
+		return futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, memMod, reallocFn, enc), nil
 
 	case binary.CanonKindStreamCancelRead, binary.CanonKindStreamCancelWrite:
 		side, evCode := sideReadable, eventStreamRead
@@ -337,6 +349,11 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 		}
 		return futureDropHostFunc(in, side, elemDesc), nil
 
+	case binary.CanonKindStreamForward:
+		return streamForwardHostFunc(in, elemDesc), nil
+	case binary.CanonKindFutureForward:
+		return futureForwardHostFunc(in, elemDesc), nil
+
 	default:
 		return hostFuncDef{}, fmt.Errorf("canon kind %#x is not a stream/future builtin", canon.Kind)
 	}
@@ -349,15 +366,18 @@ func streamFutureCanonHostFunc(comp *binary.Component, in *Instance, canon binar
 // state checks, matching Phase 1's validate-then-remove convention.
 func requireStreamEnd(in *Instance, name string, i uint32, side endSide, elemDesc binary.TypeDesc) *streamEnd {
 	raw, ok := in.resources.getEntry(i)
+	if !ok {
+		panic(fmt.Errorf("component/instance: %s: unknown handle index %d", name, i))
+	}
 	se, isSE := raw.(*streamEnd)
-	if !ok || !isSE {
-		panic(fmt.Errorf("component/instance: %s: handle %d is not a stream end", name, i))
+	if !isSE {
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a stream end", name, i))
 	}
 	if se.side != side {
-		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s stream end", name, i, sideName(side)))
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a %s stream end", name, i, sideName(side)))
 	}
 	if !elemTypesCompatible(se.shared.elemIn, se.shared.elem, se.shared.elemResolve, in, elemDesc, in.resolve) {
-		panic(fmt.Errorf("component/instance: %s: handle %d: stream element type mismatch", name, i))
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: stream element type mismatch", name, i))
 	}
 	return se
 }
@@ -365,15 +385,18 @@ func requireStreamEnd(in *Instance, name string, i uint32, side endSide, elemDes
 // requireFutureEnd is requireStreamEnd's future twin.
 func requireFutureEnd(in *Instance, name string, i uint32, side endSide, elemDesc binary.TypeDesc) *futureEnd {
 	raw, ok := in.resources.getEntry(i)
+	if !ok {
+		panic(fmt.Errorf("component/instance: %s: unknown handle index %d", name, i))
+	}
 	fe, isFE := raw.(*futureEnd)
-	if !ok || !isFE {
-		panic(fmt.Errorf("component/instance: %s: handle %d is not a future end", name, i))
+	if !isFE {
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a future end", name, i))
 	}
 	if fe.side != side {
-		panic(fmt.Errorf("component/instance: %s: handle %d is not a %s future end", name, i, sideName(side)))
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: not a %s future end", name, i, sideName(side)))
 	}
 	if !elemTypesCompatible(fe.shared.elemIn, fe.shared.elem, fe.shared.elemResolve, in, elemDesc, in.resolve) {
-		panic(fmt.Errorf("component/instance: %s: handle %d: future element type mismatch", name, i))
+		panic(fmt.Errorf("component/instance: %s: handle index %d used with the wrong type: future element type mismatch", name, i))
 	}
 	return fe
 }
@@ -395,8 +418,12 @@ func streamNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "stream.new")
 		shared := &sharedStream{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in, elemResolve: in.resolve}
-		ri := in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared})
-		wi := in.resources.addEntry(&streamEnd{side: sideWritable, state: copyIdle, shared: shared})
+		re := &streamEnd{side: sideReadable, state: copyIdle, shared: shared}
+		we := &streamEnd{side: sideWritable, state: copyIdle, shared: shared}
+		ri := in.resources.addEntry(re)
+		wi := in.resources.addEntry(we)
+		registerStreamEnd(re, ri)
+		registerStreamEnd(we, wi)
 		stack[0] = uint64(ri) | uint64(wi)<<32
 	})
 	return hostFuncDef{fn: fn, params: nil, results: []api.ValueType{api.ValueTypeI64}}
@@ -408,8 +435,12 @@ func futureNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
 		requireMayLeave(in, "future.new")
 		shared := &sharedFuture{elem: elemDesc, elemSz: elemSz, align: align, numeric: numeric, elemIn: in, elemResolve: in.resolve}
-		ri := in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared})
-		wi := in.resources.addEntry(&futureEnd{side: sideWritable, state: copyIdle, shared: shared})
+		re := &futureEnd{side: sideReadable, state: copyIdle, shared: shared}
+		we := &futureEnd{side: sideWritable, state: copyIdle, shared: shared}
+		ri := in.resources.addEntry(re)
+		wi := in.resources.addEntry(we)
+		registerFutureEnd(re, ri)
+		registerFutureEnd(we, wi)
 		stack[0] = uint64(ri) | uint64(wi)<<32
 	})
 	return hostFuncDef{fn: fn, params: nil, results: []api.ValueType{api.ValueTypeI64}}
@@ -425,7 +456,7 @@ func futureNewHostFunc(in *Instance, elemDesc binary.TypeDesc, elemSz, align uin
 // stream.drop-readable's trap_if(copying()) fire on a completed-but-
 // undelivered copy, and what makes stream.cancel-read racing a completion
 // deliver COMPLETED instead of CANCELLED.
-func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc binary.TypeDesc, elemSz, align uint32, numeric, async bool, memMod api.Module, reallocFn api.Function) hostFuncDef {
+func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc binary.TypeDesc, elemSz, align uint32, numeric, async bool, memMod api.Module, reallocFn api.Function, enc abi.Encoding) hostFuncDef {
 	name := "stream.write"
 	if side == sideReadable {
 		name = "stream.read"
@@ -471,6 +502,7 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 		} else if m != nil {
 			realloc = reallocOf(ctx, m)
 		}
+		realloc.Encoding, realloc.MayLeave = enc, &in.mayLeave
 
 		buf, err := newGuestBuffer(in, m, realloc, in.resolve, elemDesc, elemSz, align, numeric, ptr, n)
 		if err != nil {
@@ -478,12 +510,28 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 		}
 
 		// -- the three closures, verbatim from stream_copy --
-		streamEvent := func(result copyResult, reclaim func()) eventTuple {
+		// The result is decided HERE, at delivery, from the end's state -- not
+		// captured when the copy finished. StreamEnd.notify stores a closure and
+		// reads self.state inside it (definitions.py ~1008-1024), which is what
+		// lets a stream.cancel-write issued after a completion still report
+		// CANCELLED with the progress that already happened: cancel_copy flips
+		// the state to CANCELLING_COPY and then delivers the event that was
+		// already pending. cancel-stream.wast's cancel-{write,read}-after-
+		// completion assert exactly that packing (CANCELLED | 2<<4), and wazy
+		// baked COMPLETED into the closure at copy time instead.
+		//
+		// dropped is the reference's `self.other is None` -- the peer end is
+		// gone, which outranks a pending cancellation.
+		streamEvent := func(dropped bool, reclaim func()) eventTuple {
 			reclaim()
-			if result == copyDropped {
-				e.state = copyDone
-			} else {
-				e.state = copyIdle
+			var result copyResult
+			switch {
+			case dropped:
+				result, e.state = copyDropped, copyDone
+			case e.state == copyCancelling:
+				result, e.state = copyCancelled, copyIdle
+			default:
+				result, e.state = copyCompleted, copyIdle
 			}
 			return eventTuple{code: evCode, p1: i, p2: packCopyResult(result, buf.progressed())}
 		}
@@ -495,11 +543,12 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// though it arrived via the same pre-copy-remain()>0 branch in
 			// sharedStream.write/read. See streamEnd.livePending's doc.
 			e.livePending = buf.remain() > 0
-			e.setPendingEvent(func() eventTuple { return streamEvent(copyCompleted, reclaim) })
+			e.setPendingEvent(func() eventTuple { return streamEvent(false, reclaim) })
 		}
 		onCopyDone := func(result copyResult) {
 			e.livePending = false // final -- see streamEnd.livePending's doc
-			e.setPendingEvent(func() eventTuple { return streamEvent(result, func() {}) })
+			dropped := result == copyDropped
+			e.setPendingEvent(func() eventTuple { return streamEvent(dropped, func() {}) })
 		}
 
 		e.livePending = false
@@ -539,7 +588,13 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// to waitable.join's/subtask.cancel's in-set trap (§6.3).
 			e.waitablePtr().syncWaiter = true
 			if blk != nil {
-				blk.block(e.hasPendingEvent, false)
+				// A cancel-wake (subtask.cancel resuming us while parked here)
+				// returns from block with no event pending: cancel the copy so it
+				// reports CANCELLED, exactly as an explicit stream.cancel-read
+				// would, instead of reading an event that never arrived.
+				if blk.block(e.hasPendingEvent) && !e.hasPendingEvent() {
+					e.sharedCancel()
+				}
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				e.waitablePtr().syncWaiter = false
 				panic(wrapSchedErr(name, derr))
@@ -556,7 +611,7 @@ func streamCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 // future.write (0x17): the same skeleton as streamCopyHostFunc minus n (core
 // sig (i32, i32) -> i32; buffer length pinned to 1), minus onCopy (no partial
 // progress), and with the raw result as payload (no progress shift).
-func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc binary.TypeDesc, elemSz, align uint32, numeric, async bool, memMod api.Module, reallocFn api.Function) hostFuncDef {
+func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc binary.TypeDesc, elemSz, align uint32, numeric, async bool, memMod api.Module, reallocFn api.Function, enc abi.Encoding) hostFuncDef {
 	name := "future.write"
 	if side == sideReadable {
 		name = "future.read"
@@ -594,6 +649,7 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 		} else if m != nil {
 			realloc = reallocOf(ctx, m)
 		}
+		realloc.Encoding, realloc.MayLeave = enc, &in.mayLeave
 
 		buf, err := newGuestBuffer(in, m, realloc, in.resolve, elemDesc, elemSz, align, numeric, ptr, 1)
 		if err != nil {
@@ -638,7 +694,13 @@ func futureCopyHostFunc(in *Instance, side endSide, evCode eventCode, elemDesc b
 			// and identical syncWaiter bracket (§6.2).
 			e.waitablePtr().syncWaiter = true
 			if blk != nil {
-				blk.block(e.hasPendingEvent, false)
+				// A cancel-wake (subtask.cancel resuming us while parked here)
+				// returns from block with no event pending: cancel the copy so it
+				// reports CANCELLED, exactly as an explicit stream.cancel-read
+				// would, instead of reading an event that never arrived.
+				if blk.block(e.hasPendingEvent) && !e.hasPendingEvent() {
+					e.sharedCancel()
+				}
 			} else if derr := in.sched.drive(e.hasPendingEvent); derr != nil {
 				e.waitablePtr().syncWaiter = false
 				panic(wrapSchedErr(name, derr))
@@ -675,11 +737,29 @@ func streamDropHostFunc(in *Instance, side endSide, elemDesc binary.TypeDesc) ho
 			}
 			panic(fmt.Errorf("component/instance: %s: stream end %d: cannot %s busy stream", name, i, verb))
 		}
-		e.shared.drop() // counterpart's parked copy => DROPPED event
-		e.dropWaitable()
+		e.drop()
 		in.resources.removeEntry(i)
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: nil}
+}
+
+// drop is End.drop for an end already taken out of its table: the
+// counterpart's parked copy, or the idle counterpart itself, learns of it.
+func (e *streamEnd) drop() {
+	peer, peerSide := peerOfStream(e)
+	clearStreamEnd(e)
+	e.shared.drop() // counterpart's parked copy => DROPPED event
+	notifyPeerDropped(e.shared.dropDebt(), peerSide, peer)
+	e.dropWaitable()
+}
+
+// drop is streamEnd.drop's future twin.
+func (e *futureEnd) drop() {
+	peer, peerSide := peerOfFuture(e)
+	clearFutureEnd(e)
+	e.shared.drop()
+	notifyPeerDropped(e.shared.dropDebt(), peerSide, peer)
+	e.dropWaitable()
 }
 
 // futureDropHostFunc backs future.drop-readable (0x1a) / future.drop-writable
@@ -703,11 +783,118 @@ func futureDropHostFunc(in *Instance, side endSide, elemDesc binary.TypeDesc) ho
 		if e.copying() {
 			panic(fmt.Errorf("component/instance: %s: future end %d: cannot have concurrent operations active on a future/stream", name, i))
 		}
-		e.shared.drop()
-		e.dropWaitable()
+		e.drop()
 		in.resources.removeEntry(i)
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: nil}
+}
+
+// forwardTrapText is what canon_{stream,future}.forward traps with for an end
+// that is not IDLE or is joined to a waitable set, or "" when it is neither.
+func forwardTrapText(kind string, side endSide, state copyState, inSet bool) string {
+	switch {
+	case state == copyDone:
+		peer := "writable"
+		if side == sideWritable {
+			peer = "readable"
+		}
+		return "cannot forward " + kind + " after being notified that the " + peer + " end dropped"
+	case state != copyIdle:
+		return "cannot forward busy " + kind
+	case inSet:
+		return "cannot forward " + kind + " while it's in a waitable set"
+	}
+	return ""
+}
+
+// streamForwardHostFunc backs stream.forward (0x2e), canon_stream_forward.
+// Core sig (ri, wi: i32) -> (): this instance gives up the readable end ri and
+// the writable end wi, and the writer feeding ri is joined directly to the
+// reader wi feeds, so no copy passes through this instance again.
+func streamForwardHostFunc(in *Instance, elemDesc binary.TypeDesc) hostFuncDef {
+	const name = "stream.forward"
+	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+		requireMayLeave(in, name)
+		ri, wi := api.DecodeU32(stack[0]), api.DecodeU32(stack[1])
+		src := requireStreamEnd(in, name, ri, sideReadable, elemDesc)
+		if msg := forwardTrapText("stream", sideReadable, src.state, src.inWaitableSet()); msg != "" {
+			panic(fmt.Errorf("component/instance: %s: stream end %d: %s", name, ri, msg))
+		}
+		if wi == ri { // the reference has already removed ri by now
+			panic(fmt.Errorf("component/instance: %s: unknown handle index %d", name, wi))
+		}
+		dst := requireStreamEnd(in, name, wi, sideWritable, elemDesc)
+		if msg := forwardTrapText("stream", sideWritable, dst.state, dst.inWaitableSet()); msg != "" {
+			panic(fmt.Errorf("component/instance: %s: stream end %d: %s", name, wi, msg))
+		}
+		in.resources.removeEntry(ri)
+		in.resources.removeEntry(wi)
+		if err := forwardStream(src, dst); err != nil {
+			panic(fmt.Errorf("component/instance: %s: %w", name, err))
+		}
+	})
+	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: nil}
+}
+
+// futureForwardHostFunc backs future.forward (0x2f), streamForwardHostFunc's
+// future twin.
+func futureForwardHostFunc(in *Instance, elemDesc binary.TypeDesc) hostFuncDef {
+	const name = "future.forward"
+	fn := api.GoModuleFunc(func(_ context.Context, _ api.Module, stack []uint64) {
+		requireMayLeave(in, name)
+		ri, wi := api.DecodeU32(stack[0]), api.DecodeU32(stack[1])
+		src := requireFutureEnd(in, name, ri, sideReadable, elemDesc)
+		if msg := forwardTrapText("future", sideReadable, src.state, src.inWaitableSet()); msg != "" {
+			panic(fmt.Errorf("component/instance: %s: future end %d: %s", name, ri, msg))
+		}
+		if wi == ri {
+			panic(fmt.Errorf("component/instance: %s: unknown handle index %d", name, wi))
+		}
+		dst := requireFutureEnd(in, name, wi, sideWritable, elemDesc)
+		if msg := forwardTrapText("future", sideWritable, dst.state, dst.inWaitableSet()); msg != "" {
+			panic(fmt.Errorf("component/instance: %s: future end %d: %s", name, wi, msg))
+		}
+		in.resources.removeEntry(ri)
+		in.resources.removeEntry(wi)
+		if err := forwardFuture(src, dst); err != nil {
+			panic(fmt.Errorf("component/instance: %s: %w", name, err))
+		}
+	})
+	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: nil}
+}
+
+// forwardStream is End.forward (definitions.py ~992-1008). src and dst are out
+// of their table. When either has nobody on its other side, or src's other side
+// is dst itself, both are simply dropped. Otherwise both are discarded without
+// a drop -- the ends on their other sides must see nothing -- and dst's stream
+// takes on src's writer, carrying over a copy the writer has parked.
+func forwardStream(src, dst *streamEnd) error {
+	from, to := src.shared, dst.shared
+	if from == to || from.dropped || to.dropped {
+		src.drop()
+		dst.drop()
+		return nil
+	}
+	clearStreamEnd(src)
+	clearStreamEnd(dst)
+	src.dropWaitable()
+	dst.dropWaitable()
+	return to.absorb(from)
+}
+
+// forwardFuture is forwardStream's future twin.
+func forwardFuture(src, dst *futureEnd) error {
+	from, to := src.shared, dst.shared
+	if from == to || from.dropped || to.dropped {
+		src.drop()
+		dst.drop()
+		return nil
+	}
+	clearFutureEnd(src)
+	clearFutureEnd(dst)
+	src.dropWaitable()
+	dst.dropWaitable()
+	return to.absorb(from)
 }
 
 // cancelCopyHostFunc backs stream.cancel-read/write (0x11/0x12) and
@@ -784,7 +971,9 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 				// above) and identical syncWaiter bracket (§6.2).
 				w.syncWaiter = true
 				if blk != nil {
-					blk.block(hasPending, false)
+					if blk.block(hasPending) && !hasPending() {
+						sharedCancel()
+					}
 				} else if derr := in.sched.drive(hasPending); derr != nil {
 					w.syncWaiter = false
 					panic(wrapSchedErr(name, derr))
@@ -796,4 +985,72 @@ func cancelCopyHostFunc(in *Instance, isFuture bool, side endSide, evCode eventC
 		stack[0] = uint64(ev.p2)
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
+}
+
+// registerStreamEnd records e as its side's live end on the shared object, so
+// dropping the OTHER end can notify it even while it is idle (see
+// notifyPeerDropped). Called wherever a streamEnd is handed to a guest: the
+// stream.new pair, and every transfer that mints a fresh readable end on
+// another instance.
+func registerStreamEnd(e *streamEnd, idx uint32) {
+	e.index = idx
+	slot, _ := e.shared.ends()
+	if e.side == sideWritable {
+		_, slot = e.shared.ends()
+	}
+	*slot = e
+	// A notification owed to this side from before this end existed -- the
+	// producer dropped its end and the readable end was then transferred here.
+	if e.shared.dropNotify[e.side] && e.state != copyDone && !e.hasPendingEvent() {
+		e.endNotifyDropped()
+	}
+}
+
+// registerFutureEnd is registerStreamEnd's future twin.
+func registerFutureEnd(e *futureEnd, idx uint32) {
+	e.index = idx
+	slot, _ := e.shared.ends()
+	if e.side == sideWritable {
+		_, slot = e.shared.ends()
+	}
+	*slot = e
+	if e.shared.dropNotify[e.side] && e.state != copyDone && !e.hasPendingEvent() {
+		e.endNotifyDropped()
+	}
+}
+
+// peerOf returns the registration of the end on the OTHER side from e's.
+func peerOfStream(e *streamEnd) (endNotifier, endSide) {
+	r, w := e.shared.ends()
+	if e.side == sideReadable {
+		return *w, sideWritable
+	}
+	return *r, sideReadable
+}
+
+func peerOfFuture(e *futureEnd) (endNotifier, endSide) {
+	r, w := e.shared.ends()
+	if e.side == sideReadable {
+		return *w, sideWritable
+	}
+	return *r, sideReadable
+}
+
+// clearStreamEnd drops e's registration: it is gone, so a later drop of the
+// other end has nobody to notify (the reference sets End.other = None on both
+// sides).
+func clearStreamEnd(e *streamEnd) {
+	slot, _ := e.shared.ends()
+	if e.side == sideWritable {
+		_, slot = e.shared.ends()
+	}
+	*slot = nil
+}
+
+func clearFutureEnd(e *futureEnd) {
+	slot, _ := e.shared.ends()
+	if e.side == sideWritable {
+		_, slot = e.shared.ends()
+	}
+	*slot = nil
 }

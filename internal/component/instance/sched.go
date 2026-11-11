@@ -22,6 +22,15 @@ var errAsyncDeadlock = errors.New("async deadlock: no runnable work")
 type sched struct {
 	runq []schedThunk
 
+	// lockdown is the reference's Store.lockdown (definitions.py ~508-522):
+	// set once a trap escapes guest code anywhere in the store, after which
+	// no call may enter any of its instances ("cannot enter component
+	// instance"). The store is the composition: every instance nested in a
+	// root shares the root's sched. It is set where guest code actually ran
+	// and trapped, not on a host-side validation failure that ran none, and
+	// nothing ever clears it.
+	lockdown bool
+
 	// pumping is true while a thunk from runq -- or a parked task's
 	// resumeReady -- is executing. AsyncCall.Resolve checks it to tell
 	// "called from inside the scheduler" (legal) apart from "called from an
@@ -35,6 +44,20 @@ type sched struct {
 	// predicate holds, which is the deterministic profile's own resume
 	// order (plan §6's random.choice -> first monkeypatch).
 	parked []parkedTask
+
+	// pendingSwitch is the reference's Handler.switch_to (definitions.py
+	// ~269-277): the thread a switch built-in asked to run next.
+	//
+	// suspend(switch_to = other) captures the switcher's continuation and hands
+	// the scheduler the target in one step -- the switcher is parked BEFORE
+	// other runs, and other is resumed by the scheduler rather than from inside
+	// the switcher's own frame. wazy used to resume other inline instead, which
+	// left the switcher's goroutine blocked in a nested baton handoff: fine
+	// until something wanted to resume the switcher itself, which a reentrant
+	// call legitimately does (reentrance.wast's last case). Parking first and
+	// letting the next step perform the switch keeps every suspended thread
+	// resumable from anywhere, which is the whole point of a continuation.
+	pendingSwitch parkedTask
 
 	// instantiating is true while the root Instantiate is running core-module
 	// start functions (docs/component-model-async-stackful-design.md §4.3).
@@ -52,6 +75,10 @@ type sched struct {
 type parkedTask interface {
 	ready() bool
 	resumeReady() error
+	// instance is which component instance this park belongs to, so a sync
+	// call's drive can restrict its candidates to that instance's own threads
+	// -- see stepScoped.
+	instance() *Instance
 }
 
 // schedThunk is one runq entry: exactly one of fe/fv is set. Storing both as
@@ -103,7 +130,31 @@ func (s *sched) unpark(pt parkedTask) {
 // step pops and runs one runq thunk, or -- if the queue is empty -- resumes
 // the first ready parked task. progressed=false means neither had any
 // work to do.
-func (s *sched) step() (progressed bool, err error) {
+func (s *sched) step() (progressed bool, err error) { return s.stepScoped(nil) }
+
+// stepScoped is step restricted to one instance's parked threads.
+//
+// canon_lift's sync-caller loop draws its candidates from `inst.threads`, not
+// from the whole store (definitions.py ~2119) -- while a non-async-typed export
+// call is in progress, the runtime resumes threads of THAT instance only, and
+// ready threads of sibling instances wait for the top-level event loop
+// (during-sync-call-no-sibling-resume.wast). Passing only == nil is the
+// top-level loop: every instance is a candidate.
+//
+// runq thunks are not threads: they are host-side completions (a deferred async
+// import resolving), which in the reference happen outside this loop entirely,
+// so they are never scoped out.
+func (s *sched) stepScoped(only *Instance) (progressed bool, err error) {
+	// An explicit switch runs first and is never scoped out: the switcher named
+	// this thread, so it is not a candidate being chosen but a transfer already
+	// decided (see pendingSwitch).
+	if pt := s.pendingSwitch; pt != nil {
+		s.pendingSwitch = nil
+		s.pumping = true
+		err = pt.resumeReady()
+		s.pumping = false
+		return true, err
+	}
 	if len(s.runq) > 0 {
 		th := s.runq[0]
 		// Shift the remaining entries down in place (not s.runq[1:]) so the
@@ -121,6 +172,9 @@ func (s *sched) step() (progressed bool, err error) {
 		return true, err
 	}
 	for _, pt := range s.parked {
+		if only != nil && pt.instance() != only {
+			continue
+		}
 		if pt.ready() {
 			s.pumping = true
 			err = pt.resumeReady()
@@ -135,9 +189,12 @@ func (s *sched) step() (progressed bool, err error) {
 // still false, and no parked task ready, is a guaranteed-permanent deadlock
 // (nothing else can ever run to make it true) => errAsyncDeadlock; callers
 // wrap it with export/waitable-set context.
-func (s *sched) drive(pred func() bool) error {
+func (s *sched) drive(pred func() bool) error { return s.driveScoped(nil, pred) }
+
+// driveScoped is drive with stepScoped's instance restriction.
+func (s *sched) driveScoped(only *Instance, pred func() bool) error {
 	for !pred() {
-		progressed, err := s.step()
+		progressed, err := s.stepScoped(only)
 		if err != nil {
 			return err
 		}
@@ -181,7 +238,12 @@ func (s *sched) driveToQuiescence(pred func() bool) (done bool, err error) {
 // A no-op whenever nothing is ready, so every currently-green suite where
 // the drive already quiesced everything sees zero behavior change.
 func (s *sched) drainReady() error {
-	for {
+	// Bounded by the parked set as it stands on entry, not run to a fixed
+	// point: a callback loop that re-parks itself ready on every resume (a
+	// bare YIELD) is ready again the instant it is stepped, so an unbounded
+	// drain would never return. One pass per parked task is what "drain what
+	// is already ready" means.
+	for n := len(s.parked) + len(s.runq); n > 0; n-- {
 		progressed, err := s.step()
 		if err != nil {
 			return err
@@ -190,6 +252,7 @@ func (s *sched) drainReady() error {
 			return nil
 		}
 	}
+	return nil
 }
 
 // pumpSnapshot runs exactly the thunks queued at entry, not ones they
@@ -224,6 +287,23 @@ func (s *sched) pumpSnapshot() error {
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// resume resumes the parked pt directly, out of the scheduler's own order, and
+// then whatever it switched to, as Thread.resume follows each continuation's
+// switch_to (definitions.py ~329-337): a thread resumed here may switch away
+// rather than block, and the thread it named must run before control returns.
+func (s *sched) resume(pt parkedTask) error {
+	for pt != nil {
+		s.pumping = true
+		err := pt.resumeReady()
+		s.pumping = false
+		if err != nil {
+			return err
+		}
+		pt, s.pendingSwitch = s.pendingSwitch, nil
 	}
 	return nil
 }

@@ -218,6 +218,13 @@ type callEngine struct {
 	gcExec  *wasm.GCExecution
 	// gcExecSlot is the storage gcExec points at while registered, kept here so a call does not allocate one.
 	gcExecSlot wasm.GCExecution
+
+	// inFlight is set while a call runs on this engine. Host code may re-enter
+	// the same api.Function (the Component Model permits reentrance, and binds
+	// each export to one handle). A nested call on this engine would grow the
+	// stack a host function beneath it is still writing its results through,
+	// so call runs it on a fresh engine instead.
+	inFlight bool
 }
 
 // ScanGCRoots implements wasm.GCRoots. Every operand and local this call holds lives in one flat []uint64, so
@@ -1310,6 +1317,9 @@ func (ce *callEngine) Call(ctx context.Context, params ...uint64) (results []uin
 	if n := ft.ParamNumInUint64; n != len(params) {
 		return nil, fmt.Errorf("expected %d params, but passed %d", n, len(params))
 	}
+	if ce.inFlight {
+		return ce.reentrant(ctx, params, nil)
+	}
 	return ce.call(ctx, params, nil)
 }
 
@@ -1319,8 +1329,21 @@ func (ce *callEngine) CallWithStack(ctx context.Context, stack []uint64) error {
 	if err != nil {
 		return err
 	}
-	_, err = ce.call(ctx, params, results)
+	if ce.inFlight {
+		_, err = ce.reentrant(ctx, params, results)
+	} else {
+		_, err = ce.call(ctx, params, results)
+	}
 	return err
+}
+
+// reentrant runs a call on a fresh engine, ce having one in flight already.
+// Call and CallWithStack test inFlight themselves rather than call: one more
+// return there pushes its defers off Go's open-coded path onto the defer stack.
+func (ce *callEngine) reentrant(ctx context.Context, params, results []uint64) ([]uint64, error) {
+	nested := &callEngine{f: ce.f}
+	nested.slot = ce.f.moduleInstance.CallSlotFor(&nested.ownSlot)
+	return nested.call(ctx, params, results)
 }
 
 // check is what every 1024th loop or entry check does: end the call if the
@@ -1379,7 +1402,9 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		}()
 	}
 
+	ce.inFlight = true
 	defer func() {
+		ce.inFlight = false
 		// If the module closed during the call, and the call didn't err for another reason, set an ExitError.
 		if err == nil {
 			err = m.FailIfClosed()

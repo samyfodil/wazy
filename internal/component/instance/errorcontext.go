@@ -43,7 +43,7 @@ func (*ErrorContext) entryKind() entryKind { return entryErrorContext }
 // live) and keeps the real message -- the spec's sanctioned "host-defined
 // transformation" (= identity) on the non-deterministic branch, and far
 // better diagnostics.
-func errorContextNewHostFunc(in *Instance, memMod api.Module) hostFuncDef {
+func errorContextNewHostFunc(in *Instance, memMod api.Module, enc abi.Encoding) hostFuncDef {
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "error-context.new")
 		m := memMod
@@ -61,7 +61,7 @@ func errorContextNewHostFunc(in *Instance, memMod api.Module) hostFuncDef {
 		// LiftFlat directly from the two stack args, exactly as
 		// task.return's own flat-result lift does (async_builtins.go).
 		coreVals := []abi.CoreValue{{Kind: "i32", Bits: uint64(ptr)}, {Kind: "i32", Bits: uint64(length)}}
-		s, err := abi.LiftFlat(coreVals, binary.PrimitiveDesc{Prim: "string"}, nil, mem)
+		s, err := abi.LiftFlatEnc(coreVals, binary.PrimitiveDesc{Prim: "string"}, nil, mem, enc)
 		if err != nil {
 			panic(fmt.Errorf("component/instance: error-context.new: load message: %w", err))
 		}
@@ -74,7 +74,7 @@ func errorContextNewHostFunc(in *Instance, memMod api.Module) hostFuncDef {
 // errorContextDebugMessageHostFunc backs error-context.debug-message
 // (CanonKindErrorContextDebugMessage, 0x1d). Core sig (i:i32, ptr:i32) -> ():
 // kind-trap lookup; store_string(cx, msg, ptr) via the canon's memory/realloc.
-func errorContextDebugMessageHostFunc(in *Instance, memMod api.Module, reallocFn api.Function) hostFuncDef {
+func errorContextDebugMessageHostFunc(in *Instance, memMod api.Module, reallocFn api.Function, enc abi.Encoding) hostFuncDef {
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		requireMayLeave(in, "error-context.debug-message")
 		m := memMod
@@ -95,6 +95,7 @@ func errorContextDebugMessageHostFunc(in *Instance, memMod api.Module, reallocFn
 		if reallocFn != nil {
 			realloc = reallocOfFunc(ctx, reallocFn, m)
 		}
+		realloc.Encoding, realloc.MayLeave = enc, &in.mayLeave
 		if err := abi.Store(mem, ptr, binary.PrimitiveDesc{Prim: "string"}, ec.debugMessage, nil, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: error-context.debug-message: store: %w", err))
 		}

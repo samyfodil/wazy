@@ -122,8 +122,8 @@ func TestModuleValues_BundleArg(t *testing.T) {
 // A func aliased out of a bundle or a shim, neither instantiated, is the func
 // it holds: in a bundle passed on, and as a bare func arg, both calls land in
 // the sibling the shim was given. One that is this component's own lift is
-// refused when the nested component calls it, and an alias naming nothing
-// this component holds is refused when it is wired.
+// a call into the parent, which re-entrance permits, and an alias naming
+// nothing this component holds is refused when it is wired.
 func TestModuleValues_FuncAliasedOutOfBundleOrShim(t *testing.T) {
 	ctx := context.Background()
 	r := wazy.NewRuntime(ctx)
@@ -139,8 +139,9 @@ func TestModuleValues_FuncAliasedOutOfBundleOrShim(t *testing.T) {
 	if got, err := call("bundle_arg_seen_through"); err != nil || len(got) != 1 || got[0] != uint32(84) {
 		t.Fatalf("run = %v, %v; want [84]", got, err)
 	}
-	_, err := call("bundle_arg_parent_lift")
-	requireErrContains(t, err, `host import "b" "f": wasm trap: cannot enter component instance`)
+	if got, err := call("bundle_arg_parent_lift"); err != nil || len(got) != 1 || got[0] != uint32(42) {
+		t.Fatalf("run = %v, %v; want [42]", got, err)
+	}
 
 	// $p, $s, $b and $ci are instances 0..3; $pf, $sf and $bf funcs 0..2.
 	wasm := moduleValuesWasm(t, "bundle_arg_seen_through")

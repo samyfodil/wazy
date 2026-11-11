@@ -65,7 +65,7 @@ func TestScalarListLiftMatchesGeneralPath(t *testing.T) {
 			elemType := binary.PrimitiveDesc{Prim: tc.prim}
 			n := uint32(len(tc.elems))
 
-			general, err := loadListFromRange(mem, ptr, n, elemType, nil)
+			general, err := loadListFromRange(mem, ptr, n, elemType, nil, UTF8)
 			if err != nil {
 				t.Fatalf("general path: %v", err)
 			}
@@ -151,7 +151,7 @@ func TestScalarListStoreAcceptsValueShape(t *testing.T) {
 				t.Fatalf("stored %d elements, want %d", n, len(tc.elems))
 			}
 
-			back, err := loadListFromRange(mem, ptr, n, elemType, nil)
+			back, err := loadListFromRange(mem, ptr, n, elemType, nil, UTF8)
 			if err != nil {
 				t.Fatalf("load back: %v", err)
 			}
@@ -282,7 +282,7 @@ func TestSignedByteLiftsSigned(t *testing.T) {
 	for _, v := range []int8{0, 1, 127, -1, -128} {
 		mem[0] = byte(v)
 
-		lifted, err := loadPrimitive(mem, 0, "s8")
+		lifted, err := loadPrimitive(mem, 0, "s8", UTF8)
 		if err != nil {
 			t.Fatalf("load s8 %d: %v", v, err)
 		}

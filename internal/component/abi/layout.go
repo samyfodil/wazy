@@ -22,7 +22,9 @@ func Align(offset, alignment uint32) uint32 {
 	if alignment == 0 {
 		return offset
 	}
-	return ((offset + alignment - 1) / alignment) * alignment
+	// Every canonical ABI alignment is a power of two (1, 2, 4 or 8), so a
+	// mask does what a division would.
+	return (offset + alignment - 1) &^ (alignment - 1)
 }
 
 // Alignment computes the byte alignment requirement for a type.

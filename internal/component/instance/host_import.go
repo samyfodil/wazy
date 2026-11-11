@@ -30,6 +30,11 @@ type Option func(*config)
 type config struct {
 	imports map[importKey]*hostImport
 
+	// coreMem resolves this component's core memory index space to the module
+	// that holds each memory, once its core instances exist: a canon lift's
+	// memory option names one there. Set by instantiateGraph.
+	coreMem func(int) (api.Module, error)
+
 	// resourceHooks are invoked with the Instance's *handleTable as soon as
 	// it exists (graph.go's instantiateGraph, right after
 	// newHandleTable()), letting an Option's host func closures capture a
@@ -103,7 +108,7 @@ type nesting struct {
 	// destructor, so this component's resource.drop of an own<R> it received
 	// runs that dtor.
 	resCanon         func(uint32) uint32
-	importedResDtors map[uint32]func() api.Function
+	importedResDtors map[uint32]guestDtor
 
 	// resourceOrigin is copied onto the resulting Instance's own field of the
 	// same name (see its doc on Instance) -- populated by
@@ -196,6 +201,9 @@ type hostImport struct {
 	customFD      *binary.FuncDesc
 	customResolve abi.Resolver
 
+	// enc is the string-encoding of the canon lower this copy was built for.
+	enc abi.Encoding
+
 	// asyncTarget, when set, routes an async-lowered call through this
 	// import to a GUEST EXPORT of a sibling composition instance instead of
 	// a Go AsyncHostFunc (Phase 3 guest<->guest async lower, docs/component-
@@ -221,18 +229,22 @@ type hostImport struct {
 	// is then already wrapped in it, and startDelegatedFromBlocker takes it.
 	transfer *hostHandleTransfer
 
-	// lineage marks a composition delegate that crosses a DIRECT static
-	// parent<->child instantiation boundary: the outer's own local lift
-	// handed to a child as a func instantiate-arg (outerFuncArgImport's
-	// ComponentFuncFromCanonLift arm), or the outer's own canon lower of a
-	// locally-nested child's export (computeCanonHostFunc's local-sibling
-	// lower arm). The Component Model reference will eventually permit some
-	// of these (entering_set ancestor exclusion, definitions.py:220-248),
-	// but the conformance suite pins wasmtime's current behavior --
-	// trap-on-reenter.wast's own "for now, trap on parent-to-child /
-	// child-to-parent" -- so the call-time wrappers refuse them with the
-	// spec's exact re-entrancy trap text.
-	lineage bool
+	// Re-entrancy is NOT refused here. A composition delegate that crosses a
+	// direct static parent<->child instantiation boundary -- the outer's own
+	// local lift handed to a child as a func instantiate-arg, or the outer's
+	// own canon lower of a locally-nested child's export -- used to trap with
+	// the re-entrancy trap text, because the conformance suite pinned
+	// wasmtime's then-current "for now, trap on parent-to-child /
+	// child-to-parent" (trap-on-reenter.wast). That suite is gone: the
+	// reference dropped may_enter entirely (ComponentInstance has no such
+	// field any more, 0 occurrences in definitions.py), and reentrance.wast
+	// replaced it, asserting child-to-parent, parent-to-child, mutual
+	// recursion, sibling and reentrant-destructor calls all succeed
+	// ("Reentrance still doesn't trap"). Entry is now governed only by
+	// backpressure and the instance's exclusive lock, both of which park
+	// rather than trap, so an async-typed reentrant call waits and a
+	// non-async-typed one proceeds. Both delegates are fully wired already,
+	// so there is nothing to gate.
 }
 
 // guestAsyncTarget names the sibling composition instance/export a lower
@@ -759,8 +771,8 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-		if hi.lineage {
-			panic(fmt.Errorf("component/instance: host import %q %q: wasm trap: cannot enter component instance", iface, funcName))
+		if in != nil && !in.mayLeave { // canon_lower's trap_if(not may_leave)
+			panic(fmt.Errorf("component/instance: host import %q %q: cannot leave component instance", iface, funcName))
 		}
 		memMod := mod
 		if memOverride != nil {
@@ -787,9 +799,9 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		// through one Instance can overlap.
 		var err error
 		if paramsSpill {
-			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources, *argsp, lentArr[:])
+			args, lent, err = liftHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, hi.enc, api.DecodeU32(stack[0]), memMod, resources, *argsp, lentArr[:])
 		} else {
-			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, *argsp, lentArr[:])
+			args, lent, err = liftHostArgsPlanned(in, paramPlans, resolve, hi.enc, stack, memMod, resources, *argsp, lentArr[:])
 		}
 		if err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
@@ -816,20 +828,13 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 		// blast radius outside Instantiate.
 		var blockingCaller taskBlocker
 		if tgt := hi.asyncTarget; in != nil && tgt != nil && (tgt.be.asyncCallback || tgt.be.stackful) {
-			// t.syncImplicit (a REAL plain-sync-lift call chain, installed by
-			// invokeEntered whenever this instance's syncTaskNeeded is set --
-			// e.g. by binding a thread.* canon, design
-			// docs/component-model-async-threads-design-fable.md §8.3) always
-			// traps here, matching blockingTask's own classification
-			// uniformly: trap-if-block-and-sync's trap-if-sync-call-async1/2
-			// (wast:290/292) are plain sync lifts reaching exactly this sync-
-			// lower-into-async-lift site. activeTask == nil (no task at all --
-			// syncTaskNeeded was never set for this instance) is narrower: it
-			// only traps during the instantiation window (a start func can
-			// never block); outside instantiation a host-entry sync call with
-			// no task keeps the pre-existing drive-and-deadlock-detect
-			// behavior other suites rely on.
-			if t := in.activeTask; (t != nil && t.syncImplicit) || (in.sched.instantiating && t == nil) {
+			// A task-less caller during the instantiation window is the one
+			// unconditional trap left: a core module's start function has no
+			// thread to park and no instance loop to drive. Outside
+			// instantiation a host-entry sync call with no task keeps the
+			// pre-existing drive-and-deadlock-detect behavior other suites
+			// rely on.
+			if in.sched.instantiating && in.activeTask == nil {
 				panic(fmt.Errorf("component/instance: host import %q %q: cannot block a synchronous task before returning", iface, funcName))
 			}
 			// §4.4 (generalized by Feature 1 §1.4): when the CALLER is
@@ -843,7 +848,25 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			// unaffected (t.blocker() nil there) and keeps using hi.fn
 			// exactly as before.
 			if t := in.activeTask; t != nil {
-				blockingCaller = t.blocker()
+				if t.syncImplicit {
+					// A plain sync lift used to trap here on sight. It must not:
+					// canon_lift's sync-caller loop traps on `not candidates`,
+					// so a non-async-typed call may block whenever another
+					// thread of its instance is ready at that moment -- and
+					// need not block at all when the callee resolves eagerly
+					// (startDelegatedFromBlocker's `if !resolved` guard).
+					// during-sync-call-may-block-if-other-ready-threads arms a
+					// ready thread and then makes exactly this call; its
+					// counterpart trap-if-block-and-sync's
+					// trap-if-sync-call-async1/2 still traps, because there the
+					// callee blocks forever with nothing else ready.
+					blockingCaller = syncBlocker{
+						in: in, t: t,
+						name: fmt.Sprintf("host import %q %q", iface, funcName),
+					}
+				} else {
+					blockingCaller = t.blocker()
+				}
 			}
 		}
 
@@ -889,6 +912,10 @@ func buildHostWrapper(in *Instance, iface, funcName string, hi *hostImport, reso
 			// Resolved through the instance's memo rather than left to
 			// lowerHostResultsPlanned's per-call reallocOf fallback.
 			realloc = in.reallocFor(ctx, memMod)
+		}
+		realloc.Encoding = hi.enc
+		if in != nil {
+			realloc.MayLeave = &in.mayLeave
 		}
 		if err := lowerHostResultsPlanned(ctx, resultPlan, results, stack, memMod, resources, outPtrIdx, realloc); err != nil {
 			panic(fmt.Errorf("component/instance: host import %q %q: %w", iface, funcName, err))
@@ -1009,7 +1036,7 @@ func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack 
 	if err != nil {
 		return nil, nil, err
 	}
-	return liftHostArgsPlanned(in, plans, resolve, stack, mod, resources, nil, nil)
+	return liftHostArgsPlanned(in, plans, resolve, abi.UTF8, stack, mod, resources, nil, nil)
 }
 
 // liftHostArgsPlanned is liftHostArgs with the per-param resolve/flatten/
@@ -1020,7 +1047,7 @@ func liftHostArgs(in *Instance, fd binary.FuncDesc, resolve abi.Resolver, stack 
 // resolve is still needed for LiftFlat's composite tree-walk. dst, when it is
 // already the right length, receives the lifted values (the hot wrapper hands
 // in a pooled buffer); anything else allocates.
-func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
+func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, enc abi.Encoding, stack []uint64, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	args := dst
 	if len(args) != len(plans) {
@@ -1040,7 +1067,7 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 		// through a pooled iterator -- no per-param []CoreValue -- and hands
 		// pp.flat down the lift so a variant/result param doesn't re-Flatten
 		// itself per call.
-		v, err := abi.LiftFlatKinds(pp.flat, stack[pos:pos+len(pp.flat)], pp.pt, resolve, mem)
+		v, err := abi.LiftFlatKindsEnc(pp.flat, stack[pos:pos+len(pp.flat)], pp.pt, resolve, mem, enc)
 		if err != nil {
 			return nil, lent, fmt.Errorf("param %d: lift: %w", i, err)
 		}
@@ -1081,12 +1108,12 @@ func liftHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolv
 // liftHostArgsPlanned's, just sourced from the loaded tuple's elements
 // instead of per-plan LiftFlat calls -- see async_host_import.go's
 // liftAsyncHostArgsSpilled for the async-lower twin of this function.
-func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
+func liftHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, enc abi.Encoding, ptr uint32, mod api.Module, resources *handleTable, dst []abi.Value, lentBuf []lentHandle) ([]abi.Value, []lentHandle, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	if !memAvailable {
 		return nil, nil, fmt.Errorf("parameter list spills to memory (flattens beyond the flat limit), but the calling module has no memory")
 	}
-	tupleVal, err := abi.Load(mem, ptr, tupleDesc, resolve)
+	tupleVal, err := abi.LoadEnc(mem, ptr, tupleDesc, resolve, enc)
 	if err != nil {
 		return nil, nil, fmt.Errorf("spilled parameter list: %w", err)
 	}
@@ -1271,7 +1298,10 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 		default:
 			return nil, fmt.Errorf("stream result: expected a *sharedStream (from NewStream) or *StreamReader, got %T", v)
 		}
-		return resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+		e := &streamEnd{side: sideReadable, state: copyIdle, shared: shared}
+		idx := resources.addEntry(e)
+		registerStreamEnd(e, idx)
+		return idx, nil
 
 	case binary.FutureDesc:
 		var shared *sharedFuture
@@ -1283,7 +1313,10 @@ func allocHandleResult(resources *handleTable, rt binary.TypeDesc, v abi.Value) 
 		default:
 			return nil, fmt.Errorf("future result: expected a *sharedFuture (from NewFuture) or *FutureReader, got %T", v)
 		}
-		return resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
+		e := &futureEnd{side: sideReadable, state: copyIdle, shared: shared}
+		idx := resources.addEntry(e)
+		registerFutureEnd(e, idx)
+		return idx, nil
 
 	case binary.PrimitiveDesc:
 		if d.Prim != "error-context" {
@@ -1392,7 +1425,9 @@ func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, results [
 		return fmt.Errorf("result: %w", err)
 	}
 	if realloc.Call == nil {
+		enc, mayLeave := realloc.Encoding, realloc.MayLeave
 		realloc = reallocOf(ctx, mod)
+		realloc.Encoding, realloc.MayLeave = enc, mayLeave
 	}
 
 	if outPtrIdx >= 0 {
@@ -1417,7 +1452,7 @@ func lowerHostResultsPlanned(ctx context.Context, plan hostResultPlan, results [
 	// (anything wider took the outPtrIdx path above), so a small fixed
 	// buffer covers it -- no per-call result slice.
 	var flatBuf [abi.MaxFlatResults]abi.CoreValue
-	flat, err := plan.step.Lower(flatBuf[:0], resultVal, realloc, mem)
+	flat, err := plan.step.Lower(flatBuf[:0], resultVal, &realloc, mem)
 	if err != nil {
 		return fmt.Errorf("result: lower: %w", err)
 	}

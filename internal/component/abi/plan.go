@@ -76,7 +76,10 @@ func CompileLower(t binary.TypeDesc, resolve Resolver) (LowerStep, error) {
 // CompileLower was built from -- byte-for-byte equivalent (differential-oracle
 // verified via TestLowerStepMatchesLowerFlatInto), just without the per-call
 // type-switch / Flatten / intermediate slices on the leaf paths.
-func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte) ([]CoreValue, error) {
+//
+// realloc is a pointer so that the scalar paths, which never allocate, do not
+// copy it.
+func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc *Realloc, mem []byte) ([]CoreValue, error) {
 	switch s.kind {
 	case lowerKindPrimitive:
 		cv, err := lowerPrimitiveCore(v, s.prim)
@@ -98,7 +101,7 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 		// is dropped here because nothing in this frame -- or in Lower's
 		// caller, instance.lowerParams -- writes through `mem` afterwards.
 		// See lowerFlatImpl's doc for the invariant that makes that safe.
-		ptr, byteLen, _, err := allocStoreString(mem, str, realloc)
+		ptr, byteLen, _, err := allocStoreString(mem, str, *realloc)
 		if err != nil {
 			return nil, fmt.Errorf("lowerFlatString: %w", err)
 		}
@@ -113,13 +116,13 @@ func (s *LowerStep) Lower(dst []CoreValue, v Value, realloc Realloc, mem []byte)
 
 	default: // lowerKindComposite
 		if s.spills {
-			ptr, err := s.store.Spill(v, mem, realloc)
+			ptr, err := s.store.Spill(v, mem, *realloc)
 			if err != nil {
 				return nil, err
 			}
 			return append(dst, NewCoreValueI32(ptr)), nil
 		}
-		flat, err := lowerFlatImpl(v, s.t, s.flat, s.resolve, realloc, mem)
+		flat, err := lowerFlatImpl(v, s.t, s.flat, s.resolve, *realloc, mem)
 		if err != nil {
 			return nil, err
 		}
@@ -170,7 +173,7 @@ func CompileStore(t binary.TypeDesc, resolve Resolver) (StoreStep, error) {
 // and written into an abandoned array.
 func (s *StoreStep) Store(mem []byte, ptr uint32, v Value, realloc Realloc) ([]byte, error) {
 	if ptr != Align(ptr, s.align) {
-		return mem, fmt.Errorf("store: pointer %d not aligned to %d", ptr, s.align)
+		return mem, errUnaligned("store: pointer", ptr, s.align)
 	}
 	// ptr+s.size is wrap-guarded because ptr can come straight from the
 	// guest's cabi_realloc (Spill, just below): a hostile or buggy allocator
@@ -191,9 +194,9 @@ func (s *StoreStep) Store(mem []byte, ptr uint32, v Value, realloc Realloc) ([]b
 // post-growth view, which is what Store then bounds-checks and writes through;
 // with the pre-grow one, Store's own check rejects the fresh pointer outright.
 func (s *StoreStep) Spill(v Value, mem []byte, realloc Realloc) (uint32, error) {
-	ptr, mem, err := realloc.GrowMem(mem, 0, 0, s.align, s.size)
+	ptr, mem, err := realloc.allocate(mem, 0, 0, s.align, s.size, "")
 	if err != nil {
-		return 0, fmt.Errorf("spillValue: realloc failed: %w", err)
+		return 0, fmt.Errorf("spillValue: %w", err)
 	}
 	// The refreshed view Store returns is dropped: no caller of Spill writes
 	// through mem afterwards (they only forward the pointer as a core value).
@@ -221,6 +224,7 @@ type LiftStep struct {
 	t       binary.TypeDesc // kind==liftSpilled/liftFlatAgg
 	resolve Resolver        // kind==liftSpilled/liftFlatAgg
 	flat    []string        // kind==liftFlatAgg: Flatten(t), handed down the tree-walk
+	enc     Encoding        // the strings' encoding
 }
 
 type liftKind uint8
@@ -237,11 +241,11 @@ const (
 // MaxFlatParams), so a string result -- which flattens to (ptr,len) -- spills to
 // a single returned pointer and is lifted via Load, matching liftResult's own
 // spill path. A compile error surfaces the same message LiftFlat's Flatten would.
-func CompileLift(t binary.TypeDesc, resolve Resolver) (LiftStep, error) {
+func CompileLift(t binary.TypeDesc, resolve Resolver, enc Encoding) (LiftStep, error) {
 	switch d := t.(type) {
 	case binary.PrimitiveDesc:
 		if d.Prim == "string" {
-			return LiftStep{kind: liftSpilled, t: t, resolve: resolve}, nil
+			return LiftStep{kind: liftSpilled, t: t, resolve: resolve, enc: enc}, nil
 		}
 		return LiftStep{kind: liftPrimitive, prim: d.Prim}, nil
 	case binary.OwnDesc, binary.BorrowDesc, binary.StreamDesc, binary.FutureDesc:
@@ -253,12 +257,12 @@ func CompileLift(t binary.TypeDesc, resolve Resolver) (LiftStep, error) {
 			return LiftStep{}, err
 		}
 		if len(flat) > MaxFlatResults {
-			return LiftStep{kind: liftSpilled, t: t, resolve: resolve}, nil
+			return LiftStep{kind: liftSpilled, t: t, resolve: resolve, enc: enc}, nil
 		}
 		// Keep the flat list computed for the spill decision: Lift hands it
 		// down the tree-walk so the aggregate doesn't re-Flatten itself on
 		// every call (see liftFlatImpl's doc).
-		return LiftStep{kind: liftFlatAgg, t: t, resolve: resolve, flat: flat}, nil
+		return LiftStep{kind: liftFlatAgg, t: t, resolve: resolve, flat: flat, enc: enc}, nil
 	}
 }
 
@@ -274,10 +278,10 @@ func (s *LiftStep) Lift(coreResults []CoreValue, mem []byte) (Value, error) {
 	case liftHandle:
 		return coreResults[0].AsI32(), nil
 	case liftSpilled:
-		return Load(mem, coreResults[0].AsI32(), s.t, s.resolve)
+		return LoadEnc(mem, coreResults[0].AsI32(), s.t, s.resolve, s.enc)
 	default: // liftFlatAgg
 		vi := getCoreValueIter(coreResults)
-		val, err := liftFlatImpl(vi, s.t, s.flat, s.resolve, mem)
+		val, err := liftFlatImpl(vi, s.t, s.flat, s.resolve, mem, s.enc)
 		putCoreValueIter(vi)
 		return val, err
 	}

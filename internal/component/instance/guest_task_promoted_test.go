@@ -7,7 +7,7 @@ import "testing"
 // level directly, hand-building a PROMOTED guestTask the way
 // stackful_task_test.go's TestStackfulReap_* suite does for stackfulTask --
 // no wasm needed, per §1.8 item 1's own prescription ("a hand-built
-// promoted guestTask whose segment fn calls gt.block(pred, false); assert
+// promoted guestTask whose segment fn calls gt.block(pred); assert
 // park/resume/abort transitions + goroutine delta 0").
 
 // newPromotedGuestTask builds a minimal (*task, *guestTask) pair wired the
@@ -35,7 +35,7 @@ func TestPromotedGuestTask_BlockParkResumeAbort(t *testing.T) {
 	ready := false
 	blockResult := make(chan bool, 1)
 	if err := gt.runSegment(func() error {
-		cancelled := gt.block(func() bool { return ready }, false)
+		cancelled := gt.block(func() bool { return ready })
 		blockResult <- cancelled
 		return nil
 	}); err != nil {
@@ -104,7 +104,7 @@ func TestPromotedGuestTask_ReapAbortsParkedSegment(t *testing.T) {
 
 	blockResult := make(chan bool, 1)
 	if err := gt.runSegment(func() error {
-		cancelled := gt.block(func() bool { return false }, false) // never ready on its own
+		cancelled := gt.block(func() bool { return false }) // never ready on its own
 		blockResult <- cancelled
 		return nil
 	}); err != nil {
@@ -142,47 +142,4 @@ func TestPromotedGuestTask_ReapAbortsParkedSegment(t *testing.T) {
 
 	// Idempotent: reaping again (nothing left parked) must not hang.
 	in.reapParkedGoroutines()
-}
-
-// TestPromotedGuestTask_CancelNonCancellableParkBlocked pins §1.6/§1.9's
-// documented v1 shape: every parkBlocked site this session wires passes
-// cancellable=false (sync stream/future copies, the sync-lower resolution
-// wait), so a cancel request against one lands as PENDING_CANCEL -- it must
-// NOT be resumed synchronously the way a frame-free WAIT/YIELD is (that
-// would be a baton handoff from the WRONG goroutine).
-func TestPromotedGuestTask_CancelNonCancellableParkBlocked(t *testing.T) {
-	in := newAsyncInst()
-	in.mayEnter = true
-	tsk, gt := newPromotedGuestTask(in)
-
-	blockResult := make(chan bool, 1)
-	if err := gt.runSegment(func() error {
-		cancelled := gt.block(func() bool { return false }, false) // non-cancellable
-		blockResult <- cancelled
-		return nil
-	}); err != nil {
-		t.Fatalf("runSegment: %v", err)
-	}
-	if gt.park != parkBlocked {
-		t.Fatalf("park = %v, want parkBlocked", gt.park)
-	}
-
-	if err := tsk.requestCancellation(); err != nil {
-		t.Fatalf("requestCancellation: %v", err)
-	}
-	if tsk.state != taskPendingCancel {
-		t.Fatalf("state = %v, want taskPendingCancel", tsk.state)
-	}
-	// Not resumed: still parked, segment goroutine still alive, no value on
-	// blockResult yet.
-	if !in.sched.isParked(gt) {
-		t.Fatal("gt should still be parked after a non-cancellable cancel request")
-	}
-	select {
-	case <-blockResult:
-		t.Fatal("blockResult received a value -- a non-cancellable parkBlocked task must not resume synchronously on cancel")
-	default:
-	}
-
-	in.reapParkedGoroutines() // clean up the still-parked segment
 }

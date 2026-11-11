@@ -73,6 +73,21 @@ type (
 		// that waste at well under a round trip per call, whatever the pattern, while a handle
 		// called in a loop still stops paying for the pool.
 		stackReleases uint8
+		// inFlight is set for the duration of one callWithStack invocation. A
+		// callEngine carries exactly one invocation's state -- the wasm stack
+		// buffer in c.stack, the aligned top in c.stackTop, and the
+		// executionContext whose address is baked into c.execCtxPtr at
+		// construction -- so a nested call through the SAME handle would run on
+		// the outer call's frame and read its locals. Host code can legitimately
+		// re-enter a cached api.Function: the Component Model permits
+		// reentrance, and a parent component's export called back from a child
+		// (reentrance.wast's mutual recursion f -> g -> f) recursed forever
+		// because the inner f saw the outer f's parameter. callWithStack hands
+		// such a call its own engine instead; see its prologue.
+		//
+		// Like stackReleases it lives in the padding after indexInModule, so it
+		// costs this struct nothing.
+		inFlight bool
 		// sizeOfParamResultSlice is the size of the parameter/result slice.
 		sizeOfParamResultSlice int
 		requiredParams         int
@@ -313,7 +328,13 @@ func (c *callEngine) Call(ctx context.Context, params ...uint64) ([]uint64, erro
 	}
 	paramResultSlice := make([]uint64, c.sizeOfParamResultSlice)
 	copy(paramResultSlice, params)
-	if err := c.callWithStack(ctx, paramResultSlice); err != nil {
+	var err error
+	if c.inFlight {
+		err = c.reentrant(ctx, paramResultSlice)
+	} else {
+		err = c.callWithStack(ctx, paramResultSlice)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return paramResultSlice[:c.numberOfResults], nil
@@ -528,20 +549,48 @@ func (c *callEngine) CallWithStack(ctx context.Context, paramResultStack []uint6
 	if c.sizeOfParamResultSlice > len(paramResultStack) {
 		return fmt.Errorf("need %d params, but stack size is %d", c.sizeOfParamResultSlice, len(paramResultStack))
 	}
+	if c.inFlight {
+		return c.reentrant(ctx, paramResultStack)
+	}
 	return c.callWithStack(ctx, paramResultStack)
 }
 
-// CallWithStack implements api.Function.
+// reentrant runs a call on a handle that already has a live invocation, which
+// it cannot host (see inFlight): on a sibling minted for it -- exactly what the
+// caller would have got from another ExportedFunction lookup.
+//
+// Call and CallWithStack test inFlight themselves rather than callWithStack:
+// one more return there pushes its defers off Go's open-coded path onto the
+// defer stack, +38% instructions on a host-to-wasm call.
+func (c *callEngine) reentrant(ctx context.Context, paramResultStack []uint64) error {
+	nested, ok := c.parent.NewFunction(c.indexInModule).(*callEngine)
+	if !ok {
+		// Unreachable: c is a callEngine, so its own index names a local
+		// (non-host) function and NewFunction returns a callEngine for it.
+		panic("BUG: reentrant call resolved to a non-callEngine")
+	}
+	return nested.callWithStack(ctx, paramResultStack)
+}
+
+// callWithStack runs one call on c, which has none in flight.
 func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint64) (err error) {
 	snapshotEnabled := expctxkeys.SnapshotterEnabled.Load() && ctx.Value(expctxkeys.EnableSnapshotterKey{}) != nil
 	if snapshotEnabled {
 		ctx = context.WithValue(ctx, expctxkeys.SnapshotterKey{}, c)
 	}
 
+	// Cleared by whichever of the two defers below this call takes -- exactly
+	// one always runs, and both are registered before anything that can return
+	// or panic. A defer of its own would be a fifth defer site in this function,
+	// which the existing ones are deliberately counted to avoid (see the release
+	// defer's comment): it cost ~12% on a plain synchronous component call.
+	c.inFlight = true
+
 	if nativeapi.StackGuardCheckEnabled {
 		// This build's stack is the one init() allocated and never recycles, so it is already stable to scan.
 		c.registerGC(paramResultStack)
 		defer func() {
+			c.inFlight = false
 			c.unregisterGC()
 			nativeapi.CheckStackGuardPage(c.stack)
 		}()
@@ -572,6 +621,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 		// Registered only now: a collection reads c.stack, so this call must own one first.
 		c.registerGC(paramResultStack)
 		defer func() {
+			c.inFlight = false
 			// Unregister first: a collection may call ScanGCRoots right up until it returns, and that
 			// reads c.stack -- which the release below hands to whichever call takes it out of the pool
 			// next. Doing it here rather than in a defer of its own also makes the ordering a property

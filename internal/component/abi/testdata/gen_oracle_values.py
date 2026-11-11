@@ -23,6 +23,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def load_definitions():
     """Import the fetched definitions.py as a module named 'refabi'."""
+    if sys.version_info < (3, 14):
+        # Its annotations name classes it defines further down, which only
+        # deferred evaluation of annotations (PEP 649) allows.
+        raise SystemExit("definitions.py needs Python 3.14 or later")
     path = os.path.join(HERE, "definitions.py")
     spec = importlib.util.spec_from_file_location("refabi", path)
     mod = importlib.util.module_from_spec(spec)
@@ -100,10 +104,23 @@ class Ctx:
     """Minimal context for store/load."""
 
     def __init__(self, opts, alloc):
+        self.direction = "lower"
         self.opts = opts
         self.alloc = alloc
         self.inst = type('obj', (object,), {'handles': ref.Table()})()
         self.borrow_scope = None
+
+    # The reference reaches realloc through store.lift/invoke, which needs a live
+    # store and task; call the allocator directly and keep the checks the
+    # reference applies to what it returns.
+    def reallocate(self, old, old_size, alignment, new_size):
+        ptr = self.opts.realloc(old, old_size, alignment, new_size)
+        ref.trap_if(ptr != ref.align_to(ptr, alignment))
+        ref.trap_if(ptr + new_size > len(self.opts.memory))
+        return ptr
+
+    def allocate(self, alignment, size):
+        return self.reallocate(0, 0, alignment, size)
 
 
 def build_type(spec, by_name):
@@ -381,12 +398,10 @@ def main():
         opts.realloc = alloc.alloc
         ctx = Ctx(opts, alloc)
 
-        # Store the value
-        try:
-            ref.store(ctx, refabi_value, t, 1024)
-        except Exception as e:
-            print(f"ERROR in {name}: store failed: {e}")
-            continue
+        # No try around store or load: a value the reference cannot handle is
+        # a battery or harness bug, and a golden that silently drops it tests
+        # less than it says.
+        ref.store(ctx, refabi_value, t, 1024)
 
         # Capture the memory used
         mem_start = 1024
@@ -394,11 +409,7 @@ def main():
         mem_hex = mem_bytes[mem_start:mem_end].hex()
 
         # Load it back
-        try:
-            loaded_refabi = ref.load(ctx, 1024, t)
-        except Exception as e:
-            print(f"ERROR in {name}: load failed: {e}")
-            continue
+        loaded_refabi = ref.load(ctx, 1024, t)
 
         # Convert back to JSON
         loaded_json = convert_value_from_refabi(loaded_refabi, t)
@@ -409,6 +420,9 @@ def main():
             "mem_len": mem_end - mem_start,
             "loaded_value": loaded_json,
         }
+
+    if len(golden) != len(battery):
+        raise SystemExit(f"{len(golden)} golden entries for {len(battery)} battery entries: names collide")
 
     with open(golden_path, "w") as f:
         json.dump(golden, f, indent=2, sort_keys=True)

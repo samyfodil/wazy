@@ -363,12 +363,11 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 
 		case "waitable-set.wait", "waitable-set.poll":
 			si := resolveHandle(env, op["set"])
-			cancellable := opBool(op, "cancellable", false)
 			var def hostFuncDef
 			if kind == "waitable-set.wait" {
-				def = waitableSetWaitHostFunc(in, binary.Canon{Cancellable: cancellable}, nil)
+				def = waitableSetWaitHostFunc(in, binary.Canon{}, nil)
 			} else {
-				def = waitableSetPollHostFunc(in, binary.Canon{Cancellable: cancellable}, nil)
+				def = waitableSetPollHostFunc(in, binary.Canon{}, nil)
 			}
 			stack := []uint64{uint64(si), asyncEventPtr}
 			def.fn.Call(ctx, mod, stack)
@@ -463,8 +462,7 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			appendRet(k, nil)
 
 		case "thread.yield":
-			cancellable := opBool(op, "cancellable", false)
-			def := threadYieldHostFunc(in, binary.Canon{Cancellable: cancellable})
+			def := threadYieldHostFunc(in, binary.Canon{})
 			stack := []uint64{0}
 			def.fn.Call(ctx, mod, stack)
 			appendRet(k, []uint32{uint32(stack[0])})
@@ -546,7 +544,7 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			if kind == "stream.write" {
 				side, evCode = sideWritable, eventStreamWrite
 			}
-			def := streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, mod, nil)
+			def := streamCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, mod, nil, abi.UTF8)
 			stack := []uint64{uint64(i), uint64(opInt(op, "ptr")), uint64(opInt(op, "n"))}
 			def.fn.Call(ctx, mod, stack)
 			appendRet(k, []uint32{uint32(stack[0])})
@@ -559,7 +557,7 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			if kind == "future.write" {
 				side, evCode = sideWritable, eventFutureWrite
 			}
-			def := futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, mod, nil)
+			def := futureCopyHostFunc(in, side, evCode, elemDesc, elemSz, align, numeric, async, mod, nil, abi.UTF8)
 			stack := []uint64{uint64(i), uint64(opInt(op, "ptr"))}
 			def.fn.Call(ctx, mod, stack)
 			appendRet(k, []uint32{uint32(stack[0])})
@@ -613,7 +611,7 @@ func runAsyncOracleScenario(t *testing.T, sc asyncScenario) (trace []asyncTraceE
 			appendRet(k, nil)
 
 		case "error-context.new":
-			def := errorContextNewHostFunc(in, mod)
+			def := errorContextNewHostFunc(in, mod, abi.UTF8)
 			stack := []uint64{uint64(opInt(op, "ptr")), uint64(opInt(op, "len"))}
 			def.fn.Call(ctx, mod, stack)
 			h := uint32(stack[0])

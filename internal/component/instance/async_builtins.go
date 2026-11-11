@@ -26,13 +26,11 @@ import (
 // other way to reach the call in progress (mirrors the reference's
 // current_task()/current_instance()).
 
-// requireActiveTask resolves the reference's current_task() plus its
-// trap_if(!task.inst.may_leave) prologue (every async builtin in §1.5 opens
-// with it), shared by all five builtins below.
+// requireActiveTask resolves the reference's current_task(). It does not check
+// may_leave: context.get/set and backpressure.inc/dec do not, so a
+// post-return function may call them, and the built-ins that do call
+// requireMayLeave first.
 func requireActiveTask(in *Instance, builtin string) *task {
-	if !in.mayLeave { // trap_if(!may_leave)
-		panic(fmt.Errorf("component/instance: %s: instance may not be left right now", builtin))
-	}
 	t := in.activeTask
 	if t == nil {
 		panic(fmt.Errorf("component/instance: %s: called outside an active async task", builtin))
@@ -54,10 +52,15 @@ func requireActiveTask(in *Instance, builtin string) *task {
 //     driving goroutine, NOT promoted (or promoted but between segments) --
 //     suspend by NESTED sched.drive (Phase 1-3 behavior, kept as-is:
 //     wait-during-callback stays green).
-//   - t == nil: a synchronous context (a core module's instantiation-time
-//     start function, or a plain sync lift of a sync-TYPED func, or a
-//     top-level call to a boundExport this package never wires an
-//     activeTask for) -- the spec's sync-task-block trap.
+//   - blk != nil and t.syncImplicit: a non-async-typed call's own implicit
+//     thread -- parks and drives canon_lift's sync-caller loop nested, which
+//     raises the sync-task-block trap only if no other thread of this instance
+//     is ready (see syncBlocker).
+//   - t == nil: a synchronous context with no task at all (a core module's
+//     instantiation-time start function, or a top-level call to a boundExport
+//     this package never wires an activeTask for) -- there is no thread to
+//     park and no instance loop to drive, so the sync-task-block trap is
+//     immediate (dont-block-start's case 1).
 //
 // Every call site already calls requireMayLeave separately before reaching
 // here (preserving each builtin's existing may_leave-before-anything-else
@@ -65,8 +68,11 @@ func requireActiveTask(in *Instance, builtin string) *task {
 // re-derive it.
 func blockingTask(in *Instance, builtin string) (t *task, blk taskBlocker) {
 	t = in.activeTask
-	if t == nil || t.syncImplicit { // the spec's sync-task-block trap
+	if t == nil { // no thread to park at all: the spec's sync-task-block trap
 		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
+	}
+	if t.syncImplicit {
+		return t, syncBlocker{in: in, t: t, name: builtin}
 	}
 	// design docs/component-model-async-threads-design-fable.md §5.2: prefer
 	// a SPAWNED guestThread's own baton over the task's implicit-thread
@@ -123,8 +129,13 @@ func activeBlocker(in *Instance) taskBlocker {
 // shapes) stays activeTask == nil and keeps nested-driving exactly as
 // before.
 func requireNotSyncImplicit(in *Instance, builtin string) taskBlocker {
+	// A sync task is no longer refused outright here either (see syncBlocker and
+	// blockingTask): it parks and drives the instance's own loop, which traps
+	// only when nothing else in the instance is ready. idle-drop's
+	// sync-read-consumes-notification is a plain sync lift whose stream.read
+	// must succeed because the notification is already recorded.
 	if t := in.activeTask; t != nil && t.syncImplicit {
-		panic(fmt.Errorf("component/instance: %s: cannot block a synchronous task before returning", builtin))
+		return syncBlocker{in: in, t: t, name: builtin}
 	}
 	return activeBlocker(in)
 }
@@ -137,7 +148,7 @@ func requireNotSyncImplicit(in *Instance, builtin string) taskBlocker {
 // toggles it false yet); the gate is wired for Phase 3.
 func requireMayLeave(in *Instance, builtin string) {
 	if !in.mayLeave {
-		panic(fmt.Errorf("component/instance: %s: instance may not be left right now", builtin))
+		panic(fmt.Errorf("component/instance: %s: cannot leave component instance", builtin))
 	}
 }
 
@@ -196,20 +207,27 @@ func storeEvent(mod api.Module, builtin string, ptr uint32, ev eventTuple) event
 // canon's memory, rather than the calling module's: that may be a trampoline
 // with no memory of its own (see canonMemoryAndRealloc).
 //
-// canon carries the cancellable:bool payload finally threaded through here
-// (Phase 3, docs/component-model-async-phase3-design.md §2.3): when
-// cancellable and this task has a delivered-or-deliverable cancellation
-// pending, the drive predicate also wakes on that, and TASK_CANCELLED is
-// stored instead of a set event -- deliverPendingCancel is checked at THIS
-// suspension's prologue exactly where the reference's wait_until does
-// (~404). A blocking wait's cancel wake cannot resume synchronously the way
-// a parked callback loop's does (this builtin has live Go frames beneath
-// it -- see task.go's requestCancellation doc); it is instead a genuinely
-// PENDING_CANCEL task whose own drive predicate below picks the
-// cancellation up at the next scheduler check.
+// (Phase 3, docs/component-model-async-phase3-design.md §2.3): a pending
+// cancellation does NOT wake this built-in and is not reported by it.
+// WaitableSet.wait waits on has_pending_event alone and returns
+// get_pending_event(); only WaitableSet.wait_from_callback -- the callback
+// dispatch loop's WAIT disposition, not this canon -- consults a cancellation.
+// A task parked here when a cancellation is requested therefore stays parked
+// with the request pending, which is what cancel-delivery.wast asserts for the
+// sibling non-blocking built-ins ("neither may report the pending
+// cancellation ... which must survive until the task returns to its event
+// loop").
 func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module) hostFuncDef {
-	in.syncTaskNeeded = true
-	cancellable := canon.Cancellable
+	// mayBlockSync: this canon IS the reference's mid-core-call blocking site
+	// (WaitableSet.wait via Thread.wait_until), so a callback task of this
+	// instance needs a segment goroutine to park on -- otherwise reaching it
+	// from a core function can only nested-drive the shared scheduler, which
+	// cannot hand control back to a GUEST caller waiting on the async lower
+	// that started this task. trap-if-block-and-sync's trap-if-sync-cancel
+	// depends on that handback: its callee blocks here, the async lower must
+	// return with the subtask unresolved, and only then does the caller reach
+	// the subtask.cancel whose trap the suite asserts.
+	in.syncTaskNeeded, in.mayBlockSync = true, true
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		if memMod != nil {
 			mod = memMod
@@ -218,11 +236,14 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.wait", si)
-		t, blk := blockingTask(in, "waitable-set.wait")
+		_, blk := blockingTask(in, "waitable-set.wait")
 
-		pred := func() bool {
-			return ws.hasPendingEvent() || (cancellable && t.cancelDeliverable())
-		}
+		// canon_waitable_set_wait is WaitableSet.wait, which waits on
+		// has_pending_event alone -- a cancellation does not unblock it, in
+		// either arm. The cancel-aware wait is WaitableSet.wait_from_callback,
+		// and that is the callback dispatch loop's WAIT disposition rather than
+		// this built-in (reference ~2094).
+		predEvent := ws.hasPendingEvent
 
 		var ev eventTuple
 		if blk != nil {
@@ -235,9 +256,11 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module
 			// shared scheduler (invokeStackful/invokeAsyncCallback map
 			// errAsyncDeadlock to the spec's exact trap text).
 			ws.numWaiting++
-			cancelled := blk.block(pred, cancellable)
+			cancelled := blk.block(predEvent)
 			ws.numWaiting--
-			if cancelled || (cancellable && t.deliverPendingCancel(true)) {
+			// cancelled is an explicit cancel-wake resume (the reference's
+			// thread.resume(Cancelled.TRUE)), not the predicate firing.
+			if cancelled {
 				ev = eventTuple{code: eventTaskCancelled}
 			} else {
 				ev = ws.getPendingEvent()
@@ -245,7 +268,7 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module
 		} else {
 			// Callback-task arm: unchanged nested drive (Phase 1-3).
 			ws.numWaiting++
-			err := in.sched.drive(pred)
+			err := in.sched.drive(predEvent)
 			ws.numWaiting--
 			if err != nil {
 				if errors.Is(err, errAsyncDeadlock) {
@@ -253,11 +276,7 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module
 				}
 				panic(fmt.Errorf("component/instance: waitable-set.wait: %w", err))
 			}
-			if cancellable && t.deliverPendingCancel(true) {
-				ev = eventTuple{code: eventTaskCancelled}
-			} else {
-				ev = ws.getPendingEvent()
-			}
+			ev = ws.getPendingEvent()
 		}
 		stack[0] = uint64(storeEvent(mod, "waitable-set.wait", ptr, ev))
 	})
@@ -267,12 +286,11 @@ func waitableSetWaitHostFunc(in *Instance, canon binary.Canon, memMod api.Module
 // waitableSetPollHostFunc backs waitable-set.poll (CanonKindWaitableSetPoll,
 // 0x21) -- canon_waitable_set_poll, definitions.py ~2427. Same as wait but
 // non-blocking: returns EventCode.NONE immediately when nothing is pending
-// instead of driving the scheduler. The poll(cancellable) prologue (~834):
-// if cancellable and a cancellation is deliverable, TASK_CANCELLED is
+// instead of driving the scheduler. WaitableSet.poll reports NONE or the
+// pending event and never consults a cancellation, the same as wait:
 // returned immediately, before even checking the set.
 func waitableSetPollHostFunc(in *Instance, canon binary.Canon, memMod api.Module) hostFuncDef {
 	in.syncTaskNeeded = true
-	cancellable := canon.Cancellable
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
 		if memMod != nil {
 			mod = memMod
@@ -281,11 +299,10 @@ func waitableSetPollHostFunc(in *Instance, canon binary.Canon, memMod api.Module
 		si := api.DecodeU32(stack[0])
 		ptr := api.DecodeU32(stack[1])
 		ws := requireWaitableSet(in, "waitable-set.poll", si)
-		t := requireActiveTask(in, "waitable-set.poll")
-		if cancellable && t.deliverPendingCancel(true) {
-			stack[0] = uint64(storeEvent(mod, "waitable-set.poll", ptr, eventTuple{code: eventTaskCancelled}))
-			return
-		}
+		// WaitableSet.poll is has_pending_event-or-NONE. It does not consult a
+		// pending cancellation, the same as WaitableSet.wait: the cancel-aware
+		// waits are the callback loop's, not these built-ins.
+		requireActiveTask(in, "waitable-set.poll")
 		stack[0] = uint64(storeEvent(mod, "waitable-set.poll", ptr, ws.poll()))
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
@@ -375,7 +392,8 @@ func subtaskDropHostFunc(in *Instance) hostFuncDef {
 func taskCancelHostFuncGraph(in *Instance) hostFuncDef {
 	in.syncTaskNeeded = true
 	fn := api.GoModuleFunc(func(context.Context, api.Module, []uint64) {
-		t := requireActiveTask(in, "task.cancel") // may_leave + current_task (~2393-2395)
+		requireMayLeave(in, "task.cancel")
+		t := requireActiveTask(in, "task.cancel")
 		// trap_if(not task.opts.async_) (~2396): true for a callback lift
 		// and the stackful async-no-callback sub-shape (both genuinely
 		// opts.async_); a sync-opts stackful task is NOT opts.async_ (it
@@ -428,12 +446,22 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 		if st.cancellationRequested { // trap_if(subtask.cancellation_requested)
 			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d: cancellation already requested", i))
 		}
-		if st.inWaitableSet() && !async { // trap_if(in_waitable_set() and not async_)
+		// trap_if(subtask.in_waitable_set()) -- unconditional, both forms
+		// (definitions.py ~2381). The async form is not exempt: it still claims
+		// the subtask and consumes its resolution event, which a waitable set
+		// could otherwise steal, and trap-if-sync-and-waitable-set says so
+		// ("For subtask.cancel, *both* the sync and async forms trap").
+		if st.inWaitableSet() {
 			panic(fmt.Errorf("component/instance: subtask.cancel: handle %d: waitable cannot be used synchronously while added to a waitable set", i))
 		}
 
 		if !st.resolved() {
 			st.cancellationRequested = true
+			// has_sync_waiter goes up BEFORE on_cancel and for BOTH forms
+			// (~2384): it is what marks the subtask as claimed, so a
+			// waitable.join attempted while the cancel is in flight traps
+			// instead of stealing the resolution event.
+			st.syncWaiter = true
 			if st.hasOnCancel() { // false only for a host import with no OnCancel hook (§2.4)
 				// Bracket with sched.pumping exactly like sched.step's own
 				// thunk/resumeReady dispatch (sched.go): st.runOnCancel runs
@@ -462,6 +490,7 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 			}
 			if !st.resolved() {
 				if async {
+					st.syncWaiter = false
 					stack[0] = blockedSentinel
 					return
 				}
@@ -475,10 +504,9 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 				// syncImplicit case already trapped above, at earlyBlk's
 				// resolution).
 				blk := earlyBlk
-				st.syncWaiter = true
 				if blk != nil {
-					blk.block(st.hasPendingEvent, false)
-				} else if derr := in.sched.drive(st.hasPendingEvent); derr != nil {
+					blk.block(st.resolved)
+				} else if derr := in.sched.drive(st.resolved); derr != nil {
 					st.syncWaiter = false
 					if errors.Is(derr, errAsyncDeadlock) {
 						panic(fmt.Errorf("component/instance: subtask.cancel: deadlock: subtask %d's synchronous cancel is waiting on a subtask that nothing can resolve", i))
@@ -510,6 +538,7 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, error) {
 	in.syncTaskNeeded = true
 	resolve := in.resolve
+	enc := canonEncoding(canon)
 	resultRefs := funcResultTypeRefs(binary.FuncDesc{Results: canon.TaskReturnResult})
 	if len(resultRefs) > 1 {
 		return hostFuncDef{}, fmt.Errorf("component/instance: task.return: %d named results; multiple task.return results are not supported by this milestone", len(resultRefs))
@@ -540,6 +569,7 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 	}
 
 	fn := api.GoModuleFunc(func(_ context.Context, mod api.Module, stack []uint64) {
+		requireMayLeave(in, "task.return")
 		t := requireActiveTask(in, "task.return")
 		if t.syncImplicit { // trap_if(not task.opts.async_), definitions.py ~2383
 			panic(fmt.Errorf("component/instance: task.return: called on a synchronous task"))
@@ -552,19 +582,19 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 		var result []abi.Value
 		if resultType != nil {
 			// The canon-declared memory to lift the result through is the
-			// TASK's own export binding (t.be.mod), not mod -- the module
+			// TASK's own export binding's (t.be.memMod), not mod -- the module
 			// that happened to call this shared task.return core func
 			// directly. Once several canons are packed into one regrouping
 			// shim module (graph.go's "core instance N: inline export"
 			// merge), mod is that shim, which has no memory of its own; t.be
-			// is the guest module that actually declared the memory option,
-			// exactly like every other lift/lower site keys off be.mod (see
+			// names the memory the lift declared, exactly like every other
+			// lift/lower site keys off be.memMod (see
 			// e.g. guest_task.go's start, instance.go's invoke). t.be is nil
 			// only off the defensive path already guarded above; mod remains
 			// the fallback there.
 			memMod := mod
 			if t.be != nil {
-				memMod = t.be.mod
+				memMod = t.be.memMod
 			}
 			mem, memAvailable := memoryBytesOf(memMod)
 			if spills {
@@ -572,7 +602,7 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 					panic(fmt.Errorf("component/instance: task.return: result flattens beyond %d core value(s) and requires linear memory, but the core module exports no memory", abi.MaxFlatParams))
 				}
 				ptr := api.DecodeU32(stack[0])
-				val, err := abi.Load(mem, ptr, resultType, resolve)
+				val, err := abi.LoadEnc(mem, ptr, resultType, resolve, enc)
 				if err != nil {
 					panic(fmt.Errorf("component/instance: task.return: load spilled result: %w", err))
 				}
@@ -589,7 +619,7 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 				for i, k := range flatKinds {
 					coreVals[i] = abi.CoreValue{Kind: k, Bits: stack[i]}
 				}
-				val, err := abi.LiftFlat(coreVals, resultType, resolve, mem)
+				val, err := abi.LiftFlatEnc(coreVals, resultType, resolve, mem, enc)
 				putCoreValueSlice(coreValsPtr)
 				if err != nil {
 					panic(fmt.Errorf("component/instance: task.return: lift result: %w", err))

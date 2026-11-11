@@ -8,7 +8,7 @@ Correctness here is a pass count against somebody else's suite, not a claim.
 | Suite | Source | Result |
 | --- | --- | --- |
 | Core spec tests | [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) + the proposal repos | 13 corpora, **711 generated case files, no skip list**; the 3.0 corpus runs on **both** engines. |
-| Component Model async | the official async `.wast` suites | **31 suites, 0 skipped, 0 failed.** |
+| Component Model async | the official async `.wast` suites | **45 suites, 0 skipped, 0 failed.** |
 | Canonical ABI values | the official `test/values` suites | **7 suites, 0 skipped, 0 failed**, through `wasm-tools json-from-wast`. Every module instantiates — see below. |
 | wasi-testsuite | [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) | AssemblyScript, C and Rust, **no skipped tests**, on Linux, macOS **and** Windows, through the `wazy` CLI. |
 | Cross-proposal interaction | Wasmtime's own `tests/misc_testsuite`: an implementation's tests, not the spec's | 9 of Wasmtime's `.wast`, beside 5 written here. |

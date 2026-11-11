@@ -375,7 +375,7 @@ func traceResource(comp *binary.Component, cfg *config, byIdx map[int]*Instance,
 func (n *nesting) lineUp(tag uint32, prov *Instance, def uint32) {
 	o := prov.originOf(def)
 	if dtor := o.def.resourceDtors[o.tag]; dtor != nil {
-		n.importedResDtors[tag] = dtor
+		n.importedResDtors[tag] = guestDtor{owner: o.def, resolve: dtor}
 	}
 	n.resourceOrigin[tag] = o
 }
@@ -682,12 +682,9 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest 
 		}
 		// This func arg names the outer component's OWN local func, handed
 		// down to a directly-nested child as a `(with "x" (func N))`
-		// instantiate-arg -- a direct static parent<->child lineage delegate
-		// (see hostImport.lineage's doc). Refused at call time, so no handle
-		// ever crosses it and its resources need no line-up.
+		// instantiate-arg. Nothing crosses it that needs a resource line-up.
 		provToImp := func(uint32) (uint32, bool) { return 0, false }
 		hi := delegatingHostImport(newGuestAsyncTarget(in, be, diagName, provToImp))
-		hi.lineage = true
 		return hi, nil
 	}
 	if u32.OutOfRange(e.Alias, len(comp.Aliases)) {

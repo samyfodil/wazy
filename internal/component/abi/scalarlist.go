@@ -26,19 +26,27 @@ import (
 // that against them for every type rather than trusting the reading -- a
 // disagreement would not fail, it would hand a guest silently wrong numbers.
 
-// scalarListLen bounds-checks a list of length elements of elemSize bytes at
-// ptr and returns the byte span.
+// scalarListSpan checks a list of length scalars of elemSize bytes at ptr --
+// a scalar is aligned to its own size -- and returns the byte span.
 func scalarListSpan(mem []byte, ptr, length, elemSize uint32) ([]byte, error) {
-	byteLen := length * elemSize
-	// The multiply and the add both have to be checked: a length near 2^32
-	// wraps, and a wrapped span would read somewhere else entirely.
-	if elemSize != 0 && length > (1<<32-1)/elemSize {
-		return nil, fmt.Errorf("loadListFromRange: list length %d overflows at %d bytes per element", length, elemSize)
+	return listSpan(mem, ptr, length, elemSize, elemSize)
+}
+
+// listSpan is load_list_from_range's checks, in its order: the list's byte
+// length against MaxListByteLength, the pointer's alignment, then the bounds.
+// The arithmetic is 64-bit, so neither the multiply nor the add can wrap.
+func listSpan(mem []byte, ptr, length, elemSize, elemAlign uint32) ([]byte, error) {
+	byteLen := uint64(length) * uint64(elemSize)
+	if byteLen > MaxListByteLength {
+		return nil, errListBounds(ptr, byteLen, len(mem))
 	}
-	if ptr+byteLen < ptr || uint32(len(mem)) < ptr+byteLen {
-		return nil, fmt.Errorf("loadListFromRange: list buffer overflow at ptr=%d len=%d mem_len=%d", ptr, byteLen, len(mem))
+	if elemAlign > 1 && ptr&(elemAlign-1) != 0 {
+		return nil, errUnaligned("list pointer", ptr, elemAlign)
 	}
-	return mem[ptr : ptr+byteLen], nil
+	if uint64(ptr)+byteLen > uint64(len(mem)) {
+		return nil, errListBounds(ptr, byteLen, len(mem))
+	}
+	return mem[ptr : uint64(ptr)+byteLen], nil
 }
 
 // decodeScalarList reads length elements of elemSize bytes each through dec.
@@ -139,10 +147,10 @@ func liftScalarList(mem []byte, ptr, length uint32, prim string) (v Value, handl
 		out, err := decodeScalarList(mem, ptr, length, 4, func(b []byte) (rune, error) {
 			i := binary.LittleEndian.Uint32(b)
 			if i >= 0x110000 {
-				return 0, fmt.Errorf("load char: value %d out of range", i)
+				return 0, errInvalidChar(i)
 			}
 			if i >= 0xD800 && i <= 0xDFFF {
-				return 0, fmt.Errorf("load char: surrogate half %d not allowed", i)
+				return 0, errInvalidChar(i)
 			}
 			return rune(i), nil
 		})
@@ -167,11 +175,8 @@ func encodeScalarList[T any](mem []byte, in []T, elemSize, align uint32, realloc
 	}
 	byteLen := length * elemSize
 
-	ptr, mem, err := realloc.GrowMem(mem, 0, 0, align, byteLen)
+	ptr, mem, err := realloc.allocate(mem, 0, 0, align, byteLen, "list")
 	if err != nil {
-		return 0, 0, mem, fmt.Errorf("realloc failed: %w", err)
-	}
-	if err := checkAllocated(mem, ptr, byteLen); err != nil {
 		return 0, 0, mem, err
 	}
 	span := mem[ptr : ptr+byteLen]

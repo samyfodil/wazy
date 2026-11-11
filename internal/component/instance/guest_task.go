@@ -17,7 +17,7 @@ import (
 // frame.
 //
 //   - run:    call the core func / callback, interpret the packed code.
-//   - park:   store (waitableSet, cancellable) on the guestTask and RETURN
+//   - park:   store the waitableSet on the guestTask and RETURN
 //     to whoever called us (the scheduler, or an async-lower wrapper that
 //     started us) -- see sched.park.
 //   - resume: sched.step (or task.requestCancellation) calls gt.resumeReady,
@@ -52,10 +52,14 @@ type guestTask struct {
 	ctx        context.Context
 	exportName string // for error messages only
 
-	park        guestParkKind
-	wset        *waitableSet // parkWait only
-	cancellable bool         // is the current park a cancellable suspension?
-	cancelWake  bool         // request_cancellation resumed us with Cancelled.TRUE (§2.2)
+	park       guestParkKind
+	wset       *waitableSet // parkWait only
+	cancelWake bool         // request_cancellation resumed us with Cancelled.TRUE (§2.2)
+	// suspendedOverride records a Thread.stop_waiting on this task's implicit
+	// thread: its ready_func is cleared, so it is SUSPENDED rather than WAITING
+	// even though its park kind would otherwise supply a predicate. See
+	// suspendedState.
+	suspendedOverride bool
 
 	// onStart, when non-nil, is the reference OnStart: produce lifted args
 	// (lazily!) -- used by startAsyncExportTask, where args must be lifted
@@ -146,6 +150,17 @@ func (s *guestSegment) main(fn func() error) {
 // Runs on whatever goroutine currently owns the baton (the starter on the
 // first handoff; sched.step's caller on resumes).
 func (s *guestSegment) handoff(mode resumeMode) error {
+	// The baton is strictly nested: this call blocks until it comes back, so
+	// whoever we hand it to (and anything IT hands it to) runs entirely inside
+	// this frame. Save and restore our own current-thread identity around that,
+	// or a spawned thread that merely runs and exits -- guestThread.run clears
+	// activeThread on the way out -- leaves the instance with no current thread
+	// at all, and the next builtin on THIS thread resolves the wrong blocker.
+	// during-sync-call-may-block-if-other-ready-threads arms exactly such a
+	// short-lived thread before blocking, and its switch back then parked the
+	// sync task's implicit thread instead of itself.
+	prevThread := s.gt.in.activeThread
+	defer func() { s.gt.in.activeThread = prevThread }()
 	s.resumeCh <- mode
 	<-s.yieldCh
 	if s.gt.seg == nil { // finished
@@ -163,12 +178,21 @@ func (s *guestSegment) handoff(mode resumeMode) error {
 // stackfulTask.block; the exclusive stays HELD across the park (reference
 // wait_until never releases it -- only the callback loop's frame-free WAIT
 // does, via leaveRun in advance).
-func (gt *guestTask) block(ready func() bool, cancellable bool) (cancelled bool) {
-	if gt.t.deliverPendingCancel(cancellable) {
-		return true
-	}
+func (gt *guestTask) block(ready func() bool) (cancelled bool) {
+	// No cancellation delivery here. The reference's Thread.wait_until (~353)
+	// does not deliver: delivery happens at exactly four sites, all of them in
+	// the callback dispatch loop or async entry -- the loop top, its YIELD and
+	// WAIT dispositions (WaitableSet.wait_from_callback, ~803), and
+	// Task.enter_implicit_thread's backpressure wait (~441). An older revision
+	// delivered in wait_until's prologue, which is where this used to be; the
+	// re-vendor to 07afb8145b80 dropped it, and cancel-delivery.wast asserts
+	// the difference directly ("a pending cancellation is not reported by the
+	// thread.yield and waitable-set.poll built-ins ... it survives them and is
+	// delivered at the event loop"). Every builtin that parks through here --
+	// thread.yield, thread.suspend, the four switch builtins, waitable-set.wait
+	// -- must leave a PENDING_CANCEL pending.
 	seg := gt.seg
-	gt.park, gt.cancellable = parkBlocked, cancellable
+	gt.park = parkBlocked
 	seg.parkReady = ready
 	gt.in.suspendRun()   // activeTask=nil, mayEnter=true; exclusive KEPT
 	gt.in.sched.park(gt) // safe: we hold the baton
@@ -177,16 +201,21 @@ func (gt *guestTask) block(ready func() bool, cancellable bool) (cancelled bool)
 	if mode == resumeAbort {
 		panic(errStackfulAbort) // unwinds guest frames via the engine's recover
 	}
-	gt.park, gt.cancellable = parkNone, false
+	gt.park = parkNone
 	seg.parkReady = nil
 	gt.in.enterRun(gt.t)
 	return mode == resumeCancelled
 }
 
+func (gt *guestTask) instance() *Instance { return gt.in }
+
 // ready mirrors the reference's per-park wait_for_event_and/wait_until
 // predicate (docs/component-model-async-phase3-design.md §1.1): whether
 // sched.step may resume this parked task right now.
 func (gt *guestTask) ready() bool {
+	if gt.suspendedOverride { // ready_func cleared by stop_waiting: never ready
+		return false
+	}
 	// held mirrors the reference's "exclusive_thread not in {None, self}"
 	// (docs/component-model-async-stackful-design.md §5): exclusiveOwner
 	// distinguishes "this instance's exclusive is free" from "held by a
@@ -195,18 +224,21 @@ func (gt *guestTask) ready() bool {
 	// composition (exclusiveOwner is always either nil or the one running
 	// task there, so this evaluates exactly like the old bare
 	// !gt.in.exclusiveHeld check).
-	held := gt.in.exclusiveHeld && gt.in.exclusiveOwner != gt.t
 	switch gt.park {
 	case parkEntry:
-		return !gt.in.hasBackpressure()
+		return !gt.in.hasBackpressure(gt.t)
 	case parkWait:
-		// wait_for_event_and(lambda: not exclusive, ...) -- the conjunct is
-		// load-bearing now (another task of the same instance may hold the
-		// callee's exclusive).
-		return !held &&
+		// wait_from_callback's ready(): `inst.exclusive_thread is None and
+		// (has_pending_event or has_pending_cancel)`. Strictly None, not
+		// "held by someone else" -- the callback loop releases its own
+		// exclusive before waiting (reference ~2084), so a waiter here never
+		// holds one, and treating self-held as free makes a task that yields
+		// while holding it instantly ready again: a livelock, not a wait.
+		return !gt.in.exclusiveHeld &&
 			(gt.cancelWake || gt.t.cancelDeliverable() || gt.wset.hasPendingEvent())
 	case parkYield:
-		return !held
+		// The YIELD disposition: wait_until(inst.exclusive_thread is None).
+		return !gt.in.exclusiveHeld
 	case parkBlocked:
 		// No !held conjunct, mirroring stackfulTask.ready's sparkBlock case:
 		// gt itself still holds its instance's exclusive across its own
@@ -214,9 +246,53 @@ func (gt *guestTask) ready() bool {
 		// exclusiveHeld/exclusiveOwner==gt.t), so held would always
 		// evaluate false here anyway -- gating on it would only risk a
 		// self-deadlock if that invariant ever shifted.
-		return gt.cancelWake || gt.t.cancelDeliverable() || gt.seg.parkReady()
+		//
+		// And no cancellation disjunct: Thread.wait_until's ready_func is the
+		// bare predicate, so a task blocked mid-core-call is NOT woken by a
+		// pending cancellation -- wait_from_callback's ready() is the only one
+		// in the reference that mentions cancellation. cancel-delivery.wast's
+		// $deferred asserts exactly this ("while a task is blocked in its
+		// initial core function it cannot be cancelled at all, so those
+		// cancellations deterministically report BLOCKED"): it blocks in a
+		// synchronous future.read, and the request must stay pending until the
+		// caller writes the future and the callback loop delivers it.
+		return gt.cancelWake || (gt.seg.parkReady != nil && gt.seg.parkReady())
 	}
 	return false
+}
+
+// suspendedState/startWaiting/stopWaiting make a callback task's implicit
+// thread a first-class Thread for the switch built-ins, the same way
+// stackfulTask's do (see the doc there).
+//
+// Two ways to be SUSPENDED. A thread.suspend taken mid-core-call parks at
+// parkBlocked installing no predicate, so seg.parkReady is nil -- the reference's
+// ready_func of None (during-sync-scheduling-candidates' "implicit thread of an
+// async callback task blocked not in the event loop (suspended mid-frame, still
+// holding the instance's exclusive lock)"). A stop_waiting on a thread parked in
+// its event loop instead clears the ready_func of a park whose predicate is
+// derived from the park kind rather than stored, and suspendedOverride records
+// that -- which is what thread.{yield,suspend}-then-promote does to a ready
+// event-loop thread before switching to it.
+func (gt *guestTask) suspendedState() bool {
+	if gt.park == parkNone {
+		return false
+	}
+	return gt.suspendedOverride || (gt.park == parkBlocked && gt.seg != nil && gt.seg.parkReady == nil)
+}
+
+func (gt *guestTask) startWaiting() {
+	gt.suspendedOverride = false
+	if gt.park == parkBlocked && gt.seg != nil && gt.seg.parkReady == nil {
+		gt.seg.parkReady = alwaysReady // Thread.start_waiting(lambda: True)
+	}
+}
+
+func (gt *guestTask) stopWaiting() {
+	gt.suspendedOverride = true
+	if gt.park == parkBlocked && gt.seg != nil {
+		gt.seg.parkReady = nil
+	}
 }
 
 // start is canon_lift's thread_func front half (~2145-2173): attempt entry;
@@ -226,7 +302,7 @@ func (gt *guestTask) ready() bool {
 // succeeds immediately, run to the first suspension or EXIT.
 func (gt *guestTask) start() error {
 	if !gt.in.tryEnter(gt.t) {
-		gt.park, gt.cancellable = parkEntry, true // entry wait is cancellable (~494)
+		gt.park = parkEntry
 		gt.in.numWaitingToEnter++
 		gt.in.sched.park(gt)
 		return nil
@@ -245,9 +321,20 @@ func (gt *guestTask) start() error {
 // the non-promoted early return. Only the promoted branch still pays for it.
 func (gt *guestTask) firstRun() error {
 	if !gt.promoted {
-		return gt.firstRunBody()
+		return gt.firstRunAsCaller()
 	}
-	return gt.runSegment(gt.firstRunBody)
+	return gt.runSegment(gt.firstRunAsCaller)
+}
+
+// firstRunAsCaller runs firstRunBody and then restores the caller's current
+// thread: this may be a nested (reentrant) call running inside a spawned
+// thread's frames, and enterRun clears activeThread for the duration. It is a
+// wrapper rather than a defer in the body, which costs every async call.
+func (gt *guestTask) firstRunAsCaller() error {
+	prevThread := gt.in.activeThread
+	err := gt.firstRunBody()
+	gt.in.activeThread = prevThread
+	return err
 }
 
 // firstRunBody is task.start() -> lower params -> core call -> advance(packed),
@@ -273,14 +360,14 @@ func (gt *guestTask) firstRunBody() error {
 		}
 	}
 
-	mem, memAvailable := memoryBytesOf(be.mod)
-	realloc := cachedReallocOf(gt.ctx, be)
+	mem, memAvailable := memoryBytesOf(be.memMod)
+	realloc := cachedReallocOf(gt.ctx, gt.in, be)
 
 	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
 	*coreArgsPtr = (*coreArgsPtr)[:0]
 	t.state = taskStarted
 	scope := t
-	coreArgs, err := gt.in.lowerParams(be, args, mem, memAvailable, realloc, gt.exportName, *coreArgsPtr, &scope)
+	coreArgs, err := gt.in.lowerParams(be, args, mem, memAvailable, &realloc, gt.exportName, *coreArgsPtr, &scope)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
 		gt.in.leaveRun()
@@ -308,7 +395,7 @@ func (gt *guestTask) firstRunBody() error {
 	if err := be.coreFn.CallWithStack(gt.ctx, stack); err != nil {
 		putUint64Slice(stackPtr)
 		gt.in.leaveRun()
-		gt.in.poisoned = true // guest code actually ran and trapped -- see fail's doc
+		gt.in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc
 		return gt.fail(fmt.Errorf("component/instance: export %q: call core func %q: %w", gt.exportName, be.funcName, err))
 	}
 	packed := uint32(stack[0])
@@ -321,6 +408,7 @@ func (gt *guestTask) firstRunBody() error {
 // task.requestCancellation's inline resume) when ready() is true (or a
 // cancel forces an out-of-band wake via cancelWake).
 func (gt *guestTask) resumeReady() error {
+	gt.suspendedOverride = false // running again: ready_func no longer applies
 	switch gt.park {
 	case parkEntry:
 		gt.in.numWaitingToEnter--
@@ -342,7 +430,7 @@ func (gt *guestTask) resumeReady() error {
 		ws := gt.wset
 		ws.numWaiting--
 		ev := eventTuple{code: eventTaskCancelled}
-		if !gt.cancelWake && !gt.t.deliverPendingCancel(true) {
+		if !gt.cancelWake && !gt.t.deliverPendingCancel() {
 			ev = ws.getPendingEvent()
 		}
 		gt.cancelWake = false
@@ -352,7 +440,7 @@ func (gt *guestTask) resumeReady() error {
 
 	case parkYield:
 		ev := eventTuple{code: eventNone}
-		if gt.cancelWake || gt.t.deliverPendingCancel(true) {
+		if gt.cancelWake || gt.t.deliverPendingCancel() {
 			ev = eventTuple{code: eventTaskCancelled}
 		}
 		gt.cancelWake = false
@@ -379,9 +467,18 @@ func (gt *guestTask) resumeReady() error {
 // allocation on the unpromoted hot path.
 func (gt *guestTask) runLoop(ev eventTuple) error {
 	if !gt.promoted {
-		return gt.runLoopBody(ev)
+		return gt.runLoopAsCaller(ev)
 	}
-	return gt.runSegment(func() error { return gt.runLoopBody(ev) })
+	return gt.runSegment(func() error { return gt.runLoopAsCaller(ev) })
+}
+
+// runLoopAsCaller is runLoopBody with the caller's current thread restored, as
+// firstRunAsCaller is for firstRunBody.
+func (gt *guestTask) runLoopAsCaller(ev eventTuple) error {
+	prevThread := gt.in.activeThread
+	err := gt.runLoopBody(ev)
+	gt.in.activeThread = prevThread
+	return err
 }
 
 // runLoopBody delivers ev to the callback core func, then hands the packed
@@ -401,7 +498,7 @@ func (gt *guestTask) runLoopBody(ev eventTuple) error {
 	if err := gt.be.callbackFn.CallWithStack(gt.ctx, cbStack); err != nil {
 		putUint64Slice(cbStackPtr)
 		gt.in.leaveRun()
-		gt.in.poisoned = true // guest code actually ran and trapped -- see fail's doc
+		gt.in.sched.lockdown = true // guest code actually ran and trapped -- see fail's doc
 		return gt.fail(fmt.Errorf("component/instance: export %q: callback %q: %w", gt.exportName, gt.be.callbackFuncName, err))
 	}
 	packed := uint32(cbStack[0])
@@ -426,7 +523,6 @@ func (gt *guestTask) advance(packed uint32) error {
 	switch code {
 	case callbackYield:
 		gt.park = parkYield
-		gt.cancellable = true
 		gt.in.leaveRun()
 		gt.in.sched.park(gt)
 		return nil
@@ -440,7 +536,6 @@ func (gt *guestTask) advance(packed uint32) error {
 		}
 		gt.park = parkWait
 		gt.wset = ws
-		gt.cancellable = true
 		ws.numWaiting++ // held across the park; released by resumeReady's parkWait arm
 		gt.in.leaveRun()
 		gt.in.sched.park(gt)
@@ -457,8 +552,10 @@ func (gt *guestTask) advance(packed uint32) error {
 // before task.return resolved the task").
 func (gt *guestTask) finishExit() error {
 	gt.in.leaveRun()
-	if gt.t.state != taskResolved {
-		return gt.fail(fmt.Errorf("component/instance: export %q: callback returned EXIT before task.return resolved the task", gt.exportName))
+	// unregister_thread's trap_if(state != RESOLVED) applies only once the
+	// task has no thread left: a spawned thread may still resolve it.
+	if gt.t.state != taskResolved && gt.t.liveThreads == 0 {
+		return gt.fail(fmt.Errorf("component/instance: export %q: callback returned EXIT before task.return resolved the task: %w", gt.exportName, errExitUnresolved))
 	}
 	gt.done = true
 	if gt.finish != nil {
@@ -480,7 +577,7 @@ func (gt *guestTask) finishExit() error {
 // unrelated call, exactly the regression invokeEntered's doc describes for
 // resolveArgHandles on a dropped resource handle. Only firstRun's
 // be.coreFn.CallWithStack and runLoop's be.callbackFn.CallWithStack --
-// guest code that actually ran and trapped -- set gt.in.poisoned = true
+// guest code that actually ran and trapped -- set gt.in.sched.lockdown = true
 // themselves, right where they call fail.
 func (gt *guestTask) fail(err error) error {
 	gt.done = true

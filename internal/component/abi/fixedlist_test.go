@@ -221,11 +221,11 @@ func TestFixedList_LiftErrors(t *testing.T) {
 	}{
 		{"typed runs out", fixed("u32", 3), two, ""},
 		{"boxed runs out", fixed("error-context", 3), two, ""},
-		{"bad char", fixed("char", 2), []CoreValue{NewCoreValueI32('a'), NewCoreValueI32(0x110000)}, "[1]: liftFlat char: value 1114112 out of range"},
+		{"bad char", fixed("char", 2), []CoreValue{NewCoreValueI32('a'), NewCoreValueI32(0x110000)}, "[1]: wasm trap: invalid `char` bit pattern: 0x110000"},
 		{"bad element", binary.FixedListDesc{Element: refTo(nil), Length: 1}, two[:1], "unsupported type"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := liftFlatImpl(NewCoreValueIter(tc.vals), tc.d, nil, func(uint32) binary.TypeDesc { return binary.FuncDesc{} }, nil)
+			_, err := liftFlatImpl(NewCoreValueIter(tc.vals), tc.d, nil, func(uint32) binary.TypeDesc { return binary.FuncDesc{} }, nil, UTF8)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("err %v, want %q", err, tc.want)
 			}
@@ -267,7 +267,7 @@ func TestFixedList_BadElement(t *testing.T) {
 			if _, err := FlatWidth(tc.d, tc.resolve); err == nil {
 				t.Error("FlatWidth")
 			}
-			if _, err := loadValue(mem, 0, tc.d, tc.resolve); err == nil {
+			if _, err := loadValue(mem, 0, tc.d, tc.resolve, UTF8); err == nil {
 				t.Error("load")
 			}
 			if _, err := storeValue(mem, 0, tc.d, []Value{uint32(1), uint32(2)}, 4, tc.resolve, Realloc{}); err == nil {
@@ -276,7 +276,7 @@ func TestFixedList_BadElement(t *testing.T) {
 			if _, err := lowerFlatImpl([]Value{uint32(1), uint32(2)}, tc.d, nil, tc.resolve, Realloc{}, mem); err == nil {
 				t.Error("lower")
 			}
-			if _, err := liftFlatImpl(NewCoreValueIter([]CoreValue{NewCoreValueI32(1), NewCoreValueI32(2)}), tc.d, nil, tc.resolve, mem); err == nil {
+			if _, err := liftFlatImpl(NewCoreValueIter([]CoreValue{NewCoreValueI32(1), NewCoreValueI32(2)}), tc.d, nil, tc.resolve, mem, UTF8); err == nil {
 				t.Error("lift")
 			}
 		})

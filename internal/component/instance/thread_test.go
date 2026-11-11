@@ -46,7 +46,7 @@ func TestThreadYieldHostFunc_BindSetsPromotionGate(t *testing.T) {
 // resolution.
 func TestThreadYieldHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		callThreadYield(in, binary.Canon{})
 	})
 }
@@ -94,44 +94,27 @@ func TestThreadYieldHostFunc_UnpromotedCallbackTask(t *testing.T) {
 	}
 }
 
-// TestThreadYieldHostFunc_UnpromotedCallbackTask_PendingCancelDelivers pins
-// the middle arm's deliverPendingCancel prologue (design §4.1, mirroring
-// wait_until's ~404): a PENDING_CANCEL task with cancel?=true yielding must
-// flip to CANCEL_DELIVERED and report Cancelled.TRUE immediately, without
-// running a scheduler round at all.
-func TestThreadYieldHostFunc_UnpromotedCallbackTask_PendingCancelDelivers(t *testing.T) {
+// TestThreadYieldHostFunc_PendingCancelIsNotReported pins that thread.yield
+// reports nothing about cancellation.
+//
+// canon_thread_yield is `thread.yield_(); return [0]` -- unconditional. An
+// earlier revision of this test asserted the opposite, from the shape the
+// built-in had while it still carried a `cancellable` immediate: back then a
+// cancellable yield delivered the pending cancellation and returned
+// Cancelled.TRUE. component-model#716 removed the immediate and the return
+// value with it; the pending cancellation stays pending until a suspension that
+// can actually report it (the callback loop's WAIT/YIELD disposition).
+func TestThreadYieldHostFunc_PendingCancelIsNotReported(t *testing.T) {
 	tk := &task{state: taskPendingCancel}
 	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: tk}
-	if got := callThreadYield(in, binary.Canon{Cancellable: true}); got != 1 {
-		t.Fatalf("thread.yield (pending cancel, cancellable) = %d, want 1 (Cancelled.TRUE)", got)
-	}
-	if tk.state != taskCancelDelivered {
-		t.Fatalf("task state = %v, want taskCancelDelivered", tk.state)
-	}
-}
-
-// TestThreadYieldHostFunc_UnpromotedCallbackTask_NonCancellableIgnoresPendingCancel
-// pins that a non-cancellable yield never consults cancelDeliverable/
-// deliverPendingCancel -- a PENDING_CANCEL task yielding without cancel?=true
-// just runs its scheduler round and returns NOT cancelled, staying
-// PENDING_CANCEL (the pending cancellation is only observed at a
-// cancellable suspension point).
-func TestThreadYieldHostFunc_UnpromotedCallbackTask_NonCancellableIgnoresPendingCancel(t *testing.T) {
-	tk := &task{state: taskPendingCancel}
-	in := &Instance{sched: &sched{}, mayLeave: true, activeTask: tk}
-	if got := callThreadYield(in, binary.Canon{Cancellable: false}); got != 0 {
-		t.Fatalf("thread.yield (pending cancel, non-cancellable) = %d, want 0 (not cancelled)", got)
+	if got := callThreadYield(in, binary.Canon{}); got != 0 {
+		t.Fatalf("thread.yield (pending cancel) = %d, want 0 -- yield never reports cancellation", got)
 	}
 	if tk.state != taskPendingCancel {
-		t.Fatalf("task state = %v, want unchanged taskPendingCancel", tk.state)
+		t.Fatalf("task state = %v, want it left at taskPendingCancel", tk.state)
 	}
 }
 
-// ------- Stage C: threadTable -------
-
-// TestThreadTable_ReservesIndexZero pins §4.3/§3's "index 0 reserved,
-// mirroring the reference Table's `array = [None]`" convention: the first
-// allocated slot must be index 1, never 0.
 func TestThreadTable_ReservesIndexZero(t *testing.T) {
 	var tt threadTable
 	idx := tt.add("first")
@@ -198,7 +181,7 @@ func TestThreadIndexHostFunc_BindSetsPromotionGate(t *testing.T) {
 
 func TestThreadIndexHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		callThreadIndex(in)
 	})
 }
@@ -273,7 +256,7 @@ func TestThreadSuspendHostFunc_BindSetsPromotionGate(t *testing.T) {
 
 func TestThreadSuspendHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		callThreadSuspend(in, binary.Canon{})
 	})
 }
@@ -573,7 +556,7 @@ func TestThreadNewIndirectHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	defer closeFn()
 	in := &Instance{sched: &sched{}, mayLeave: false, activeTask: &task{}}
 	def := bindThreadFuncTableNewIndirect(t, in, mod)
-	requirePanicContains(t, "may not be left", func() {
+	requirePanicContains(t, "cannot leave component instance", func() {
 		def.fn.Call(context.Background(), nil, []uint64{0, 0})
 	})
 }
@@ -652,7 +635,7 @@ func TestGuestThread_ReadySuspendedVsWaiting(t *testing.T) {
 	}
 
 	ready := false
-	th.parked, th.parkReady, th.cancellable = true, func() bool { return ready }, false
+	th.parked, th.parkReady = true, func() bool { return ready }
 	if th.suspendedState() {
 		t.Fatal("suspendedState() = true with a non-nil parkReady, want false (WAITING)")
 	}
@@ -664,13 +647,20 @@ func TestGuestThread_ReadySuspendedVsWaiting(t *testing.T) {
 		t.Fatal("ready() = false after the predicate is satisfied")
 	}
 
-	// A cancellable WAITING thread wakes on a deliverable pending cancel even
-	// when its own predicate is false (cancelDeliverable() disjunct).
-	th.parked, th.parkReady, th.cancellable = true, func() bool { return false }, true
+	// A pending cancellation alone does NOT make a WAITING thread ready: the
+	// reference's Thread.ready() is `waiting() and ready_func()`, with no
+	// cancellation disjunct in either the old or the current revision. Only an
+	// explicit cancel-wake resume (cancelWake) or the predicate itself wakes it.
+	th.parked, th.parkReady = true, func() bool { return false }
 	th.t.state = taskPendingCancel
-	if !th.ready() {
-		t.Fatal("ready() = false for a WAITING cancellable thread with a deliverable pending cancel, want true")
+	if th.ready() {
+		t.Fatal("ready() = true for a WAITING thread on a pending cancel alone, want false")
 	}
+	th.cancelWake = true
+	if !th.ready() {
+		t.Fatal("ready() = false after an explicit cancel-wake resume, want true")
+	}
+	th.cancelWake = false
 
 	// But a SUSPENDED thread (parkReady == nil) never wakes this way -- only
 	// an explicit thread.yield-then-resume (or reap) can resume it (§3's
@@ -710,7 +700,7 @@ func TestGuestThread_BlockResumeRoundtrip(t *testing.T) {
 	ready := false
 	blockResult := make(chan bool, 1)
 	th := newSuspendedGuestThreadSelfBlocking(in, tsk, func(th *guestThread, ctx context.Context, stack []uint64) error {
-		cancelled := th.block(func() bool { return ready }, false)
+		cancelled := th.block(func() bool { return ready })
 		blockResult <- cancelled
 		return nil
 	})
@@ -787,7 +777,7 @@ func TestGuestThread_ReapAbortsParkedSpawnedThread(t *testing.T) {
 	tsk := &task{state: taskStarted}
 	blockResult := make(chan bool, 1)
 	th := newSuspendedGuestThreadSelfBlocking(in, tsk, func(th *guestThread, ctx context.Context, stack []uint64) error {
-		cancelled := th.block(func() bool { return false }, false) // never ready on its own
+		cancelled := th.block(func() bool { return false }) // never ready on its own
 		blockResult <- cancelled
 		return nil
 	})
@@ -933,6 +923,13 @@ func TestGuestThread_ReapNeverSpawnedThreadCrossInstance(t *testing.T) {
 func TestGuestThread_RunLastThreadUnresolvedTraps(t *testing.T) {
 	in := newAsyncInst()
 	tsk := &task{state: taskStarted} // NOT resolved
+	// The task's own body must already be finished, or this thread is not the
+	// last one: unregister_thread's trap is `if len(self.threads) == 0`, and
+	// Task.threads holds the implicit thread until exit_implicit_thread
+	// (see task.implicitThreadAlive). A callback task whose gt is done models
+	// that -- a spawned thread outliving the task body, which is the real bug
+	// this trap catches.
+	tsk.gt = &guestTask{t: tsk, in: in, done: true}
 	th := newSuspendedGuestThread(in, tsk, func(ctx context.Context, stack []uint64) error { return nil })
 
 	if err := th.resumeReady(); err == nil {
@@ -945,6 +942,27 @@ func TestGuestThread_RunLastThreadUnresolvedTraps(t *testing.T) {
 	}
 	if _, ok := in.threads.getThread(th.index); ok {
 		t.Fatal("th's table slot should still be freed even though run() returned an error")
+	}
+}
+
+// TestGuestThread_RunLastThreadDoesNotTrapWhileTheImplicitThreadLives is the
+// other side of that conjunct: a spawned thread that exits while the task's own
+// implicit thread is merely PARKED is not the last thread of the task, so no
+// trap. Spawning a worker precisely to run and exit while the implicit thread
+// waits to be resumed is what trap-if-block-and-sync's yield-then-resume-is-fine
+// and during-sync-scheduling-candidates both do.
+func TestGuestThread_RunLastThreadDoesNotTrapWhileTheImplicitThreadLives(t *testing.T) {
+	in := newAsyncInst()
+	tsk := &task{state: taskStarted} // NOT resolved -- and must not need to be
+	tsk.gt = &guestTask{t: tsk, in: in}
+	tsk.gt.park = parkWait // parked in its event loop: implicit thread still live
+	th := newSuspendedGuestThread(in, tsk, func(context.Context, []uint64) error { return nil })
+
+	if err := th.resumeReady(); err != nil {
+		t.Fatalf("resumeReady: %v -- a spawned thread exiting while the implicit thread is parked is not the task's last thread", err)
+	}
+	if tsk.liveThreads != 0 {
+		t.Fatalf("tsk.liveThreads = %d, want 0", tsk.liveThreads)
 	}
 }
 
@@ -962,8 +980,8 @@ func TestGuestThread_RunGuestTrapPropagatesAndPoisons(t *testing.T) {
 		t.Fatal("expected the guest trap to propagate out of resumeReady")
 	}
 	requireErrContains(t, err, "boom")
-	if !in.poisoned {
-		t.Fatal("in.poisoned = false after a spawned thread's guest code trapped, want true")
+	if !in.sched.lockdown {
+		t.Fatal("in.sched.lockdown = false after a spawned thread's guest code trapped, want true")
 	}
 	if tsk.liveThreads != 0 {
 		t.Fatalf("tsk.liveThreads = %d, want 0 (unregister still happens on trap)", tsk.liveThreads)
@@ -1068,7 +1086,7 @@ func TestThreadYieldThenResumeHostFunc_BindSetsPromotionGate(t *testing.T) {
 func TestThreadYieldThenResumeHostFunc_MayLeaveFalsePanics(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false}
 	def := threadYieldThenResumeHostFunc(in, binary.Canon{})
-	requirePanicContains(t, "may not be left", func() { callThreadYieldThenResume(def, 1) })
+	requirePanicContains(t, "cannot leave component instance", func() { callThreadYieldThenResume(def, 1) })
 }
 
 func TestThreadYieldThenResumeHostFunc_BadIndexTraps(t *testing.T) {
@@ -1077,11 +1095,15 @@ func TestThreadYieldThenResumeHostFunc_BadIndexTraps(t *testing.T) {
 	requirePanicContains(t, "is not a live spawned thread", func() { callThreadYieldThenResume(def, 1) })
 }
 
-func TestThreadYieldThenResumeHostFunc_ImplicitMarkerIndexTraps(t *testing.T) {
+// TestThreadYieldThenResumeHostFunc_ImplicitMarkerNotSuspended pins that an
+// implicit thread resolves like any other -- inst.threads.get(i) returns one in
+// the reference -- and then trips the not-suspended trap, rather than being
+// reported as a bad index.
+func TestThreadYieldThenResumeHostFunc_ImplicitMarkerNotSuspended(t *testing.T) {
 	in := newAsyncInst()
 	idx := in.threads.add(implicitThreadMarker{t: &task{}})
 	def := threadYieldThenResumeHostFunc(in, binary.Canon{})
-	requirePanicContains(t, "is not a live spawned thread", func() { callThreadYieldThenResume(def, idx) })
+	requirePanicContains(t, "cannot resume thread which is not suspended", func() { callThreadYieldThenResume(def, idx) })
 }
 
 func TestThreadYieldThenResumeHostFunc_NotSuspendedTraps(t *testing.T) {
@@ -1102,13 +1124,41 @@ func TestThreadYieldThenResumeHostFunc_TaskLessTraps(t *testing.T) {
 	requirePanicContains(t, "cannot block a synchronous task before returning", func() { callThreadYieldThenResume(def, th.index) })
 }
 
-func TestThreadYieldThenResumeHostFunc_SyncImplicitTraps(t *testing.T) {
+// TestSuspendSelf_SyncTaskDeadlocks pins the sync task's suspension path
+// directly, rather than through a switch built-in whose fixture would need a
+// second live thread.
+//
+// A sync task's implicit thread may suspend -- the current reference puts no
+// restriction on canon_thread_suspend -- and parks while driving the scheduler
+// so other threads run. With nothing able to resume it, that drive reports a
+// deadlock, and the specification's wording for it is the old sync-block trap.
+func TestSuspendSelf_SyncTaskDeadlocks(t *testing.T) {
 	in := newAsyncInst()
-	tsk := &task{syncImplicit: true}
+	in.activeTask = &task{syncImplicit: true, inst: in}
+	requirePanicContains(t, "cannot block a synchronous task before returning", func() {
+		suspendSelf(in, "thread.suspend", neverReady)
+	})
+}
+
+// TestSuspendSelf_SyncTaskResumedByResumeLater is the other half: once another
+// thread calls resume-later on it, the parked sync thread is ready and the drive
+// returns, so the sync call carries on.
+func TestSuspendSelf_SyncTaskResumedByResumeLater(t *testing.T) {
+	in := newAsyncInst()
+	tsk := &task{syncImplicit: true, inst: in}
 	in.activeTask = tsk
-	th := newSuspendedGuestThread(in, tsk, nil)
-	def := threadYieldThenResumeHostFunc(in, binary.Canon{})
-	requirePanicContains(t, "cannot block a synchronous task before returning", func() { callThreadYieldThenResume(def, th.index) })
+	// Queue the resume so it runs on the drive's first step, standing in for
+	// the other thread that would call thread.resume-later.
+	in.sched.enqueue(func() error {
+		sit, ok := in.threads.getSwitchable(tsk.implicitThreadIdx)
+		if !ok {
+			t.Error("the suspended sync thread is not resolvable through the thread table")
+			return nil
+		}
+		sit.startWaiting()
+		return nil
+	})
+	suspendSelf(in, "thread.suspend", neverReady)
 }
 
 func TestThreadYieldThenResumeHostFunc_UnpromotedCallbackTaskFailsLoud(t *testing.T) {
@@ -1120,35 +1170,69 @@ func TestThreadYieldThenResumeHostFunc_UnpromotedCallbackTaskFailsLoud(t *testin
 	requirePanicContains(t, "not supported from an unpromoted callback task", func() { callThreadYieldThenResume(def, th.index) })
 }
 
-// TestThreadYieldThenResumeHostFunc_PendingCancelDeliversWithoutSwitching
-// pins the deliver-pending-cancel prologue (§4.5): a PENDING_CANCEL
-// cancellable caller must flip to CANCEL_DELIVERED and return Cancelled.TRUE
-// WITHOUT ever touching `other` -- other stays untouched/suspended.
-func TestThreadYieldThenResumeHostFunc_PendingCancelDeliversWithoutSwitching(t *testing.T) {
+// TestThreadYieldThenResumeHostFunc_PendingCancelDoesNotPreemptTheSwitch pins
+// that a pending cancellation neither preempts the switch nor is consumed by it.
+//
+// canon_thread_yield_then_resume never consults the task state, and
+// Thread.yield_then_resume/wait_until deliver no cancellation, so the switch is
+// recorded, the built-in reports Cancelled.FALSE, and the request stays
+// PENDING_CANCEL for the event loop to deliver (cancel-delivery.wast's test 3
+// asserts exactly this for the sibling built-in thread.yield).
+func TestThreadYieldThenResumeHostFunc_PendingCancelDoesNotPreemptTheSwitch(t *testing.T) {
 	in := newAsyncInst()
-	tsk, _ := newBareStackfulTask(in)
-	tsk.state = taskPendingCancel
+	tsk, st := newBareStackfulTask(in)
 	in.activeTask = tsk
-	th := newSuspendedGuestThread(in, tsk, func(context.Context, []uint64) error {
-		t.Fatal("other's thread func must not run when the caller's pending cancel delivers first")
+
+	ran := make(chan struct{})
+	other := newSuspendedGuestThread(in, tsk, func(context.Context, []uint64) error {
+		close(ran)
 		return nil
 	})
-	def := threadYieldThenResumeHostFunc(in, binary.Canon{Cancellable: true})
-	if got := callThreadYieldThenResume(def, th.index); got != 1 {
-		t.Fatalf("thread.yield-then-resume (pending cancel) = %d, want 1 (Cancelled.TRUE)", got)
+	tsk.state = taskPendingCancel
+
+	def := threadYieldThenResumeHostFunc(in, binary.Canon{})
+	got := make(chan uint64, 1)
+	if err := bareStackfulRun(st, func() error {
+		got <- callThreadYieldThenResume(def, other.index)
+		return nil
+	}); err != nil {
+		t.Fatalf("bareStackfulRun: %v", err)
 	}
-	if tsk.state != taskCancelDelivered {
-		t.Fatalf("task state = %v, want taskCancelDelivered", tsk.state)
+
+	if in.sched.pendingSwitch != other {
+		t.Fatal("the switch was not recorded: a pending cancel must not preempt it")
 	}
-	if !th.suspendedState() {
-		t.Fatal("other must remain SUSPENDED (never resumed) when the caller's own pending cancel delivers first")
+	if tsk.state != taskPendingCancel {
+		t.Fatalf("task state = %v after the switch, want taskPendingCancel -- the switch built-ins deliver no cancellation", tsk.state)
+	}
+	if !in.sched.isParked(st) {
+		t.Fatal("st should be parked ready-waiting: the pending cancel must not skip the self-park")
+	}
+
+	// The scheduler performs the switch; other runs and exits.
+	tsk.state = taskResolved // other is the task's last thread on exit
+	if _, err := in.sched.step(); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	select {
+	case <-ran:
+	default:
+		t.Fatal("the switched-to thread never ran")
+	}
+
+	if err := st.resumeReady(); err != nil {
+		t.Fatalf("st.resumeReady: %v", err)
+	}
+	select {
+	case cancelled := <-got:
+		if cancelled != 0 {
+			t.Fatalf("thread.yield-then-resume = %d, want 0 -- it never reports cancellation", cancelled)
+		}
+	default:
+		t.Fatal("st did not resume to completion")
 	}
 }
 
-// newBareStackfulTask builds a minimal (*task, *stackfulTask) pair with no
-// wasm-backed boundExport -- driven via bareStackfulRun(st, fn) instead of
-// st.firstRun()/st.run(), mirroring newPromotedGuestTask's no-wasm-needed
-// pattern (guest_task_promoted_test.go) for guestTask.
 func newBareStackfulTask(in *Instance) (*task, *stackfulTask) {
 	tsk := &task{inst: in, state: taskStarted}
 	st := &stackfulTask{t: tsk, in: in}
@@ -1180,23 +1264,28 @@ func bareStackfulRun(st *stackfulTask, fn func() error) error {
 	return st.handoff(resumeNormal)
 }
 
-// TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark is the design's §4.5
-// ordering-equivalence proof exercised end to end at the host-func level (the
-// exact mechanism trap-if-sync-and-waitable-set's $spawn-and-yield uses,
-// wast:69-72): $Main (a stackful implicit thread) switches directly to a
-// spawned thread that runs to completion, then parks itself ready-waiting;
-// resuming $Main later completes the call with Cancelled.FALSE.
+// TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark pins the switch's shape
+// after it stopped resuming the target inline.
+//
+// canon_thread_yield_then_resume is start_waiting(lambda: True) then
+// switch_to(other), and switch_to is suspend(switch_to = other): the switcher's
+// continuation is captured and the TARGET is handed to the scheduler, which
+// performs the resume (definitions.py ~266-277, ~363-367). So the built-in parks
+// the caller ready-waiting and records the target; the switched-to thread runs on
+// the driver's next step, not from inside the switcher's frame. That is what
+// makes a suspended thread resumable from anywhere, which reentrance.wast's
+// outer-sync/inner-async case needs.
 func TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark(t *testing.T) {
 	in := newAsyncInst()
 	tsk, st := newBareStackfulTask(in)
 	in.activeTask = tsk
 
 	ran := make(chan struct{})
-	other := newSuspendedGuestThread(in, tsk, func(ctx context.Context, stack []uint64) error {
+	other := newSuspendedGuestThread(in, tsk, func(context.Context, []uint64) error {
 		close(ran)
 		return nil
 	})
-	tsk.state = taskResolved // other becomes the last thread on exit; avoid the unresolved-task trap
+	tsk.state = taskResolved // other becomes the last thread on exit
 
 	before := numGoroutineStable(t)
 
@@ -1210,6 +1299,33 @@ func TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark(t *testing.T) {
 		t.Fatalf("bareStackfulRun: %v", err)
 	}
 
+	// The built-in handed the baton back without running other: it parked itself
+	// and left the target for the scheduler.
+	select {
+	case <-ran:
+		t.Fatal("the switched-to thread ran from inside the switcher's frame; the scheduler must perform the switch")
+	default:
+	}
+	if in.sched.pendingSwitch != other {
+		t.Fatal("sched.pendingSwitch is not the switch target")
+	}
+	if !in.sched.isParked(st) {
+		t.Fatal("st should be parked ready-waiting after the switch built-in returns")
+	}
+	select {
+	case <-selfParked:
+		t.Fatal("the host func returned before st ever parked -- ordering violated")
+	default:
+	}
+
+	// One scheduler step performs the switch; other runs to completion.
+	progressed, err := in.sched.step()
+	if err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if !progressed {
+		t.Fatal("step made no progress, so the pending switch was never performed")
+	}
 	select {
 	case <-ran:
 	default:
@@ -1221,17 +1337,8 @@ func TestThreadYieldThenResumeHostFunc_SwitchAndSelfPark(t *testing.T) {
 	if tsk.liveThreads != 0 {
 		t.Fatalf("tsk.liveThreads = %d, want 0", tsk.liveThreads)
 	}
-	if !in.sched.isParked(st) {
-		t.Fatal("st (the implicit thread) should be parked ready-waiting after the switch returns")
-	}
-	select {
-	case <-selfParked:
-		t.Fatal("the host func returned before st ever got a chance to self-park -- ordering violated")
-	default:
-	}
 
-	// Resume st (simulating the driver's next step): the "yield" half
-	// completes, Cancelled.FALSE.
+	// Resuming st completes the "yield" half with Cancelled.FALSE.
 	if err := st.resumeReady(); err != nil {
 		t.Fatalf("st.resumeReady: %v", err)
 	}

@@ -2,6 +2,7 @@ package instance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/samyfodil/wazy/internal/component/abi"
@@ -78,11 +79,10 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	// only the guest code actually being on the stack (task.go's
 	// enterRun/leaveRun), so a second entry into THIS instance while this
 	// task is merely parked (not running) can succeed, exactly as the
-	// reference allows. poisoned, unlike mayEnter, is sticky (see its doc on
-	// Instance): once any earlier call's guestTask/stackfulTask.fail has run,
-	// every later entry is refused permanently, matching the reference's
-	// Store poisoning invariant.
-	if in.poisoned || !in.mayEnter {
+	// reference allows. The store's lockdown, unlike mayEnter, is sticky (see
+	// sched.lockdown): once guest code anywhere in the store has trapped,
+	// every later entry is refused permanently.
+	if in.sched.lockdown {
 		return nil, in.cannotEnter(exportName)
 	}
 
@@ -98,27 +98,39 @@ func (in *Instance) invokeAsyncCallback(ctx context.Context, be *boundExport, ex
 	t.inst, t.be = in, be
 	gt.t, gt.in, gt.be, gt.ctx, gt.exportName = t, in, be, ctx, exportName
 	gt.args = args
+	// Promote when a cooperative-thread canon is bound: this task's implicit
+	// thread can then be the TARGET of a resume from another thread, which only
+	// works if its frames are on a goroutine that can park. This used to be
+	// false on the host-entry path unconditionally, which made thread.suspend
+	// inside a callback lift's own core function unimplementable ("not supported
+	// from an unpromoted callback task") -- during-sync-scheduling-candidates'
+	// $setup does exactly that: task.return, then thread.suspend, so a LATER
+	// non-async-typed call can resume its thread.
+	//
+	// Deliberately NOT mayBlockSync (which startAsyncExportTask uses): a
+	// host-entered task that merely blocks is resumed by the host-entry drive
+	// this function already runs, and nested-drives as it always has. Gating on
+	// the narrower flag keeps every async component that binds no thread.* canon
+	// -- which is all of them today -- at zero goroutines per call.
+	gt.promoted = in.mayThreadSwitch
 	t.gt = gt
 
 	if err := gt.start(); err != nil {
 		in.reapParkedGoroutines() // a trap may strand OTHER parked promoted segments (delegated callees)
 		return nil, err
 	}
-	done, err := in.sched.driveToQuiescence(func() bool { return gt.done })
-	if err != nil {
+	// Resolved is enough: the export's result exists the moment task.return
+	// runs, and the callback loop may legitimately keep parking itself after
+	// that -- during-sync-call-exclusive-resume's $C.arm resolves and then
+	// returns YIELD forever, waiting to be resumed during some LATER sync call.
+	// Waiting for EXIT here would drive that yield in a loop that never ends.
+	// The event loop stays parked; a subsequent entry point drives it.
+	if err := in.sched.drive(func() bool { return gt.done || t.state == taskResolved }); err != nil {
 		in.reapParkedGoroutines()
-		return nil, err
-	}
-	if !done {
-		if t.state != taskResolved {
-			in.reapParkedGoroutines()
+		if errors.Is(err, errAsyncDeadlock) {
 			return nil, fmt.Errorf("component/instance: export %q: deadlock: the async task is suspended but the run queue is empty and no parked task is ready; an import resolved externally requires CallAsync (not yet implemented)", exportName)
 		}
-		// The task returned, and is parked on work after it: writing a stream
-		// it returned, say. The call is over -- Store.lift returns at
-		// task.return -- and the task resumes when the scheduler is next
-		// driven: by a later call, or a host stream op (see settle).
-		return t.result, nil
+		return nil, err
 	}
 	if gt.err != nil {
 		in.reapParkedGoroutines()
@@ -154,11 +166,11 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 	if be.flattenErr != nil {
 		return nil, fmt.Errorf("component/instance: export %q: flatten func type: %w", exportName, be.flattenErr)
 	}
-	if in.poisoned || !in.mayEnter { // Store.lift's prologue: trap_if(!may_enter_from)
+	if in.sched.lockdown { // Store.lift's prologue: trap_if(!may_enter_from)
 		return nil, in.cannotEnter(exportName)
 	}
 
-	t := &task{inst: in, be: be}
+	t := &task{inst: in, be: be, noExclusive: be.stackfulAsyncOpts}
 	st := &stackfulTask{
 		t: t, in: in, be: be, ctx: ctx, exportName: exportName,
 		asyncOpts: be.stackfulAsyncOpts, args: args,
@@ -169,18 +181,22 @@ func (in *Instance) invokeStackful(ctx context.Context, be *boundExport, exportN
 		in.reapParkedGoroutines() // a trap may strand OTHER parked tasks (delegated callees)
 		return nil, err
 	}
-	done, err := in.sched.driveToQuiescence(func() bool { return st.done })
-	if err != nil {
+	// Resolved is enough, exactly as in invokeAsyncCallback above: canon_lift's
+	// sync-caller loop is `while task.state != Task.State.RESOLVED`
+	// (definitions.py ~2119), and an async-typed lift's caller sees the result
+	// the moment task.return runs. A stackful task's thread may legitimately
+	// keep yielding after that -- during-sync-scheduling-candidates' $setup
+	// calls task.return(1) and then loops on thread.yield forever, precisely so
+	// its thread stays a resumable candidate for the LATER sync calls to
+	// 'run'/'run-promote'. Waiting for st.done there drives that yield loop
+	// with no way out. The thread stays parked; a subsequent entry point
+	// resumes it.
+	if err := in.sched.drive(func() bool { return st.done || t.state == taskResolved }); err != nil {
 		in.reapParkedGoroutines()
-		return nil, err
-	}
-	if !done {
-		if t.state != taskResolved {
-			in.reapParkedGoroutines()
+		if errors.Is(err, errAsyncDeadlock) {
 			return nil, fmt.Errorf("component/instance: export %q: wasm trap: deadlock detected: event loop cannot make further progress", exportName)
 		}
-		// See invokeAsyncCallback: returned, with work parked after it.
-		return t.result, nil
+		return nil, err
 	}
 	if st.err != nil {
 		in.reapParkedGoroutines()
@@ -225,7 +241,7 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 	// running, so by construction it cannot also be running on THIS
 	// instance unless this instance IS the caller re-entering itself --
 	// exactly the case mayEnter guards), kept as a real trap for parity.
-	if in.poisoned || !in.mayEnter {
+	if in.sched.lockdown {
 		return nil, in.cannotEnter(exportName)
 	}
 	fr := &callbackFrame{}
@@ -274,10 +290,10 @@ func (in *Instance) startAsyncExportTask(ctx context.Context, be *boundExport, e
 func (in *Instance) startStackfulExportTask(ctx context.Context, be *boundExport, exportName string,
 	onStart func(*task) ([]abi.Value, error), onResolve func([]abi.Value, bool) error,
 ) (calleeTask *task, err error) {
-	if in.poisoned || !in.mayEnter {
+	if in.sched.lockdown {
 		return nil, in.cannotEnter(exportName)
 	}
-	t := &task{inst: in, be: be}
+	t := &task{inst: in, be: be, noExclusive: be.stackfulAsyncOpts}
 	t.onResolve = func(vals []abi.Value, cancelled bool) {
 		if e := onResolve(vals, cancelled); e != nil {
 			panic(fmt.Errorf("component/instance: export %q: %w", exportName, e))

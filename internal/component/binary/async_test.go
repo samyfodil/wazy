@@ -2,6 +2,7 @@ package binary
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -115,19 +116,19 @@ func TestDecodeAsyncBuiltins_Canons(t *testing.T) {
 	if cn[6].Kind != CanonKindWaitableSetNew {
 		t.Errorf("canon[6] kind: got %#x, want WaitableSetNew", cn[6].Kind)
 	}
-	// [core func 7] WaitableSetWait { cancellable: false, memory: 0 }
+	// [core func 7] WaitableSetWait { 0x00 reserved, memory: 0 }
 	if cn[7].Kind != CanonKindWaitableSetWait {
 		t.Errorf("canon[7] kind: got %#x, want WaitableSetWait", cn[7].Kind)
 	}
-	if cn[7].Cancellable || cn[7].MemIdx != 0 {
-		t.Errorf("canon[7] wait payload: got cancellable=%v memIdx=%d, want false,0", cn[7].Cancellable, cn[7].MemIdx)
+	if cn[7].MemIdx != 0 {
+		t.Errorf("canon[7] wait payload: got memIdx=%d, want 0", cn[7].MemIdx)
 	}
-	// [core func 8] WaitableSetPoll { cancellable: false, memory: 0 }
+	// [core func 8] WaitableSetPoll { 0x00 reserved, memory: 0 }
 	if cn[8].Kind != CanonKindWaitableSetPoll {
 		t.Errorf("canon[8] kind: got %#x, want WaitableSetPoll", cn[8].Kind)
 	}
-	if cn[8].Cancellable || cn[8].MemIdx != 0 {
-		t.Errorf("canon[8] poll payload: got cancellable=%v memIdx=%d, want false,0", cn[8].Cancellable, cn[8].MemIdx)
+	if cn[8].MemIdx != 0 {
+		t.Errorf("canon[8] poll payload: got memIdx=%d, want 0", cn[8].MemIdx)
 	}
 	// [core func 9] WaitableSetDrop
 	if cn[9].Kind != CanonKindWaitableSetDrop {
@@ -383,5 +384,70 @@ func TestDecodeErrorContextInSignature(t *testing.T) {
 	}
 	if fn.Results.Unnamed == nil || fn.Results.Unnamed.Primitive != "error-context" {
 		t.Errorf("func result: got %+v, want Some(error-context)", fn.Results.Unnamed)
+	}
+}
+
+// The thread built-ins and the reserved byte component-model#716 left where
+// the cancellable flag was, against design/mvp/Binary.md's grammar.
+func TestDecodeThreadBuiltinsAndReservedByte(t *testing.T) {
+	one := func(entry []byte) (Canon, error) {
+		buf := append([]byte{1}, entry...)
+		cn, _, err := decodeCanonSection(buf, 0, uint32(len(buf)))
+		if err != nil {
+			return Canon{}, err
+		}
+		return cn[0], nil
+	}
+
+	for _, tc := range []struct {
+		name  string
+		entry []byte
+		want  Canon
+	}{
+		{"waitable-set.wait", []byte{0x20, 0x00, 0x02}, Canon{Kind: CanonKindWaitableSetWait, MemIdx: 2}},
+		{"waitable-set.poll", []byte{0x21, 0x00, 0x00}, Canon{Kind: CanonKindWaitableSetPoll}},
+		{"thread.yield", []byte{0x0c, 0x00}, Canon{Kind: CanonKindThreadYield}},
+		{"thread.resume-later", []byte{0x28}, Canon{Kind: CanonKindThreadResumeLater}},
+		{"thread.suspend", []byte{0x29, 0x00}, Canon{Kind: CanonKindThreadSuspend}},
+		{"thread.suspend-then-resume", []byte{0x2a, 0x00}, Canon{Kind: CanonKindThreadSuspendThenResume}},
+		{"thread.yield-then-resume", []byte{0x2b, 0x00}, Canon{Kind: CanonKindThreadYieldThenResume}},
+		{"thread.suspend-then-promote", []byte{0x2c, 0x00}, Canon{Kind: CanonKindThreadSuspendThenPromote}},
+		{"thread.yield-then-promote", []byte{0x2d, 0x00}, Canon{Kind: CanonKindThreadYieldThenPromote}},
+		{"thread.spawn-ref", []byte{0x40, 0x01, 0x03}, Canon{Kind: CanonKindThreadSpawnRef, Shared: true, TypeIdx: 3}},
+		{"thread.spawn-indirect", []byte{0x41, 0x00, 0x03, 0x01}, Canon{Kind: CanonKindThreadSpawnIndirect, TypeIdx: 3, TableIdx: 1}},
+		{"thread.available-parallelism", []byte{0x42, 0x01}, Canon{Kind: CanonKindThreadAvailableParallelism, Shared: true}},
+	} {
+		got, err := one(tc.entry)
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if got.Kind != tc.want.Kind || got.MemIdx != tc.want.MemIdx || got.TypeIdx != tc.want.TypeIdx ||
+			got.TableIdx != tc.want.TableIdx || got.Shared != tc.want.Shared {
+			t.Errorf("%s: got %+v, want %+v", tc.name, got, tc.want)
+		}
+		if name := CanonKindName(got.Kind); name != tc.name {
+			t.Errorf("CanonKindName(%#x) = %q, want %q", got.Kind, name, tc.name)
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		entry []byte
+		want  string
+	}{
+		{"wait with the old cancellable flag", []byte{0x20, 0x01, 0x00}, "reserved byte must be 0x00, got 0x1"},
+		{"poll with the old cancellable flag", []byte{0x21, 0x01, 0x00}, "reserved byte must be 0x00, got 0x1"},
+		{"yield with the old cancellable flag", []byte{0x0c, 0x01}, "reserved byte must be 0x00, got 0x1"},
+		{"suspend-then-promote with a nonzero byte", []byte{0x2c, 0x02}, "reserved byte must be 0x00, got 0x2"},
+		{"truncated reserved byte", []byte{0x29}, ErrTruncatedBinary.Error()},
+		{"resource.drop async left the grammar", []byte{0x07, 0x00}, "unknown canon kind 0x7"},
+		{"bad shared? byte", []byte{0x42, 0x02}, "invalid bool byte 0x2"},
+		{"spawn-ref without its type", []byte{0x40, 0x00}, "functype index"},
+		{"spawn-indirect without its table", []byte{0x41, 0x00, 0x03}, "table index"},
+	} {
+		if _, err := one(tc.entry); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v, want an error containing %q", tc.name, err, tc.want)
+		}
 	}
 }

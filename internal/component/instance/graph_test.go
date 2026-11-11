@@ -497,13 +497,13 @@ func TestBuildCanonHostModule_UnsupportedCanonKind(t *testing.T) {
 
 func TestResourceCanonHostFuncGraph_UnsupportedKind(t *testing.T) {
 	comp := &binary.Component{} // ResolveType fails on TypeIdx 0 (no types at all), tolerated
-	_, err := resourceCanonHostFuncGraph(comp, newConfig(nil), newHandleTable(), "x", binary.Canon{Kind: 0xff})
+	_, err := resourceCanonHostFuncGraph(comp, newConfig(nil), &Instance{mayLeave: true}, newHandleTable(), "x", binary.Canon{Kind: 0xff})
 	requireErrContains(t, err, "unsupported resource canon kind")
 }
 
 func TestResourceCanonHostFuncGraph_ResolvableButWrongType(t *testing.T) {
 	comp := &binary.Component{Types: []binary.Type{{Descriptor: binary.PrimitiveDesc{Prim: "u32"}}}}
-	_, err := resourceCanonHostFuncGraph(comp, newConfig(nil), newHandleTable(), "x", binary.Canon{Kind: 0x02, TypeIdx: 0})
+	_, err := resourceCanonHostFuncGraph(comp, newConfig(nil), &Instance{mayLeave: true}, newHandleTable(), "x", binary.Canon{Kind: 0x02, TypeIdx: 0})
 	requireErrContains(t, err, "is not a resource type")
 }
 
@@ -516,7 +516,7 @@ func TestResourceCanonHostFuncGraph_NewAndRep(t *testing.T) {
 	resources := newHandleTable()
 	ctx := context.Background()
 
-	newDef, err := resourceCanonHostFuncGraph(comp, newConfig(nil), resources, "new", binary.Canon{Kind: 0x02, TypeIdx: 7})
+	newDef, err := resourceCanonHostFuncGraph(comp, newConfig(nil), &Instance{mayLeave: true}, resources, "new", binary.Canon{Kind: 0x02, TypeIdx: 7})
 	if err != nil {
 		t.Fatalf("resource.new: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestResourceCanonHostFuncGraph_NewAndRep(t *testing.T) {
 	newDef.fn.Call(ctx, nil, stack)
 	handle := uint32(stack[0])
 
-	repDef, err := resourceCanonHostFuncGraph(comp, newConfig(nil), resources, "rep", binary.Canon{Kind: 0x04, TypeIdx: 7})
+	repDef, err := resourceCanonHostFuncGraph(comp, newConfig(nil), &Instance{mayLeave: true}, resources, "rep", binary.Canon{Kind: 0x04, TypeIdx: 7})
 	if err != nil {
 		t.Fatalf("resource.rep: %v", err)
 	}
@@ -534,7 +534,7 @@ func TestResourceCanonHostFuncGraph_NewAndRep(t *testing.T) {
 		t.Fatalf("resource.rep(new(99)) = %d, want 99", uint32(stack2[0]))
 	}
 
-	dropDef, err := resourceCanonHostFuncGraph(comp, newConfig(nil), resources, "drop", binary.Canon{Kind: 0x03, TypeIdx: 7})
+	dropDef, err := resourceCanonHostFuncGraph(comp, newConfig(nil), &Instance{mayLeave: true}, resources, "drop", binary.Canon{Kind: 0x03, TypeIdx: 7})
 	if err != nil {
 		t.Fatalf("resource.drop: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestResourceCanonHostFuncGraph_NewAndRep(t *testing.T) {
 func TestResourceCanonHostFuncGraph_RepPanicsOnBadHandle(t *testing.T) {
 	comp := &binary.Component{}
 	resources := newHandleTable()
-	def, err := resourceCanonHostFuncGraph(comp, newConfig(nil), resources, "rep", binary.Canon{Kind: 0x04, TypeIdx: 7})
+	def, err := resourceCanonHostFuncGraph(comp, newConfig(nil), &Instance{mayLeave: true}, resources, "rep", binary.Canon{Kind: 0x04, TypeIdx: 7})
 	if err != nil {
 		t.Fatalf("resource.rep: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestResourceCanonHostFuncGraph_RepPanicsOnBadHandle(t *testing.T) {
 func TestResourceCanonHostFuncGraph_DropPanicsOnBadHandle(t *testing.T) {
 	comp := &binary.Component{}
 	resources := newHandleTable()
-	def, err := resourceCanonHostFuncGraph(comp, newConfig(nil), resources, "drop", binary.Canon{Kind: 0x03, TypeIdx: 7})
+	def, err := resourceCanonHostFuncGraph(comp, newConfig(nil), &Instance{mayLeave: true}, resources, "drop", binary.Canon{Kind: 0x03, TypeIdx: 7})
 	if err != nil {
 		t.Fatalf("resource.drop: %v", err)
 	}

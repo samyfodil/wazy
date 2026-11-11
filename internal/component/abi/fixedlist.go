@@ -287,7 +287,7 @@ func lowerFixed[T any](v Value, n uint32, lower func(T) (CoreValue, error)) ([]C
 
 // liftFlatFixedList lifts n elements in turn, as a tuple's are lifted, into a
 // dynamic list's shape.
-func liftFlatFixedList(vi valueIter, n uint32, elemType binary.TypeDesc, resolve Resolver, mem []byte) (Value, error) {
+func liftFlatFixedList(vi valueIter, n uint32, elemType binary.TypeDesc, resolve Resolver, mem []byte, enc Encoding) (Value, error) {
 	if prim, ok := scalarPrim(elemType); ok {
 		if v, handled, err := liftFixedScalars(vi, prim, n); handled {
 			return v, err
@@ -297,7 +297,7 @@ func liftFlatFixedList(vi valueIter, n uint32, elemType binary.TypeDesc, resolve
 	// so the slice grows from a small start rather than trusting n.
 	out := make([]Value, 0, min(n, MaxFlatParams))
 	for i := range n {
-		e, err := liftFlatImpl(vi, elemType, nil, resolve, mem)
+		e, err := liftFlatImpl(vi, elemType, nil, resolve, mem, enc)
 		if err != nil {
 			return nil, fmt.Errorf("liftFlat fixed-length list [%d]: %w", i, err)
 		}

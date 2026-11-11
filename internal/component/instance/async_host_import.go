@@ -200,6 +200,8 @@ type asyncResolveCfg struct {
 	resultNest      *asyncNest
 	resources       *handleTable
 	reallocOverride api.Function
+	enc             abi.Encoding
+	in              *Instance // the caller, whose realloc stores the results
 }
 
 // applyResolve replaces the per-call closure formerly assigned in
@@ -247,6 +249,8 @@ func (st *subtask) applyResolve(vals []abi.Value) error {
 		if cfg.reallocOverride != nil {
 			realloc = reallocOfFunc(st.resolveCtx, cfg.reallocOverride, st.memMod)
 		}
+		realloc.Encoding = cfg.enc
+		realloc.MayLeave = &cfg.in.mayLeave
 	}
 	// The refreshed view Store returns is dropped: this is the only store on
 	// this path and nothing writes through mem afterwards. (mem itself is
@@ -370,7 +374,7 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	cfg := &asyncResolveCfg{
 		iface: iface, funcName: funcName,
 		resultCount: resultCount, resultType: resultType, resultStore: resultPlan.store, resultUsesMem: resultUsesMem, resultNest: resultPlan.nest,
-		resources: resources, reallocOverride: reallocOverride,
+		resources: resources, reallocOverride: reallocOverride, enc: hi.enc, in: in,
 	}
 
 	// A delegate's handles below the top level cross as in buildHostWrapper.
@@ -380,8 +384,8 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	}
 
 	fn := api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-		if hi.lineage {
-			panic(fmt.Errorf("component/instance: async lower %q %q: wasm trap: cannot enter component instance", iface, funcName))
+		if !in.mayLeave { // canon_lower's trap_if(not may_leave)
+			panic(fmt.Errorf("component/instance: async import %q %q: cannot leave component instance", iface, funcName))
 		}
 		memMod := mod
 		if memOverride != nil {
@@ -426,9 +430,9 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 				var args []abi.Value
 				var aerr error
 				if paramsSpill {
-					args, aerr = liftAsyncHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, argPtr, memMod, resources, st)
+					args, aerr = liftAsyncHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, hi.enc, argPtr, memMod, resources, st)
 				} else {
-					args, aerr = liftAsyncHostArgsPlanned(in, paramPlans, resolve, flat, memMod, resources, st)
+					args, aerr = liftAsyncHostArgsPlanned(in, paramPlans, resolve, hi.enc, flat, memMod, resources, st)
 				}
 				if aerr != nil {
 					return nil, fmt.Errorf("async lower %q %q: %w", iface, funcName, aerr)
@@ -511,9 +515,9 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		var args []abi.Value
 		var aerr error
 		if paramsSpill {
-			args, aerr = liftAsyncHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, api.DecodeU32(stack[0]), memMod, resources, st)
+			args, aerr = liftAsyncHostArgsSpilled(in, paramPlans, paramTupleDesc, resolve, hi.enc, api.DecodeU32(stack[0]), memMod, resources, st)
 		} else {
-			args, aerr = liftAsyncHostArgsPlanned(in, paramPlans, resolve, stack, memMod, resources, st)
+			args, aerr = liftAsyncHostArgsPlanned(in, paramPlans, resolve, hi.enc, stack, memMod, resources, st)
 		}
 		if aerr != nil {
 			panic(fmt.Errorf("component/instance: async import %q %q: %w", iface, funcName, aerr))
@@ -560,12 +564,12 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 // Per-param post-processing (borrow lending, resolveHandleArg) is identical
 // to liftAsyncHostArgsPlanned's, just sourced from the loaded tuple's
 // elements instead of per-plan LiftFlat calls.
-func liftAsyncHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, ptr uint32, mod api.Module, resources *handleTable, st *subtask) ([]abi.Value, error) {
+func liftAsyncHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc binary.TupleDesc, resolve abi.Resolver, enc abi.Encoding, ptr uint32, mod api.Module, resources *handleTable, st *subtask) ([]abi.Value, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	if !memAvailable {
 		return nil, fmt.Errorf("parameter list spills to memory (flattens beyond the async flat limit), but the calling module has no memory")
 	}
-	tupleVal, err := abi.Load(mem, ptr, tupleDesc, resolve)
+	tupleVal, err := abi.LoadEnc(mem, ptr, tupleDesc, resolve, enc)
 	if err != nil {
 		return nil, fmt.Errorf("spilled parameter list: %w", err)
 	}
@@ -604,7 +608,7 @@ func liftAsyncHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc bin
 // stay lent until the subtask's SUBTASK event is delivered, which can be
 // long after this call returns (see subtask.deliverResolve, called from the
 // pending-event closure AsyncCall.Resolve installs).
-func liftAsyncHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, stack []uint64, mod api.Module, resources *handleTable, st *subtask) ([]abi.Value, error) {
+func liftAsyncHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.Resolver, enc abi.Encoding, stack []uint64, mod api.Module, resources *handleTable, st *subtask) ([]abi.Value, error) {
 	mem, memAvailable := memoryBytesOf(mod)
 	args := make([]abi.Value, len(plans))
 	pos := 0
@@ -620,7 +624,7 @@ func liftAsyncHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.R
 			}
 			cvs[k] = abi.CoreValue{Kind: pp.flat[k], Bits: stack[pos+k]}
 		}
-		v, err := abi.LiftFlat(cvs, pp.pt, resolve, mem)
+		v, err := abi.LiftFlatEnc(cvs, pp.pt, resolve, mem, enc)
 		if err != nil {
 			return nil, fmt.Errorf("param %d: lift: %w", i, err)
 		}

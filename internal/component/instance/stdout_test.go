@@ -257,7 +257,7 @@ func TestStdout_ListOutOfBounds(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for an out-of-bounds list<u8> pointer")
 	}
-	requireErrContains(t, err, "overflow")
+	requireErrContains(t, err, "list content out-of-bounds")
 	if out.Len() != 0 {
 		t.Fatalf("host buffer should not have been written to, got %q", out.String())
 	}

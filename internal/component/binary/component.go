@@ -315,39 +315,14 @@ type CanonOpt struct {
 }
 
 // CanonKind names the byte values Canon.Kind takes -- the first byte of each
-// entry in the canonical-function section (id 0x08). 0x00-0x04 were already
-// implemented; 0x05 and up are the Phase 0 async additions. Verified against
-// wasm-tools 1.253 (`wasm-tools dump`) on internal/component/binary/testdata/
-// async/*.wasm -- see decodeCanonSection and canonKindName.
-//
-// 0x07 (resource.drop async) was added in Phase 3 -- see
-// docs/component-model-async-phase3-design.md §4.4; its payload (a single
-// typeidx) is byte-identical to 0x03's, verified against fresh wasm-tools
-// output the same way as every other kind in this table.
-//
-// CanonKindThreadYield/Index/NewIndirect/Suspend/YieldThenResume are the five
-// thread.* builtins actually exercised by the vendored async .wast suites
-// (cancellable, sync-barges-in, trap-if-sync-and-waitable-set, trap-if-
-// block-and-sync); their opcodes and payload grammars are taken from the
-// component-model spec's design/mvp/Binary.md canon-definitions EBNF (the
-// 🧵/🔀 threads-proposal entries), cross-checked against `wasm-tools dump`
-// on those four fixtures. The REMAINING thread.* opcodes (0x28 resume-later,
-// 0x2a/0x2c/0x2d suspend/yield-then-promote, 0x40-0x42 spawn-ref/spawn-
-// indirect/available-parallelism) are deliberately NOT added here: no
-// vendored suite decodes one, so their byte layouts are unverified against
-// a real fixture -- add them (and their decode case) only once a suite that
-// actually needs them shows up. Decoding these five is NOT the same as
-// implementing thread.* execution (no runtime support exists for any of
-// them -- see stream_builtins.go/async_builtins.go's absence of a
-// thread.yield/thread.new-indirect host func); every suite that reaches one
-// at CALL time (not just decode) still traps or hangs on its own, real gap.
+// entry in the canonical-function section (id 0x08), as design/mvp/Binary.md
+// lists them.
 const (
-	CanonKindLift              byte = 0x00
-	CanonKindLower             byte = 0x01
-	CanonKindResourceNew       byte = 0x02
-	CanonKindResourceDrop      byte = 0x03
-	CanonKindResourceRep       byte = 0x04
-	CanonKindResourceDropAsync byte = 0x07
+	CanonKindLift         byte = 0x00
+	CanonKindLower        byte = 0x01
+	CanonKindResourceNew  byte = 0x02
+	CanonKindResourceDrop byte = 0x03
+	CanonKindResourceRep  byte = 0x04
 
 	CanonKindTaskCancel               byte = 0x05
 	CanonKindSubtaskCancel            byte = 0x06
@@ -382,8 +357,18 @@ const (
 	CanonKindBackpressureDec          byte = 0x25
 	CanonKindThreadIndex              byte = 0x26
 	CanonKindThreadNewIndirect        byte = 0x27
+	CanonKindThreadResumeLater        byte = 0x28
 	CanonKindThreadSuspend            byte = 0x29
+	CanonKindThreadSuspendThenResume  byte = 0x2a
 	CanonKindThreadYieldThenResume    byte = 0x2b
+	CanonKindThreadSuspendThenPromote byte = 0x2c
+	CanonKindThreadYieldThenPromote   byte = 0x2d
+	CanonKindStreamForward            byte = 0x2e
+	CanonKindFutureForward            byte = 0x2f
+
+	CanonKindThreadSpawnRef             byte = 0x40
+	CanonKindThreadSpawnIndirect        byte = 0x41
+	CanonKindThreadAvailableParallelism byte = 0x42
 )
 
 // Canon represents a canonical lift/lower binding (section 8).
@@ -403,13 +388,12 @@ type Canon struct {
 	// -write, and future.cancel-read/-write.
 	Async bool
 
-	// Cancellable is waitable-set.wait/poll's cancellable:bool payload, and
-	// (decode-only -- see CanonKindThreadYield's doc) thread.yield/thread.
-	// suspend/thread.yield-then-resume's identically-shaped cancel:bool.
-	Cancellable bool
+	// Shared is thread.spawn-ref/spawn-indirect/available-parallelism's
+	// shared? payload.
+	Shared bool
 
-	// TableIdx is thread.new-indirect's tbl:<core:tableidx> payload
-	// (decode-only). TypeIdx doubles as its ft:<typeidx> payload.
+	// TableIdx is thread.new-indirect's and thread.spawn-indirect's
+	// tbl:<core:tableidx> payload. TypeIdx doubles as their ft:<typeidx>.
 	TableIdx uint32
 
 	// MemIdx is waitable-set.wait/poll's memory index. (error-context.new/
@@ -639,7 +623,7 @@ func (c *Component) Dump(w io.Writer) error {
 				// Async builtins (0x05+): named but with no per-field dump
 				// yet -- Phase 0 is decode + typing only, so a name plus the
 				// raw kind byte is enough for now.
-				kindStr = fmt.Sprintf("%s (kind %#x)", canonKindName(cn.Kind), cn.Kind)
+				kindStr = fmt.Sprintf("%s (kind %#x)", CanonKindName(cn.Kind), cn.Kind)
 			}
 			if _, err := fmt.Fprintf(w, "  [%d] %s\n", i, kindStr); err != nil {
 				return err
@@ -691,11 +675,10 @@ func externTypeName(t byte) string {
 	}
 }
 
-// canonKindName maps a Canon.Kind byte to its builtin name, for Dump and
-// decode error messages. Kinds not in the CanonKind* table (0x08, 0x0c,
-// 0x26+) never reach here -- decodeCanonSection fails loud on them
-// before a Canon value exists.
-func canonKindName(k byte) string {
+// CanonKindName maps a Canon.Kind byte to its built-in's text-format name, for
+// Dump and error messages. A kind outside the CanonKind* table never reaches
+// here: decodeCanonSection fails loud on it before a Canon value exists.
+func CanonKindName(k byte) string {
 	switch k {
 	case CanonKindLift:
 		return "lift"
@@ -707,8 +690,6 @@ func canonKindName(k byte) string {
 		return "resource.drop"
 	case CanonKindResourceRep:
 		return "resource.rep"
-	case CanonKindResourceDropAsync:
-		return "resource.drop (async)"
 	case CanonKindTaskCancel:
 		return "task.cancel"
 	case CanonKindSubtaskCancel:
@@ -749,6 +730,16 @@ func canonKindName(k byte) string {
 		return "future.drop-readable"
 	case CanonKindFutureDropWritable:
 		return "future.drop-writable"
+	case CanonKindStreamForward:
+		return "stream.forward"
+	case CanonKindFutureForward:
+		return "future.forward"
+	case CanonKindThreadSpawnRef:
+		return "thread.spawn-ref"
+	case CanonKindThreadSpawnIndirect:
+		return "thread.spawn-indirect"
+	case CanonKindThreadAvailableParallelism:
+		return "thread.available-parallelism"
 	case CanonKindErrorContextNew:
 		return "error-context.new"
 	case CanonKindErrorContextDebugMessage:
@@ -779,6 +770,14 @@ func canonKindName(k byte) string {
 		return "thread.suspend"
 	case CanonKindThreadYieldThenResume:
 		return "thread.yield-then-resume"
+	case CanonKindThreadResumeLater:
+		return "thread.resume-later"
+	case CanonKindThreadSuspendThenResume:
+		return "thread.suspend-then-resume"
+	case CanonKindThreadSuspendThenPromote:
+		return "thread.suspend-then-promote"
+	case CanonKindThreadYieldThenPromote:
+		return "thread.yield-then-promote"
 	default:
 		return fmt.Sprintf("canon kind %#x", k)
 	}

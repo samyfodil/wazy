@@ -1,6 +1,6 @@
 ;; As bundle_arg_seen_through, but what the shim holds is this component's
-;; own lift: a call from the nested component into its parent, which is
-;; refused when made, as Wasmtime refuses it.
+;; own lift: a call from the nested component into its parent, which
+;; re-entrance permits (component-model#705, reentrance.wast).
 (component
   (core module $impl (func (export "f") (result i32) i32.const 42))
   (core instance $impl (instantiate $impl))

@@ -704,7 +704,7 @@ func TestPhase2EntryKinds(t *testing.T) {
 func TestFutureCancel(t *testing.T) {
 	in := newAsyncInst()
 	r, w := newBareFutureEnds(in)
-	writeFn := futureCopyHostFunc(in, sideWritable, eventFutureWrite, nil, 0, 0, true, true, nil, nil)
+	writeFn := futureCopyHostFunc(in, sideWritable, eventFutureWrite, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	callBuiltin(writeFn, uint64(w), 0) // parks
 
 	cancelFn := cancelCopyHostFunc(in, true, sideWritable, eventFutureWrite, nil, true)
@@ -718,7 +718,7 @@ func TestFutureCancel(t *testing.T) {
 
 func TestErrorContextNew_TrapsWithoutMemory(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
-	newFn := errorContextNewHostFunc(in, nil)
+	newFn := errorContextNewHostFunc(in, nil, abi.UTF8)
 	requirePanicContains(t, "no memory", func() {
 		newFn.fn.Call(context.Background(), nil, []uint64{0, 4, 0, 0})
 	})
@@ -728,7 +728,7 @@ func TestErrorContextDebugMessage_WrongKindTraps(t *testing.T) {
 	ctx, mod := memModule(t)
 	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
 	h := in.resources.addEntry(&resourceEntry{})
-	dmFn := errorContextDebugMessageHostFunc(in, nil, nil)
+	dmFn := errorContextDebugMessageHostFunc(in, nil, nil, abi.UTF8)
 	requirePanicContains(t, "is not an error-context", func() {
 		dmFn.fn.Call(ctx, mod, []uint64{uint64(h), 0, 0, 0})
 	})
@@ -748,21 +748,21 @@ func TestErrorContextDrop_WrongKindTraps(t *testing.T) {
 func TestFutureCopy_EndNotIdleAndJoinedSetTraps(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareFutureEnds(in)
-	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil)
+	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	callBuiltin(readFn, uint64(r), 0)
 	requirePanicContains(t, "cannot have concurrent operations active on a future/stream", func() { callBuiltin(readFn, uint64(r), 0) })
 
 	r2, _ := newBareFutureEnds(in)
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(r2), uint64(set))
-	syncRead := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, false, nil, nil)
+	syncRead := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, false, nil, nil, abi.UTF8)
 	requirePanicContains(t, "waitable cannot be used synchronously while added to a waitable set", func() { callBuiltin(syncRead, uint64(r2), 0) })
 }
 
 func TestFutureCopy_DeadlockOnEmptyRunq(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareFutureEnds(in)
-	syncRead := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, false, nil, nil)
+	syncRead := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, false, nil, nil, abi.UTF8)
 	requirePanicContains(t, "deadlock", func() { callBuiltin(syncRead, uint64(r), 0) })
 }
 
@@ -772,7 +772,7 @@ func TestRequireFutureEnd_WrongSideAndKindTraps(t *testing.T) {
 	requirePanicContains(t, "not a readable future end", func() {
 		callBuiltin(futureDropHostFunc(in, sideReadable, nil), uint64(w))
 	})
-	requirePanicContains(t, "not a future end", func() {
+	requirePanicContains(t, "unknown handle index 999", func() {
 		callBuiltin(futureDropHostFunc(in, sideReadable, nil), uint64(999))
 	})
 	_ = r
@@ -789,7 +789,7 @@ func TestCancelCopyHostFunc_WrongKindTraps(t *testing.T) {
 func TestCancelCopyHostFunc_SyncDrivesScheduler(t *testing.T) {
 	in := newAsyncInst()
 	r, _ := newBareStreamEnds(in)
-	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil)
+	asyncRead := streamCopyHostFunc(in, sideReadable, eventStreamRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	callBuiltin(asyncRead, uint64(r), 0, 1) // parks
 
 	re, _ := in.resources.getEntry(r)
@@ -821,7 +821,7 @@ func TestTakeReadableFutureEnd_Traps(t *testing.T) {
 		t.Fatal("expected an element-type-mismatch trap")
 	}
 
-	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil)
+	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil, abi.UTF8)
 	callBuiltin(readFn, uint64(r), 0)
 	if _, err := takeReadableFutureEnd(in, in.resources, nil, in.resolve, r); err == nil {
 		t.Fatal("expected a trap transferring a COPYING readable future end")
@@ -989,7 +989,7 @@ func TestResolveNewElem_SizeAndAlignmentErrors(t *testing.T) {
 func TestErrorContextDebugMessage_TrapsWithoutMemory(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
 	h := in.resources.addEntry(&ErrorContext{debugMessage: "x"})
-	dmFn := errorContextDebugMessageHostFunc(in, nil, nil)
+	dmFn := errorContextDebugMessageHostFunc(in, nil, nil, abi.UTF8)
 	requirePanicContains(t, "no memory", func() {
 		dmFn.fn.Call(context.Background(), nil, []uint64{uint64(h), 0, 0, 0})
 	})

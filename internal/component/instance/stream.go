@@ -84,14 +84,17 @@ type guestBuffer struct {
 // newGuestBuffer transliterates BufferGuestImpl.__init__'s traps:
 //
 //	trap_if(length > maxBufferLen)
-//	if elem != nil && length > 0:
+//	if elem != nil:
 //	  trap_if(ptr != align_to(ptr, alignment(elem)))
 //	  trap_if(ptr + length*elemSz > len(mem))   // checked against CURRENT mem
+//
+// A zero-length buffer is checked too (component-model#755): its pointer
+// still has to be aligned and inside memory.
 func newGuestBuffer(inst *Instance, memMod api.Module, realloc abi.Realloc, resolve abi.Resolver, elem binary.TypeDesc, elemSz, align uint32, numeric bool, ptr, length uint32) (*guestBuffer, error) {
 	if length > maxBufferLen {
 		return nil, fmt.Errorf("stream/future buffer: length %d exceeds the maximum (%d)", length, maxBufferLen)
 	}
-	if elem != nil && length > 0 {
+	if elem != nil {
 		mem, ok := memoryBytesOf(memMod)
 		if !ok {
 			return nil, fmt.Errorf("stream/future buffer: calling module has no memory")
@@ -100,11 +103,11 @@ func newGuestBuffer(inst *Instance, memMod api.Module, realloc abi.Realloc, reso
 			align = 1
 		}
 		if ptr != abi.Align(ptr, align) {
-			return nil, fmt.Errorf("stream/future buffer: pointer %d not aligned to %d", ptr, align)
+			return nil, fmt.Errorf("stream/future buffer pointer not aligned: %d is not a multiple of %d", ptr, align)
 		}
 		need := uint64(ptr) + uint64(length)*uint64(elemSz)
 		if need > uint64(len(mem)) {
-			return nil, fmt.Errorf("stream/future buffer: bounds: ptr=%d length=%d elemSz=%d mem_len=%d", ptr, length, elemSz, len(mem))
+			return nil, fmt.Errorf("stream/future buffer pointer out of bounds of memory: ptr=%d length=%d elemSz=%d mem_len=%d", ptr, length, elemSz, len(mem))
 		}
 	}
 	var ownElem *binary.OwnDesc
@@ -132,7 +135,7 @@ func (b *guestBuffer) read(n uint32) ([]abi.Value, error) {
 	}
 	out := make([]abi.Value, n)
 	for i := uint32(0); i < n; i++ {
-		v, err := abi.Load(mem, b.ptr, b.elem, b.resolve)
+		v, err := abi.LoadEnc(mem, b.ptr, b.elem, b.resolve, b.realloc.Encoding)
 		if err != nil {
 			return nil, fmt.Errorf("stream/future buffer read: element %d: %w", i, err)
 		}
@@ -259,6 +262,11 @@ type (
 	onCopyDoneFn func(result copyResult)
 )
 
+// errIntraComponentCopy is the spec's temporary same-instance restriction: an
+// intra-instance copy of a non-numeric element would alias the source and
+// destination memory mid-lift.
+var errIntraComponentCopy = errors.New("cannot read from and write to intra-component future/stream with non-numeric payload")
+
 // sharedStream is the reference SharedStreamImpl: the rendezvous point. At
 // most ONE pending buffer at a time -- whichever side calls read/write first
 // parks; the second side copies directly between the two buffers. No elastic
@@ -268,6 +276,17 @@ type sharedStream struct {
 	elemSz  uint32
 	align   uint32
 	numeric bool // noneOrNumberType(elem)
+	dropped bool
+
+	// dropNotify[side] records a DROPPED notification OWED to that side but not
+	// yet delivered. The reference has no such field because its End object
+	// itself moves between instances on a transfer, carrying its pending event;
+	// wazy mints a fresh end object on the receiving side, so the debt has to
+	// live on the shared object or a transfer would silently lose it.
+	// idle-drop.wast's transfer-then-park does exactly that: the producer drops
+	// the writable end and returns the readable end as a RESULT, and the
+	// receiver must still find the notification waiting.
+	dropNotify [2]bool
 
 	// elemIn is the Instance whose resolver/TypeSpace elem's type indices
 	// (e.g. an OwnDesc's ResourceType) are relative to -- the instance that
@@ -287,7 +306,15 @@ type sharedStream struct {
 	// the host's for a host-created stream.
 	elemResolve abi.Resolver
 
-	dropped bool
+	// readEnd/writeEnd are the LIVE end objects, one per side, so dropping one
+	// end can notify the other even when that other end is IDLE -- the
+	// reference's End.drop reaches its counterpart through End.other
+	// (definitions.py ~988-996) and notifies it whenever it is neither DONE nor
+	// already carrying an event. wazy's ends do not point at each other (they
+	// meet at this shared object), so the link lives here. At most one end per
+	// side is live at a time: a transfer across a component boundary replaces
+	// the readable end, which re-registers.
+	readEnd, writeEnd endNotifier
 
 	// The pending side. pendingInst identifies the guest instance whose
 	// buffer is parked (nil for a host buffer) -- consumed ONLY by the
@@ -296,9 +323,58 @@ type sharedStream struct {
 	pendingBuffer     copyBuffer
 	pendingOnCopy     onCopyFn
 	pendingOnCopyDone onCopyDoneFn
+
+	// hostWriter is the host's writable end, when the host made this stream
+	// (NewStream); a guest writer is writeEnd. absorb moves either one.
+	hostWriter *StreamWriter
+
+	// fwd is the stream this one was forwarded into (absorb), which carries
+	// its writer and any copy that writer had parked here.
+	fwd *sharedStream
 }
 
-func (s *sharedStream) resetPending() { s.setPending(nil, nil, nil, nil) }
+// resetPending clears the parked copy. On a stream that has been forwarded,
+// the parked copy moved with its writer, and a reclaim handed out before the
+// forward follows it there.
+func (s *sharedStream) resetPending() {
+	if s.fwd != nil {
+		s.fwd.resetPending()
+		return
+	}
+	s.setPending(nil, nil, nil, nil)
+}
+
+// absorb takes from's writer as this stream's, as End.forward links the
+// writer on the far side of the forwarded readable end to the reader on the
+// far side of the forwarded writable end. The forwarder's own two ends are
+// already gone. If both survivors have a copy parked, the smaller one is
+// re-issued against the other, which is the rendezvous End.forward performs.
+func (s *sharedStream) absorb(from *sharedStream) error {
+	if we, ok := from.writeEnd.(*streamEnd); ok {
+		we.shared = s
+	}
+	if hw := from.hostWriter; hw != nil {
+		hw.shared = s
+	}
+	s.writeEnd, s.hostWriter = from.writeEnd, from.hostWriter
+	s.dropNotify[sideWritable] = from.dropNotify[sideWritable]
+	inst, buf, oc, ocd := from.pendingInst, from.pendingBuffer, from.pendingOnCopy, from.pendingOnCopyDone
+	from.setPending(nil, nil, nil, nil)
+	from.fwd = s
+	switch {
+	case buf == nil:
+		return nil
+	case s.pendingBuffer == nil:
+		s.setPending(inst, buf, oc, ocd)
+		return nil
+	case s.pendingBuffer.remain() > buf.remain():
+		return s.write(inst, buf, oc, ocd)
+	default:
+		rinst, rbuf, roc, rocd := s.pendingInst, s.pendingBuffer, s.pendingOnCopy, s.pendingOnCopyDone
+		s.setPending(inst, buf, oc, ocd)
+		return s.read(rinst, rbuf, roc, rocd)
+	}
+}
 
 func (s *sharedStream) setPending(inst *Instance, b copyBuffer, oc onCopyFn, ocd onCopyDoneFn) {
 	s.pendingInst, s.pendingBuffer, s.pendingOnCopy, s.pendingOnCopyDone = inst, b, oc, ocd
@@ -323,6 +399,11 @@ func (s *sharedStream) drop() {
 	}
 }
 
+// ends returns this shared object's two live end registrations.
+func (s *sharedStream) ends() (*endNotifier, *endNotifier) { return &s.readEnd, &s.writeEnd }
+
+func (s *sharedStream) dropDebt() *[2]bool { return &s.dropNotify }
+
 // write is a writable-end (or host-writer) call with src as the source
 // buffer. Branch-for-branch transliteration of stream_copy's write side.
 func (s *sharedStream) write(inst *Instance, src copyBuffer, onCopy onCopyFn, onCopyDone onCopyDoneFn) error {
@@ -339,7 +420,7 @@ func (s *sharedStream) write(inst *Instance, src copyBuffer, onCopy onCopyFn, on
 		// copy of a non-numeric element would alias the source and
 		// destination memory mid-lift. inst==nil (host side) never trips it.
 		if inst != nil && inst == s.pendingInst && !s.numeric {
-			return errors.New("cannot read from and write to intra-component stream (element type requires cross-memory lift/lower, spec restriction)")
+			return errIntraComponentCopy
 		}
 		if s.pendingBuffer.remain() > 0 {
 			if src.remain() > 0 {
@@ -383,7 +464,7 @@ func (s *sharedStream) read(inst *Instance, dst copyBuffer, onCopy onCopyFn, onC
 
 	default:
 		if inst != nil && inst == s.pendingInst && !s.numeric {
-			return errors.New("cannot read from and write to intra-component stream (element type requires cross-memory lift/lower, spec restriction)")
+			return errIntraComponentCopy
 		}
 		if s.pendingBuffer.remain() > 0 {
 			if dst.remain() > 0 {
@@ -587,6 +668,7 @@ type streamEnd struct {
 	waitable
 	side   endSide
 	state  copyState
+	index  uint32 // the handle this end is reachable by (reference End.index)
 	shared *sharedStream
 
 	// livePending is true while this end's pendingEvent is a LIVE, still-
@@ -625,6 +707,7 @@ type futureEnd struct {
 	waitable
 	side   endSide
 	state  copyState
+	index  uint32 // the handle this end is reachable by (reference End.index)
 	shared *sharedFuture
 }
 
@@ -636,26 +719,64 @@ func (e *futureEnd) copying() bool          { return e.state == copyCopying || e
 // simpler protocol -- no onCopy (no partial progress), buffers always
 // length 1.
 type sharedFuture struct {
-	elem    binary.TypeDesc
-	elemSz  uint32
-	align   uint32
-	numeric bool
+	elem       binary.TypeDesc
+	elemSz     uint32
+	align      uint32
+	numeric    bool
+	dropped    bool
+	dropNotify [2]bool
 
 	// elemIn and elemResolve are sharedStream's twins -- see their docs.
 	elemIn      *Instance
 	elemResolve abi.Resolver
 
-	dropped           bool
+	// readEnd/writeEnd, dropNotify: see sharedStream's identical fields.
+	readEnd, writeEnd endNotifier
+
 	pendingInst       *Instance
 	pendingBuffer     copyBuffer
 	pendingOnCopyDone onCopyDoneFn
+
+	// hostWriter is sharedStream.hostWriter's twin.
+	hostWriter *FutureWriter
 }
 
 func (f *sharedFuture) resetPending() { f.setPending(nil, nil, nil) }
 
+// absorb is sharedStream.absorb's twin. A future's copy is always one element,
+// so when both survivors have one parked, the read is the one re-issued.
+func (f *sharedFuture) absorb(from *sharedFuture) error {
+	if we, ok := from.writeEnd.(*futureEnd); ok {
+		we.shared = f
+	}
+	if hw := from.hostWriter; hw != nil {
+		hw.shared = f
+	}
+	f.writeEnd, f.hostWriter = from.writeEnd, from.hostWriter
+	f.dropNotify[sideWritable] = from.dropNotify[sideWritable]
+	inst, buf, ocd := from.pendingInst, from.pendingBuffer, from.pendingOnCopyDone
+	from.resetPending()
+	switch {
+	case buf == nil:
+		return nil
+	case f.pendingBuffer == nil:
+		f.setPending(inst, buf, ocd)
+		return nil
+	default:
+		rinst, rbuf, rocd := f.pendingInst, f.pendingBuffer, f.pendingOnCopyDone
+		f.setPending(inst, buf, ocd)
+		return f.read(rinst, rbuf, rocd)
+	}
+}
+
 func (f *sharedFuture) setPending(inst *Instance, b copyBuffer, ocd onCopyDoneFn) {
 	f.pendingInst, f.pendingBuffer, f.pendingOnCopyDone = inst, b, ocd
 }
+
+// ends returns this shared object's two live end registrations.
+func (f *sharedFuture) ends() (*endNotifier, *endNotifier) { return &f.readEnd, &f.writeEnd }
+
+func (f *sharedFuture) dropDebt() *[2]bool { return &f.dropNotify }
 
 func (f *sharedFuture) resetAndNotifyPending(result copyResult) {
 	ocd := f.pendingOnCopyDone
@@ -678,7 +799,7 @@ func (f *sharedFuture) read(inst *Instance, dst copyBuffer, onCopyDone onCopyDon
 		return nil
 	}
 	if inst != nil && inst == f.pendingInst && !f.numeric {
-		return errors.New("cannot read from and write to intra-component future (element type requires cross-memory lift/lower, spec restriction)")
+		return errIntraComponentCopy
 	}
 	// pendingBuffer is a parked WRITER's source; copy it into dst then
 	// complete both sides.
@@ -701,7 +822,7 @@ func (f *sharedFuture) write(inst *Instance, src copyBuffer, onCopyDone onCopyDo
 		return nil
 	}
 	if inst != nil && inst == f.pendingInst && !f.numeric {
-		return errors.New("cannot read from and write to intra-component future (element type requires cross-memory lift/lower, spec restriction)")
+		return errIntraComponentCopy
 	}
 	// pendingBuffer is a parked READER's destination.
 	if err := copyElements(f.numeric, f.pendingBuffer, src, 1); err != nil {
@@ -783,4 +904,85 @@ func takeReadableFutureEnd(in *Instance, t *handleTable, elemDesc binary.TypeDes
 	}
 	t.removeEntry(i)
 	return fe.shared, nil
+}
+
+// sharedCancel cancels the in-flight copy on this end's shared object, which
+// installs a CANCELLED pending event for whichever side was parked on it. Named
+// on the end (rather than reaching through .shared at each call site) because
+// both the explicit cancel built-ins and the cancel-wake path in
+// stream_builtins.go need it, and the two end types differ only in the shared
+// object's type.
+func (e *streamEnd) sharedCancel() { e.shared.cancel() }
+func (e *futureEnd) sharedCancel() { e.shared.cancel() }
+
+// endNotifier is one side's live end, as much of it as a drop notification
+// needs.
+//
+// The reference keeps the two ends pointing at each other (End.other) and
+// End.drop notifies the counterpart directly. wazy's ends meet at the shared
+// object instead, so the shared object holds these registrations and
+// notifyPeerDropped below plays End.drop's notify arm. An interface rather than
+// a struct of closures: the end object already exists, so registering it costs
+// nothing.
+type endNotifier interface {
+	// endDone reports whether this end has already reached DONE (a delivered
+	// terminal result), in which case there is nothing left to tell it.
+	endDone() bool
+	// endHasEvent reports whether an event is already pending on it -- a copy
+	// that was in flight has just been notified DROPPED through the normal
+	// path, and the notification must be delivered exactly once.
+	endHasEvent() bool
+	// endNotifyDropped installs the DROPPED event.
+	endNotifyDropped()
+}
+
+func notifyPeerDropped(debt *[2]bool, peerSide endSide, peer endNotifier) {
+	if peer != nil && (peer.endDone() || peer.endHasEvent()) {
+		return // already terminal, or already told
+	}
+	debt[peerSide] = true
+	if peer != nil {
+		peer.endNotifyDropped() // a live end: install it now
+	}
+}
+
+// index/eventCode are the reference End's own fields (definitions.py ~941-942):
+// the handle this end is reachable by, and the event code its notifications
+// carry. Recorded at registration so a drop notification can build its event
+// without the copy built-in's closures.
+func (e *streamEnd) endDone() bool     { return e.state == copyDone }
+func (e *streamEnd) endHasEvent() bool { return e.hasPendingEvent() }
+
+func (e *streamEnd) endNotifyDropped() {
+	e.livePending = false
+	e.setPendingEvent(func() eventTuple {
+		e.shared.dropNotify[e.side] = false
+		e.state = copyDone
+		return eventTuple{code: e.eventCode(), p1: e.index, p2: packCopyResult(copyDropped, 0)}
+	})
+}
+
+func (e *streamEnd) eventCode() eventCode {
+	if e.side == sideReadable {
+		return eventStreamRead
+	}
+	return eventStreamWrite
+}
+
+func (e *futureEnd) endDone() bool     { return e.state == copyDone }
+func (e *futureEnd) endHasEvent() bool { return e.hasPendingEvent() }
+
+func (e *futureEnd) endNotifyDropped() {
+	e.setPendingEvent(func() eventTuple {
+		e.shared.dropNotify[e.side] = false
+		e.state = copyDone
+		return eventTuple{code: e.eventCode(), p1: e.index, p2: uint32(copyDropped)}
+	})
+}
+
+func (e *futureEnd) eventCode() eventCode {
+	if e.side == sideReadable {
+		return eventFutureRead
+	}
+	return eventFutureWrite
 }
