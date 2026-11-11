@@ -159,3 +159,55 @@ func Variant(v component.Value, wit string) (component.VariantValue, error) {
 func ResultValue(v component.Value, wit string) (component.ResultValue, error) {
 	return want[component.ResultValue](v, wit)
 }
+
+// Handles moves resource handles between a component's handle table and the
+// reps the host works with, for the handles the engine does not translate
+// itself: those nested in an import's composite arguments and results, and
+// every one an export takes or returns.
+type Handles struct {
+	// Table is the handle table the handles live in.
+	Table *component.HandleTable
+	// Inst is the instance a guest resource's handle belongs to.
+	Inst *component.Instance
+
+	lent []lent
+}
+
+type lent struct{ tag, handle uint32 }
+
+// Rep reads the handle v of the host resource tag, returning its rep: taking
+// the handle out of the table for an own, leaving it for a borrow.
+func (h *Handles) Rep(tag uint32, own bool, v component.Value) (uint32, error) {
+	handle, err := U32(v)
+	if err != nil {
+		return 0, err
+	}
+	if own {
+		return h.Table.TakeOwn(tag, handle)
+	}
+	return h.Table.Rep(tag, handle)
+}
+
+// Mint puts rep, a host resource of tag, in the table and returns the handle.
+// One minted for a borrow is dropped again by Release, once the call that
+// borrows it has returned.
+func (h *Handles) Mint(tag, rep uint32, borrow bool) component.Value {
+	handle := h.Table.NewOwn(tag, rep)
+	if borrow {
+		h.lent = append(h.lent, lent{tag, handle})
+	}
+	return handle
+}
+
+// Release drops the handles minted for borrows. It does not run the
+// resources' destructors: the host still owns them.
+func (h *Handles) Release() error {
+	var first error
+	for _, l := range h.lent {
+		if err := h.Table.Drop(l.tag, l.handle); err != nil && first == nil {
+			first = err
+		}
+	}
+	h.lent = nil
+	return first
+}

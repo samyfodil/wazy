@@ -101,18 +101,6 @@ func TestGenerateRefuses(t *testing.T) {
 			"f: async functions are not supported yet",
 		},
 		{
-			"exported resource", `package a:b; interface i { resource r; } world w { export i; }`,
-			"export a:b/i: exported resource r is not supported yet",
-		},
-		{
-			"handle param in export", `package a:b; interface t { resource r; } world w { use t.{r}; export f: func(x: borrow<r>); }`,
-			"f: param x: a resource handle in an export is not supported yet",
-		},
-		{
-			"handle result in export", `package a:b; interface t { resource r; } world w { use t.{r}; export f: func() -> r; }`,
-			"f: result: a resource handle in an export is not supported yet",
-		},
-		{
 			"stream", `package a:b; world w { export f: func() -> stream<u8>; }`,
 			"f: result: stream types are not supported yet",
 		},
@@ -138,18 +126,6 @@ func TestGenerateRefuses(t *testing.T) {
 			"f: result: a tuple of 9 elements is longer than witgo has a type for",
 		},
 		{
-			"handle in an export list", `package a:b; interface t { resource r; } world w { use t.{r}; export f: func(x: list<borrow<r>>); }`,
-			"f: param x: a resource handle in an export",
-		},
-		{
-			"handle in an export tuple", `package a:b; interface t { resource r; } world w { use t.{r}; export f: func() -> tuple<u8, r>; }`,
-			"f: result: a resource handle in an export",
-		},
-		{
-			"handle in an export record", `package a:b; interface t { resource r; record h { x: r } } world w { use t.{h}; export f: func() -> h; }`,
-			"f: result: a resource handle in an export",
-		},
-		{
 			"unbound resource", `package a:b; interface t { resource r; } interface i { use t.{r}; g: func(x: borrow<r>); } world w { import i; }`,
 			"a:b/i#g: param x: a handle to a:b/t.r, of an interface left unbound",
 		},
@@ -171,6 +147,72 @@ func TestGenerateRefuses(t *testing.T) {
 	require.EqualError(t, err, "bindgen: no Go package name")
 	_, err = Generate(pkg, Options{Package: "p", World: "nope"})
 	require.EqualError(t, err, "bindgen: no world \"nope\" in package a:b")
+}
+
+// Handles in exports and an exported resource generate: the resource as a Go
+// type holding its handle, with its methods; the host's handles converted
+// through the instance's table, borrows released after the call.
+func TestGenerateExportHandles(t *testing.T) {
+	src := `package a:b;
+interface t { resource r; }
+interface i {
+  use t.{r};
+  resource blob {
+    constructor(init: string);
+    read: func() -> string;
+    join: static func(a: borrow<blob>, b: borrow<blob>) -> blob;
+    drop: func();
+  }
+  keep: func(x: r) -> list<blob>;
+  lend: func(x: borrow<r>, xs: list<borrow<r>>) -> tuple<r, option<r>>;
+}
+world w { import t; export i; }`
+	out, err := genSrc(t, src, Options{})
+	require.NoError(t, err)
+	for _, want := range []string{
+		"type Blob struct {",
+		"func (x Blob) Drop(ctx context.Context) error {",
+		`return x.inst.DropResource(ctx, "a:b/i", "blob", x.handle)`,
+		"func (x Blob) Read(ctx context.Context) (string, error) {",
+		`x.inst.CallExport(ctx, "a:b/i", "[method]blob.read", x.handle)`,
+		"func (x Blob) Drop_(ctx context.Context) error {",
+		"func (x I) NewBlob(ctx context.Context, init string) (Blob, error) {",
+		"func (x I) BlobJoin(ctx context.Context, a Blob, b Blob) (Blob, error) {",
+		"func (x I) Keep(ctx context.Context, x_ R) ([]Blob, error) {",
+		`h := &witgo.Handles{Table: x.inst.ResourcesFor("a:b/i"), Inst: x.inst}`,
+		"if rerr := h.Release(); err == nil {",
+		"lowerR(h, x_, true)",
+		"DropR(ctx context.Context, self R) error",
+	} {
+		require.Contains(t, out, want)
+	}
+}
+
+// An import's handles below the top level go through the table the
+// resources hook captures; those at the top level are the engine's to
+// translate.
+func TestGenerateNestedImportHandles(t *testing.T) {
+	src := `package a:b;
+interface i {
+  resource r;
+  pair: func() -> tuple<r, r>;
+  all: func(xs: list<borrow<r>>, one: borrow<r>) -> result<r, string>;
+  plain: func(x: borrow<r>) -> r;
+}
+world w { import i; }`
+	out, err := genSrc(t, src, Options{})
+	require.NoError(t, err)
+	for _, want := range []string{
+		"var table *component.HandleTable",
+		"component.WithResourcesHook(func(t *component.HandleTable) { table = t }),",
+		"h := &witgo.Handles{Table: table}",
+		"xs, err := liftT",
+		"one, err := liftR(nil, args[1], false)",
+		"x_, err := liftR(nil, args[0], false)",
+		"return []component.Value{lowerR(nil, r, false)}, nil",
+	} {
+		require.Contains(t, out, want)
+	}
 }
 
 // A world with no imports takes none, and WASI is left to the host by

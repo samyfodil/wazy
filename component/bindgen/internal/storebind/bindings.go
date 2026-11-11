@@ -12,7 +12,7 @@ import (
 	"github.com/samyfodil/wazy/component/witgo"
 )
 
-// The tags the bindings mint host resource handles under.
+// The tags the bindings mint resource handles under.
 const (
 	tagBucket uint32 = 0xdb2fb000
 )
@@ -21,9 +21,20 @@ const (
 // value the host returns from its constructor, and receives back as self.
 type Bucket uint32
 
-func liftBucket(v component.Value) (Bucket, error) {
-	x, err := witgo.U32(v)
+func liftBucket(h *witgo.Handles, v component.Value, own bool) (Bucket, error) {
+	if h == nil {
+		x, err := witgo.U32(v)
+		return Bucket(x), err
+	}
+	x, err := h.Rep(tagBucket, own, v)
 	return Bucket(x), err
+}
+
+func lowerBucket(h *witgo.Handles, x Bucket, borrow bool) component.Value {
+	if h == nil {
+		return uint32(x)
+	}
+	return h.Mint(tagBucket, uint32(x), borrow)
 }
 
 // Error is the WIT variant error: Case says which case it holds.
@@ -52,7 +63,7 @@ func (x Error) Denied() (string, bool) {
 	return v, ok && x.Case == ErrorCaseDenied
 }
 
-func liftError(v component.Value) (Error, error) {
+func liftError(h *witgo.Handles, v component.Value) (Error, error) {
 	var out Error
 	vv, err := witgo.Variant(v, "error")
 	if err != nil {
@@ -73,7 +84,7 @@ func liftError(v component.Value) (Error, error) {
 	return out, nil
 }
 
-func lowerError(x Error) component.Value {
+func lowerError(h *witgo.Handles, x Error) component.Value {
 	switch x.Case {
 	case 1:
 		p, _ := x.payload.(string)
@@ -82,7 +93,7 @@ func lowerError(x Error) component.Value {
 	return component.VariantValue{Disc: uint32(x.Case)}
 }
 
-func liftT1(v component.Value) (*[]byte, error) {
+func liftT1(h *witgo.Handles, v component.Value) (*[]byte, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -93,14 +104,14 @@ func liftT1(v component.Value) (*[]byte, error) {
 	return &x, nil
 }
 
-func lowerT1(x *[]byte) component.Value {
+func lowerT1(h *witgo.Handles, x *[]byte) component.Value {
 	if x == nil {
 		return nil
 	}
 	return *x
 }
 
-func liftT2(v component.Value) ([]string, error) {
+func liftT2(h *witgo.Handles, v component.Value) ([]string, error) {
 	vs, err := witgo.Values(v, -1, "list<string>")
 	if err != nil {
 		return nil, err
@@ -114,7 +125,7 @@ func liftT2(v component.Value) ([]string, error) {
 	return out, nil
 }
 
-func lowerT2(x []string) component.Value {
+func lowerT2(h *witgo.Handles, x []string) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
 		out[i] = e
@@ -122,7 +133,7 @@ func lowerT2(x []string) component.Value {
 	return out
 }
 
-func liftT3(v component.Value) (witgo.Result[[]string, Error], error) {
+func liftT3(h *witgo.Handles, v component.Value) (witgo.Result[[]string, Error], error) {
 	var out witgo.Result[[]string, Error]
 	r, err := witgo.ResultValue(v, "result")
 	if err != nil {
@@ -130,19 +141,19 @@ func liftT3(v component.Value) (witgo.Result[[]string, Error], error) {
 	}
 	out.IsErr = r.IsErr
 	if !r.IsErr {
-		out.Ok, err = liftT2(r.Payload)
+		out.Ok, err = liftT2(h, r.Payload)
 	}
 	if r.IsErr {
-		out.Err, err = liftError(r.Payload)
+		out.Err, err = liftError(h, r.Payload)
 	}
 	return out, err
 }
 
-func lowerT3(x witgo.Result[[]string, Error]) component.Value {
+func lowerT3(h *witgo.Handles, x witgo.Result[[]string, Error]) component.Value {
 	if x.IsErr {
-		return component.ResultValue{IsErr: true, Payload: lowerError(x.Err)}
+		return component.ResultValue{IsErr: true, Payload: lowerError(h, x.Err)}
 	}
-	return component.ResultValue{Payload: lowerT2(x.Ok)}
+	return component.ResultValue{Payload: lowerT2(h, x.Ok)}
 }
 
 // Imports are the host's implementations of the world's imports.
@@ -177,13 +188,13 @@ func optionsKv(impl Kv) []component.Option {
 			if err != nil {
 				return nil, err
 			}
-			return []component.Value{uint32(r)}, nil
+			return []component.Value{lowerBucket(nil, r, false)}, nil
 		}, tbl.Func([]component.TypeRef{component.Prim("string")}, tbl.Own(tagBucket)), resolve),
 		component.WithImportCustom("example:store/kv@1.0.0", "[method]bucket.put", func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 			if len(args) != 3 {
 				return nil, fmt.Errorf("%s: %d args", "[method]bucket.put", len(args))
 			}
-			self, err := liftBucket(args[0])
+			self, err := liftBucket(nil, args[0], false)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: %w", "[method]bucket.put", "self", err)
 			}
@@ -201,7 +212,7 @@ func optionsKv(impl Kv) []component.Option {
 			if len(args) != 2 {
 				return nil, fmt.Errorf("%s: %d args", "[method]bucket.get", len(args))
 			}
-			self, err := liftBucket(args[0])
+			self, err := liftBucket(nil, args[0], false)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: %w", "[method]bucket.get", "self", err)
 			}
@@ -213,13 +224,13 @@ func optionsKv(impl Kv) []component.Option {
 			if err != nil {
 				return nil, err
 			}
-			return []component.Value{lowerT1(r)}, nil
+			return []component.Value{lowerT1(nil, r)}, nil
 		}, tbl.Func([]component.TypeRef{tbl.Borrow(tagBucket), component.Prim("string")}, tbl.Option(tbl.List(component.Prim("u8")))), resolve),
 		component.WithImportCustom("example:store/kv@1.0.0", "list-keys", func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("%s: %d args", "list-keys", len(args))
 			}
-			b, err := liftBucket(args[0])
+			b, err := liftBucket(nil, args[0], false)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: %w", "list-keys", "b", err)
 			}
@@ -227,7 +238,7 @@ func optionsKv(impl Kv) []component.Option {
 			if err != nil {
 				return nil, err
 			}
-			return []component.Value{lowerT3(r)}, nil
+			return []component.Value{lowerT3(nil, r)}, nil
 		}, tbl.Func([]component.TypeRef{tbl.Borrow(tagBucket)}, tbl.Result(tbl.List(component.Prim("string")), t1)), resolve),
 		component.WithResourceTag("example:store/kv@1.0.0", "bucket", tagBucket),
 		component.WithHostResourceDtor(tagBucket, func(ctx context.Context, rep uint32) error { return impl.DropBucket(ctx, Bucket(rep)) }),

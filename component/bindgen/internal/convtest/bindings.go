@@ -95,7 +95,7 @@ type OtherItem struct {
 	X uint8
 }
 
-func liftItem(v component.Value) (Item, error) {
+func liftItem(h *witgo.Handles, v component.Value) (Item, error) {
 	var out Item
 	vs, err := witgo.Values(v, 2, "item")
 	if err != nil {
@@ -104,17 +104,17 @@ func liftItem(v component.Value) (Item, error) {
 	if out.ID, err = witgo.U32(vs[0]); err != nil {
 		return out, err
 	}
-	if out.Tags, err = liftT1(vs[1]); err != nil {
+	if out.Tags, err = liftT1(h, vs[1]); err != nil {
 		return out, err
 	}
 	return out, nil
 }
 
-func lowerItem(x Item) component.Value {
-	return []component.Value{x.ID, lowerT1(x.Tags)}
+func lowerItem(h *witgo.Handles, x Item) component.Value {
+	return []component.Value{x.ID, lowerT1(h, x.Tags)}
 }
 
-func liftNode(v component.Value) (Node, error) {
+func liftNode(h *witgo.Handles, v component.Value) (Node, error) {
 	var out Node
 	vv, err := witgo.Variant(v, "node")
 	if err != nil {
@@ -132,7 +132,7 @@ func liftNode(v component.Value) (Node, error) {
 		}
 		out.payload = p
 	case 1:
-		p, err := liftT4(vv.Payload)
+		p, err := liftT4(h, vv.Payload)
 		if err != nil {
 			return out, err
 		}
@@ -141,19 +141,19 @@ func liftNode(v component.Value) (Node, error) {
 	return out, nil
 }
 
-func lowerNode(x Node) component.Value {
+func lowerNode(h *witgo.Handles, x Node) component.Value {
 	switch x.Case {
 	case 0:
 		p, _ := x.payload.(uint8)
 		return component.VariantValue{Disc: 0, Payload: uint32(p)}
 	case 1:
 		p, _ := x.payload.(witgo.Tuple2[int16, string])
-		return component.VariantValue{Disc: 1, Payload: lowerT4(p)}
+		return component.VariantValue{Disc: 1, Payload: lowerT4(h, p)}
 	}
 	return component.VariantValue{Disc: uint32(x.Case)}
 }
 
-func liftLevel(v component.Value) (Level, error) {
+func liftLevel(h *witgo.Handles, v component.Value) (Level, error) {
 	x, err := witgo.U32(v)
 	if err == nil && x >= 2 {
 		err = fmt.Errorf("%s: case %d", "level", x)
@@ -161,56 +161,56 @@ func liftLevel(v component.Value) (Level, error) {
 	return Level(x), err
 }
 
-func lowerLevel(x Level) component.Value {
+func lowerLevel(h *witgo.Handles, x Level) component.Value {
 	return uint32(x)
 }
 
-func liftBits(v component.Value) (Bits, error) {
+func liftBits(h *witgo.Handles, v component.Value) (Bits, error) {
 	x, err := witgo.U32(v)
 	return Bits(x), err
 }
 
-func lowerBits(x Bits) component.Value {
+func lowerBits(h *witgo.Handles, x Bits) component.Value {
 	return uint32(x)
 }
 
-func liftHolder(v component.Value) (Holder, error) {
+func liftHolder(h *witgo.Handles, v component.Value) (Holder, error) {
 	var out Holder
 	vs, err := witgo.Values(v, 14, "holder")
 	if err != nil {
 		return out, err
 	}
-	if out.M, err = liftT2(vs[0]); err != nil {
+	if out.M, err = liftT2(h, vs[0]); err != nil {
 		return out, err
 	}
-	if out.F, err = liftT3(vs[1]); err != nil {
+	if out.F, err = liftT3(h, vs[1]); err != nil {
 		return out, err
 	}
-	if out.O, err = liftT6(vs[2]); err != nil {
+	if out.O, err = liftT6(h, vs[2]); err != nil {
 		return out, err
 	}
-	if out.Okonly, err = liftT7(vs[3]); err != nil {
+	if out.Okonly, err = liftT7(h, vs[3]); err != nil {
 		return out, err
 	}
-	if out.Bare, err = liftT8(vs[4]); err != nil {
+	if out.Bare, err = liftT8(h, vs[4]); err != nil {
 		return out, err
 	}
-	if out.Errorly, err = liftT9(vs[5]); err != nil {
+	if out.Errorly, err = liftT9(h, vs[5]); err != nil {
 		return out, err
 	}
-	if out.T, err = liftT10(vs[6]); err != nil {
+	if out.T, err = liftT10(h, vs[6]); err != nil {
 		return out, err
 	}
-	if out.B, err = liftBits(vs[7]); err != nil {
+	if out.B, err = liftBits(h, vs[7]); err != nil {
 		return out, err
 	}
-	if out.L, err = liftLevel(vs[8]); err != nil {
+	if out.L, err = liftLevel(h, vs[8]); err != nil {
 		return out, err
 	}
-	if out.Nested, err = liftT11(vs[9]); err != nil {
+	if out.Nested, err = liftT11(h, vs[9]); err != nil {
 		return out, err
 	}
-	if out.Fixedprim, err = liftT12(vs[10]); err != nil {
+	if out.Fixedprim, err = liftT12(h, vs[10]); err != nil {
 		return out, err
 	}
 	if out.Ints, err = component.ListOf[int32](vs[11]); err != nil {
@@ -225,11 +225,11 @@ func liftHolder(v component.Value) (Holder, error) {
 	return out, nil
 }
 
-func lowerHolder(x Holder) component.Value {
-	return []component.Value{lowerT2(x.M), lowerT3(x.F), lowerT6(x.O), lowerT7(x.Okonly), lowerT8(x.Bare), lowerT9(x.Errorly), lowerT10(x.T), uint32(x.B), uint32(x.L), lowerT11(x.Nested), append([]int8(nil), x.Fixedprim[:]...), x.Ints, x.Chars, x.Bools}
+func lowerHolder(h *witgo.Handles, x Holder) component.Value {
+	return []component.Value{lowerT2(h, x.M), lowerT3(h, x.F), lowerT6(h, x.O), lowerT7(h, x.Okonly), lowerT8(h, x.Bare), lowerT9(h, x.Errorly), lowerT10(h, x.T), uint32(x.B), uint32(x.L), lowerT11(h, x.Nested), append([]int8(nil), x.Fixedprim[:]...), x.Ints, x.Chars, x.Bools}
 }
 
-func liftOtherItem(v component.Value) (OtherItem, error) {
+func liftOtherItem(h *witgo.Handles, v component.Value) (OtherItem, error) {
 	var out OtherItem
 	vs, err := witgo.Values(v, 1, "item")
 	if err != nil {
@@ -241,11 +241,11 @@ func liftOtherItem(v component.Value) (OtherItem, error) {
 	return out, nil
 }
 
-func lowerOtherItem(x OtherItem) component.Value {
+func lowerOtherItem(h *witgo.Handles, x OtherItem) component.Value {
 	return []component.Value{uint32(x.X)}
 }
 
-func liftT1(v component.Value) ([]string, error) {
+func liftT1(h *witgo.Handles, v component.Value) ([]string, error) {
 	vs, err := witgo.Values(v, -1, "list<string>")
 	if err != nil {
 		return nil, err
@@ -259,7 +259,7 @@ func liftT1(v component.Value) ([]string, error) {
 	return out, nil
 }
 
-func lowerT1(x []string) component.Value {
+func lowerT1(h *witgo.Handles, x []string) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
 		out[i] = e
@@ -267,7 +267,7 @@ func lowerT1(x []string) component.Value {
 	return out
 }
 
-func liftT2(v component.Value) (map[string]Item, error) {
+func liftT2(h *witgo.Handles, v component.Value) (map[string]Item, error) {
 	vs, err := witgo.Values(v, -1, "map")
 	if err != nil {
 		return nil, err
@@ -282,22 +282,22 @@ func liftT2(v component.Value) (map[string]Item, error) {
 		if err != nil {
 			return nil, err
 		}
-		if out[k], err = liftItem(kv[1]); err != nil {
+		if out[k], err = liftItem(h, kv[1]); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-func lowerT2(x map[string]Item) component.Value {
+func lowerT2(h *witgo.Handles, x map[string]Item) component.Value {
 	out := make([]component.Value, 0, len(x))
 	for k, e := range x {
-		out = append(out, []component.Value{k, lowerItem(e)})
+		out = append(out, []component.Value{k, lowerItem(h, e)})
 	}
 	return out
 }
 
-func liftT3(v component.Value) ([2]Item, error) {
+func liftT3(h *witgo.Handles, v component.Value) ([2]Item, error) {
 	var out [2]Item
 	s, err := witgo.Values(v, -1, "list<item, 2>")
 	if err != nil {
@@ -307,22 +307,22 @@ func liftT3(v component.Value) ([2]Item, error) {
 		return out, fmt.Errorf("%s: %d elements", "list<item, 2>", len(s))
 	}
 	for i, e := range s {
-		if out[i], err = liftItem(e); err != nil {
+		if out[i], err = liftItem(h, e); err != nil {
 			return out, err
 		}
 	}
 	return out, nil
 }
 
-func lowerT3(x [2]Item) component.Value {
+func lowerT3(h *witgo.Handles, x [2]Item) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
-		out[i] = lowerItem(e)
+		out[i] = lowerItem(h, e)
 	}
 	return out
 }
 
-func liftT4(v component.Value) (witgo.Tuple2[int16, string], error) {
+func liftT4(h *witgo.Handles, v component.Value) (witgo.Tuple2[int16, string], error) {
 	var out witgo.Tuple2[int16, string]
 	vs, err := witgo.Values(v, 2, "tuple")
 	if err != nil {
@@ -337,51 +337,51 @@ func liftT4(v component.Value) (witgo.Tuple2[int16, string], error) {
 	return out, nil
 }
 
-func lowerT4(x witgo.Tuple2[int16, string]) component.Value {
+func lowerT4(h *witgo.Handles, x witgo.Tuple2[int16, string]) component.Value {
 	return []component.Value{int32(x.F0), x.F1}
 }
 
-func liftT5(v component.Value) ([]Node, error) {
+func liftT5(h *witgo.Handles, v component.Value) ([]Node, error) {
 	vs, err := witgo.Values(v, -1, "list<node>")
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Node, len(vs))
 	for i, e := range vs {
-		if out[i], err = liftNode(e); err != nil {
+		if out[i], err = liftNode(h, e); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-func lowerT5(x []Node) component.Value {
+func lowerT5(h *witgo.Handles, x []Node) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
-		out[i] = lowerNode(e)
+		out[i] = lowerNode(h, e)
 	}
 	return out
 }
 
-func liftT6(v component.Value) (*[]Node, error) {
+func liftT6(h *witgo.Handles, v component.Value) (*[]Node, error) {
 	if v == nil {
 		return nil, nil
 	}
-	x, err := liftT5(v)
+	x, err := liftT5(h, v)
 	if err != nil {
 		return nil, err
 	}
 	return &x, nil
 }
 
-func lowerT6(x *[]Node) component.Value {
+func lowerT6(h *witgo.Handles, x *[]Node) component.Value {
 	if x == nil {
 		return nil
 	}
-	return lowerT5(*x)
+	return lowerT5(h, *x)
 }
 
-func liftT7(v component.Value) (witgo.Result[uint64, struct{}], error) {
+func liftT7(h *witgo.Handles, v component.Value) (witgo.Result[uint64, struct{}], error) {
 	var out witgo.Result[uint64, struct{}]
 	r, err := witgo.ResultValue(v, "result")
 	if err != nil {
@@ -394,14 +394,14 @@ func liftT7(v component.Value) (witgo.Result[uint64, struct{}], error) {
 	return out, err
 }
 
-func lowerT7(x witgo.Result[uint64, struct{}]) component.Value {
+func lowerT7(h *witgo.Handles, x witgo.Result[uint64, struct{}]) component.Value {
 	if x.IsErr {
 		return component.ResultValue{IsErr: true, Payload: nil}
 	}
 	return component.ResultValue{Payload: x.Ok}
 }
 
-func liftT8(v component.Value) (witgo.Result[struct{}, struct{}], error) {
+func liftT8(h *witgo.Handles, v component.Value) (witgo.Result[struct{}, struct{}], error) {
 	var out witgo.Result[struct{}, struct{}]
 	r, err := witgo.ResultValue(v, "result")
 	if err != nil {
@@ -411,14 +411,14 @@ func liftT8(v component.Value) (witgo.Result[struct{}, struct{}], error) {
 	return out, err
 }
 
-func lowerT8(x witgo.Result[struct{}, struct{}]) component.Value {
+func lowerT8(h *witgo.Handles, x witgo.Result[struct{}, struct{}]) component.Value {
 	if x.IsErr {
 		return component.ResultValue{IsErr: true, Payload: nil}
 	}
 	return component.ResultValue{Payload: nil}
 }
 
-func liftT9(v component.Value) (witgo.Result[struct{}, Level], error) {
+func liftT9(h *witgo.Handles, v component.Value) (witgo.Result[struct{}, Level], error) {
 	var out witgo.Result[struct{}, Level]
 	r, err := witgo.ResultValue(v, "result")
 	if err != nil {
@@ -426,19 +426,19 @@ func liftT9(v component.Value) (witgo.Result[struct{}, Level], error) {
 	}
 	out.IsErr = r.IsErr
 	if r.IsErr {
-		out.Err, err = liftLevel(r.Payload)
+		out.Err, err = liftLevel(h, r.Payload)
 	}
 	return out, err
 }
 
-func lowerT9(x witgo.Result[struct{}, Level]) component.Value {
+func lowerT9(h *witgo.Handles, x witgo.Result[struct{}, Level]) component.Value {
 	if x.IsErr {
 		return component.ResultValue{IsErr: true, Payload: uint32(x.Err)}
 	}
 	return component.ResultValue{Payload: nil}
 }
 
-func liftT10(v component.Value) (witgo.Tuple3[bool, rune, float32], error) {
+func liftT10(h *witgo.Handles, v component.Value) (witgo.Tuple3[bool, rune, float32], error) {
 	var out witgo.Tuple3[bool, rune, float32]
 	vs, err := witgo.Values(v, 3, "tuple")
 	if err != nil {
@@ -456,11 +456,11 @@ func liftT10(v component.Value) (witgo.Tuple3[bool, rune, float32], error) {
 	return out, nil
 }
 
-func lowerT10(x witgo.Tuple3[bool, rune, float32]) component.Value {
+func lowerT10(h *witgo.Handles, x witgo.Tuple3[bool, rune, float32]) component.Value {
 	return []component.Value{x.F0, x.F1, x.F2}
 }
 
-func liftT11(v component.Value) ([][]uint16, error) {
+func liftT11(h *witgo.Handles, v component.Value) ([][]uint16, error) {
 	vs, err := witgo.Values(v, -1, "list<list<u16>>")
 	if err != nil {
 		return nil, err
@@ -474,7 +474,7 @@ func liftT11(v component.Value) ([][]uint16, error) {
 	return out, nil
 }
 
-func lowerT11(x [][]uint16) component.Value {
+func lowerT11(h *witgo.Handles, x [][]uint16) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
 		out[i] = e
@@ -482,7 +482,7 @@ func lowerT11(x [][]uint16) component.Value {
 	return out
 }
 
-func liftT12(v component.Value) ([2]int8, error) {
+func liftT12(h *witgo.Handles, v component.Value) ([2]int8, error) {
 	var out [2]int8
 	s, err := component.ListOf[int8](v)
 	if err != nil {
@@ -495,7 +495,7 @@ func liftT12(v component.Value) ([2]int8, error) {
 	return out, nil
 }
 
-func lowerT12(x [2]int8) component.Value {
+func lowerT12(h *witgo.Handles, x [2]int8) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
 		out[i] = int32(e)
@@ -503,7 +503,7 @@ func lowerT12(x [2]int8) component.Value {
 	return out
 }
 
-func liftT13(v component.Value) (witgo.Tuple3[uint8, int16, uint16], error) {
+func liftT13(h *witgo.Handles, v component.Value) (witgo.Tuple3[uint8, int16, uint16], error) {
 	var out witgo.Tuple3[uint8, int16, uint16]
 	vs, err := witgo.Values(v, 3, "tuple")
 	if err != nil {
@@ -521,11 +521,11 @@ func liftT13(v component.Value) (witgo.Tuple3[uint8, int16, uint16], error) {
 	return out, nil
 }
 
-func lowerT13(x witgo.Tuple3[uint8, int16, uint16]) component.Value {
+func lowerT13(h *witgo.Handles, x witgo.Tuple3[uint8, int16, uint16]) component.Value {
 	return []component.Value{uint32(x.F0), int32(x.F1), uint32(x.F2)}
 }
 
-func liftT14(v component.Value) (map[uint32][]byte, error) {
+func liftT14(h *witgo.Handles, v component.Value) (map[uint32][]byte, error) {
 	vs, err := witgo.Values(v, -1, "map")
 	if err != nil {
 		return nil, err
@@ -547,7 +547,7 @@ func liftT14(v component.Value) (map[uint32][]byte, error) {
 	return out, nil
 }
 
-func lowerT14(x map[uint32][]byte) component.Value {
+func lowerT14(h *witgo.Handles, x map[uint32][]byte) component.Value {
 	out := make([]component.Value, 0, len(x))
 	for k, e := range x {
 		out = append(out, []component.Value{k, e})
@@ -582,7 +582,7 @@ func optionsHost(impl Host) []component.Option {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("%s: %d args", "take", len(args))
 			}
-			h, err := liftHolder(args[0])
+			h, err := liftHolder(nil, args[0])
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: %w", "take", "h", err)
 			}
@@ -590,7 +590,7 @@ func optionsHost(impl Host) []component.Option {
 			if err != nil {
 				return nil, err
 			}
-			return []component.Value{lowerHolder(r)}, nil
+			return []component.Value{lowerHolder(nil, r)}, nil
 		}, tbl.Func([]component.TypeRef{t5}, t5), resolve),
 		component.WithImportCustom("wazy:conv/host@0.1.0", "keywords", func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 			if len(args) != 6 {
@@ -630,7 +630,7 @@ func optionsHost(impl Host) []component.Option {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("%s: %d args", "shuffle", len(args))
 			}
-			t, err := liftT13(args[0])
+			t, err := liftT13(nil, args[0])
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: %w", "shuffle", "t", err)
 			}
@@ -638,7 +638,7 @@ func optionsHost(impl Host) []component.Option {
 			if err != nil {
 				return nil, err
 			}
-			return []component.Value{lowerT14(r)}, nil
+			return []component.Value{lowerT14(nil, r)}, nil
 		}, tbl.Func([]component.TypeRef{tbl.Tuple(component.Prim("u8"), component.Prim("s16"), component.Prim("u16"))}, tbl.Map(component.Prim("u32"), tbl.List(component.Prim("u8")))), resolve),
 	}
 }
@@ -657,7 +657,7 @@ func optionsOther(impl Other) []component.Option {
 			if len(args) != 1 {
 				return nil, fmt.Errorf("%s: %d args", "use-item", len(args))
 			}
-			i, err := liftOtherItem(args[0])
+			i, err := liftOtherItem(nil, args[0])
 			if err != nil {
 				return nil, fmt.Errorf("%s: %s: %w", "use-item", "i", err)
 			}
@@ -665,7 +665,7 @@ func optionsOther(impl Other) []component.Option {
 			if err != nil {
 				return nil, err
 			}
-			return []component.Value{lowerOtherItem(r)}, nil
+			return []component.Value{lowerOtherItem(nil, r)}, nil
 		}, tbl.Func([]component.TypeRef{t1}, t1), resolve),
 	}
 }
@@ -731,7 +731,7 @@ func (x *Conv) Close(ctx context.Context) error { return x.inst.Close(ctx) }
 
 // Echo calls the export echo.
 func (x *Conv) Echo(ctx context.Context, h Holder) (uint32, error) {
-	res, err := x.inst.Call(ctx, "echo", lowerHolder(h))
+	res, err := x.inst.Call(ctx, "echo", lowerHolder(nil, h))
 	if err != nil {
 		var zero uint32
 		return zero, err

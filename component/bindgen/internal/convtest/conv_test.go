@@ -32,7 +32,7 @@ func holder() Holder {
 }
 
 func TestLowerShape(t *testing.T) {
-	got := lowerHolder(holder())
+	got := lowerHolder(nil, holder())
 	want := []component.Value{
 		[]component.Value{[]component.Value{"k", []component.Value{uint32(1), []component.Value{"a"}}}},
 		[]component.Value{
@@ -66,15 +66,15 @@ func TestRoundtrip(t *testing.T) {
 		Nested: [][]uint16{}, Ints: []int32{}, Chars: []rune{}, Bools: []bool{},
 	}
 	for _, h := range []Holder{holder(), empty} {
-		got, err := liftHolder(lowerHolder(h))
+		got, err := liftHolder(nil, lowerHolder(nil, h))
 		require.NoError(t, err)
 		require.Equal(t, h, got)
 	}
 	m := map[uint32][]byte{4: {1}, 5: {}}
-	got, err := liftT14(lowerT14(m))
+	got, err := liftT14(nil, lowerT14(nil, m))
 	require.NoError(t, err)
 	require.Equal(t, m, got)
-	o, err := liftOtherItem(lowerOtherItem(OtherItem{X: 255}))
+	o, err := liftOtherItem(nil, lowerOtherItem(nil, OtherItem{X: 255}))
 	require.NoError(t, err)
 	require.Equal(t, OtherItem{X: 255}, o)
 }
@@ -83,18 +83,18 @@ func TestRoundtrip(t *testing.T) {
 // than panicking or reading garbage.
 func TestLiftRejects(t *testing.T) {
 	for name, f := range map[string]func() error{
-		"record arity": func() error { _, err := liftItem([]component.Value{uint32(1)}); return err },
-		"record field": func() error { _, err := liftItem([]component.Value{"x", []component.Value{}}); return err },
-		"variant case": func() error { _, err := liftNode(component.VariantValue{Disc: 3}); return err },
-		"variant type": func() error { _, err := liftNode(uint32(0)); return err },
-		"enum range":   func() error { _, err := liftLevel(uint32(2)); return err },
-		"fixed length": func() error { _, err := liftT12([]int8{1}); return err },
-		"fixed items":  func() error { _, err := liftT3([]component.Value{}); return err },
-		"map entry":    func() error { _, err := liftT2([]component.Value{[]component.Value{"k"}}); return err },
-		"result":       func() error { _, err := liftT7(uint64(1)); return err },
-		"option":       func() error { _, err := liftT6("x"); return err },
-		"tuple":        func() error { _, err := liftT10([]component.Value{true, 'a'}); return err },
-		"list item":    func() error { _, err := liftT5([]component.Value{uint32(1)}); return err },
+		"record arity": func() error { _, err := liftItem(nil, []component.Value{uint32(1)}); return err },
+		"record field": func() error { _, err := liftItem(nil, []component.Value{"x", []component.Value{}}); return err },
+		"variant case": func() error { _, err := liftNode(nil, component.VariantValue{Disc: 3}); return err },
+		"variant type": func() error { _, err := liftNode(nil, uint32(0)); return err },
+		"enum range":   func() error { _, err := liftLevel(nil, uint32(2)); return err },
+		"fixed length": func() error { _, err := liftT12(nil, []int8{1}); return err },
+		"fixed items":  func() error { _, err := liftT3(nil, []component.Value{}); return err },
+		"map entry":    func() error { _, err := liftT2(nil, []component.Value{[]component.Value{"k"}}); return err },
+		"result":       func() error { _, err := liftT7(nil, uint64(1)); return err },
+		"option":       func() error { _, err := liftT6(nil, "x"); return err },
+		"tuple":        func() error { _, err := liftT10(nil, []component.Value{true, 'a'}); return err },
+		"list item":    func() error { _, err := liftT5(nil, []component.Value{uint32(1)}); return err },
 	} {
 		require.Error(t, f(), name)
 	}

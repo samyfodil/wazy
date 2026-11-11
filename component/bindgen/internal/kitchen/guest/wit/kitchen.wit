@@ -49,10 +49,29 @@ interface host {
   pick: func(c: color, p: perms) -> option<string>;
   mint: func(v: u32) -> token;
   peek: func(t: borrow<token>) -> u32;
+  mint-pair: func(a: u32, b: u32) -> tuple<token, token>;
+  peek-all: func(ts: list<borrow<token>>) -> u32;
+  try-mint: func(v: u32) -> result<token, string>;
 }
 
 interface api {
-  use types.{point, color, perms, shape, everything};
+  use types.{point, color, perms, shape, everything, token};
+
+  /// A resource the guest implements: a growable string.
+  resource blob {
+    constructor(init: string);
+    append: func(s: string);
+    read: func() -> string;
+    join: static func(a: borrow<blob>, b: borrow<blob>) -> blob;
+  }
+
+  make-blobs: func(n: u32) -> list<blob>;
+  blob-size: func(b: borrow<blob>) -> u32;
+  tally: func(ts: list<token>) -> u32;
+  take-token: func(t: token) -> u32;
+  give-token: func(v: u32) -> token;
+  peek-token: func(t: borrow<token>) -> u32;
+  pair-tokens: func(a: u32, b: u32) -> u32;
 
   roundtrip: func(e: everything) -> everything;
   area: func(s: shape) -> f64;

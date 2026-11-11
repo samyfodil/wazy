@@ -129,6 +129,9 @@ type resource struct {
 	tag    uint32
 	goName string
 	tagGo  string
+	// guest is set for a resource of an exported interface: the component
+	// implements it, and the host holds handles to it.
+	guest bool
 }
 
 // fn is one function the bindings call or implement.
@@ -140,6 +143,9 @@ type fn struct {
 	result  *typ
 	sig     *wit.Signature
 	dropFor *resource // a destructor rather than a WIT func
+	// onResource is set for a guest resource's method, which the bindings
+	// make a method of the resource's Go type.
+	onResource bool
 }
 
 // iface is one bound interface, or the world's own functions.
@@ -187,7 +193,7 @@ func (g *gen) skipped(name string) bool {
 func (g *gen) collect() error {
 	tags := wit.Tags{}
 	next := g.opts.TagBase
-	for _, items := range [][]wit.WorldItem{g.world.Imports, g.world.Exports} {
+	for i, items := range [][]wit.WorldItem{g.world.Imports, g.world.Exports} {
 		for _, it := range items {
 			if it.Interface == nil {
 				continue
@@ -198,7 +204,7 @@ func (g *gen) collect() error {
 					continue
 				}
 				tags[k] = next
-				g.res[k] = &resource{key: k, tag: next}
+				g.res[k] = &resource{key: k, tag: next, guest: i == 1}
 				next++
 			}
 		}
@@ -282,10 +288,10 @@ func (g *gen) bind(it wit.WorldItem, tags wit.Tags, imported bool) (*iface, erro
 		in.name = it.Name
 		funcs = it.Interface.Funcs
 		for _, r := range it.Interface.Resources {
-			if !imported {
-				return nil, fmt.Errorf("bindgen: export %s: exported resource %s is not supported yet", it.Name, r.Name)
-			}
 			res := g.res[wit.ResourceKey{Interface: r.Interface, Name: r.Name}]
+			if res.guest {
+				g.nameResource(res)
+			}
 			in.res = append(in.res, res)
 		}
 	}
@@ -317,17 +323,11 @@ func (g *gen) bindFunc(f *wit.Func, ifaceName string, tags wit.Tags, imported bo
 		if err != nil {
 			return nil, fmt.Errorf("param %s: %w", p.Name, err)
 		}
-		if !imported && t.hasHandle() {
-			return nil, fmt.Errorf("param %s: a resource handle in an export is not supported yet", p.Name)
-		}
 		b.params = append(b.params, member{wit: p.Name, t: t})
 	}
 	if r := sig.Desc.Results.Unnamed; r != nil {
 		if b.result, err = g.typeOf(*r, sig, ifaceName); err != nil {
 			return nil, fmt.Errorf("result: %w", err)
-		}
-		if !imported && b.result.hasHandle() {
-			return nil, fmt.Errorf("result: a resource handle in an export is not supported yet")
 		}
 	}
 	return b, nil
@@ -502,10 +502,7 @@ func (g *gen) intern(t *typ, ifaceName string) *typ {
 	g.byKey[t.id] = t
 	switch {
 	case t.kind == kHandle:
-		if t.res.goName == "" {
-			t.res.goName = g.claim(pascal(t.res.key.Name))
-			t.res.tagGo = g.claim("tag" + t.res.goName)
-		}
+		g.nameResource(t.res)
 	case t.witName != "":
 		name := pascal(t.witName)
 		if g.used[name] && ifaceName != "" {
@@ -518,6 +515,14 @@ func (g *gen) intern(t *typ, ifaceName string) *typ {
 		g.anon = append(g.anon, t)
 	}
 	return t
+}
+
+// nameResource gives r its Go names, the first time it is used.
+func (g *gen) nameResource(r *resource) {
+	if r.goName == "" {
+		r.goName = g.claim(pascal(r.key.Name))
+		r.tagGo = g.claim("tag" + r.goName)
+	}
 }
 
 // needsConv reports whether lifting or lowering t takes a function of its own.
@@ -579,23 +584,26 @@ func (t *typ) convName() string {
 }
 
 // lift is an expression of type (t's Go type, error) reading the
-// component.Value v.
-func (t *typ) lift(v string) string {
+// component.Value v, with the *witgo.Handles h for the handles in it. A nil h
+// takes a handle as the rep the engine translated it to: it is one at the top
+// level of an import's arguments.
+func (t *typ) lift(h, v string) string {
 	switch t.kind {
 	case kPrim:
 		return "witgo." + pascal(t.prim) + "(" + v + ")"
 	case kHandle:
-		return "lift" + t.res.goName + "(" + v + ")"
+		return fmt.Sprintf("lift%s(%s, %s, %v)", t.res.goName, h, v, t.own)
 	case kList:
 		if t.elem.fixedWidth() {
 			return "component.ListOf[" + t.elem.goType() + "](" + v + ")"
 		}
 	}
-	return "lift" + t.convName() + "(" + v + ")"
+	return "lift" + t.convName() + "(" + h + ", " + v + ")"
 }
 
-// lower is an expression of type component.Value holding the Go value x.
-func (t *typ) lower(x string) string {
+// lower is an expression of type component.Value holding the Go value x; see
+// lift for h.
+func (t *typ) lower(h, x string) string {
 	switch t.kind {
 	case kPrim:
 		switch t.prim {
@@ -605,7 +613,9 @@ func (t *typ) lower(x string) string {
 			return "int32(" + x + ")"
 		}
 		return x
-	case kHandle, kEnum, kFlags:
+	case kHandle:
+		return fmt.Sprintf("lower%s(%s, %s, %v)", t.res.goName, h, x, !t.own)
+	case kEnum, kFlags:
 		return "uint32(" + x + ")"
 	case kList:
 		if t.elem.fixedWidth() {
@@ -616,7 +626,7 @@ func (t *typ) lower(x string) string {
 			return "append([]" + t.elem.goType() + "(nil), " + x + "[:]...)"
 		}
 	}
-	return "lower" + t.convName() + "(" + x + ")"
+	return "lower" + t.convName() + "(" + h + ", " + x + ")"
 }
 
 func (t *typ) witString() string {
@@ -699,7 +709,7 @@ func (g *gen) emitResources(w *writer) {
 	if len(rs) == 0 {
 		return
 	}
-	w.p("// The tags the bindings mint host resource handles under.")
+	w.p("// The tags the bindings mint resource handles under.")
 	w.p("const (")
 	for _, r := range rs {
 		w.p("%s uint32 = %#x", r.tagGo, r.tag)
@@ -707,15 +717,52 @@ func (g *gen) emitResources(w *writer) {
 	w.p(")")
 	for _, r := range rs {
 		w.p("")
+		if r.guest {
+			g.emitGuestResource(w, r)
+			continue
+		}
 		w.p("// %s is the host's representation of the WIT resource %s.%s: the", r.goName, r.key.Interface, r.key.Name)
 		w.p("// value the host returns from its constructor, and receives back as self.")
 		w.p("type %s uint32", r.goName)
 		w.p("")
-		w.p("func lift%s(v component.Value) (%s, error) {", r.goName, r.goName)
+		w.p("func lift%s(h *witgo.Handles, v component.Value, own bool) (%s, error) {", r.goName, r.goName)
+		w.p("if h == nil {")
 		w.p("x, err := witgo.U32(v)")
 		w.p("return %s(x), err", r.goName)
 		w.p("}")
+		w.p("x, err := h.Rep(%s, own, v)", r.tagGo)
+		w.p("return %s(x), err", r.goName)
+		w.p("}")
+		w.p("")
+		w.p("func lower%s(h *witgo.Handles, x %s, borrow bool) component.Value {", r.goName, r.goName)
+		w.p("if h == nil { return uint32(x) }")
+		w.p("return h.Mint(%s, uint32(x), borrow)", r.tagGo)
+		w.p("}")
 	}
+}
+
+func (g *gen) emitGuestResource(w *writer, r *resource) {
+	w.p("// %s is a handle to the WIT resource %s.%s, which the component", r.goName, r.key.Interface, r.key.Name)
+	w.p("// implements. Drop it when done with it.")
+	w.p("type %s struct {", r.goName)
+	w.p("inst   *component.Instance")
+	w.p("handle uint32")
+	w.p("}")
+	w.p("")
+	w.p("// Handle is the handle's index in the instance's table.")
+	w.p("func (x %s) Handle() uint32 { return x.handle }", r.goName)
+	w.p("")
+	w.p("// Drop drops the handle, running the component's destructor for it.")
+	w.p("func (x %s) Drop(ctx context.Context) error {", r.goName)
+	w.p("return x.inst.DropResource(ctx, %q, %q, x.handle)", r.key.Interface, r.key.Name)
+	w.p("}")
+	w.p("")
+	w.p("func lift%s(h *witgo.Handles, v component.Value, _ bool) (%s, error) {", r.goName, r.goName)
+	w.p("x, err := witgo.U32(v)")
+	w.p("return %s{inst: h.Inst, handle: x}, err", r.goName)
+	w.p("}")
+	w.p("")
+	w.p("func lower%s(_ *witgo.Handles, x %s, _ bool) component.Value { return x.handle }", r.goName, r.goName)
 }
 
 func (g *gen) emitType(w *writer, t *typ) {
@@ -783,14 +830,14 @@ func (g *gen) emitConv(w *writer, t *typ) {
 	gt, n := t.goType(), t.convName()
 	ws := t.witString()
 	w.p("")
-	w.p("func lift%s(v component.Value) (%s, error) {", n, gt)
+	w.p("func lift%s(h *witgo.Handles, v component.Value) (%s, error) {", n, gt)
 	switch t.kind {
 	case kList:
 		w.p("vs, err := witgo.Values(v, -1, %q)", ws)
 		w.p("if err != nil { return nil, err }")
 		w.p("out := make(%s, len(vs))", gt)
 		w.p("for i, e := range vs {")
-		w.p("if out[i], err = %s; err != nil { return nil, err }", t.elem.lift("e"))
+		w.p("if out[i], err = %s; err != nil { return nil, err }", t.elem.lift("h", "e"))
 		w.p("}")
 		w.p("return out, nil")
 	case kFixed:
@@ -807,13 +854,13 @@ func (g *gen) emitConv(w *writer, t *typ) {
 			w.p("copy(out[:], s)")
 		} else {
 			w.p("for i, e := range s {")
-			w.p("if out[i], err = %s; err != nil { return out, err }", t.elem.lift("e"))
+			w.p("if out[i], err = %s; err != nil { return out, err }", t.elem.lift("h", "e"))
 			w.p("}")
 		}
 		w.p("return out, nil")
 	case kOption:
 		w.p("if v == nil { return nil, nil }")
-		w.p("x, err := %s", t.elem.lift("v"))
+		w.p("x, err := %s", t.elem.lift("h", "v"))
 		w.p("if err != nil { return nil, err }")
 		w.p("return &x, nil")
 	case kResult:
@@ -822,10 +869,10 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("if err != nil { return out, err }")
 		w.p("out.IsErr = r.IsErr")
 		if t.ok != nil {
-			w.p("if !r.IsErr { out.Ok, err = %s }", t.ok.lift("r.Payload"))
+			w.p("if !r.IsErr { out.Ok, err = %s }", t.ok.lift("h", "r.Payload"))
 		}
 		if t.err != nil {
-			w.p("if r.IsErr { out.Err, err = %s }", t.err.lift("r.Payload"))
+			w.p("if r.IsErr { out.Err, err = %s }", t.err.lift("h", "r.Payload"))
 		}
 		w.p("return out, err")
 	case kTuple, kRecord:
@@ -840,7 +887,7 @@ func (g *gen) emitConv(w *writer, t *typ) {
 			} else {
 				field, et = t.members[i].goName, t.members[i].t
 			}
-			w.p("if out.%s, err = %s; err != nil { return out, err }", field, et.lift(fmt.Sprintf("vs[%d]", i)))
+			w.p("if out.%s, err = %s; err != nil { return out, err }", field, et.lift("h", fmt.Sprintf("vs[%d]", i)))
 		}
 		w.p("return out, nil")
 	case kVariant:
@@ -855,7 +902,7 @@ func (g *gen) emitConv(w *writer, t *typ) {
 				continue
 			}
 			w.p("case %d:", i)
-			w.p("p, err := %s", m.t.lift("vv.Payload"))
+			w.p("p, err := %s", m.t.lift("h", "vv.Payload"))
 			w.p("if err != nil { return out, err }")
 			w.p("out.payload = p")
 		}
@@ -874,40 +921,40 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("for _, e := range vs {")
 		w.p("kv, err := witgo.Values(e, 2, %q)", ws)
 		w.p("if err != nil { return nil, err }")
-		w.p("k, err := %s", t.key.lift("kv[0]"))
+		w.p("k, err := %s", t.key.lift("h", "kv[0]"))
 		w.p("if err != nil { return nil, err }")
-		w.p("if out[k], err = %s; err != nil { return nil, err }", t.elem.lift("kv[1]"))
+		w.p("if out[k], err = %s; err != nil { return nil, err }", t.elem.lift("h", "kv[1]"))
 		w.p("}")
 		w.p("return out, nil")
 	}
 	w.p("}")
 	w.p("")
-	w.p("func lower%s(x %s) component.Value {", n, gt)
+	w.p("func lower%s(h *witgo.Handles, x %s) component.Value {", n, gt)
 	switch t.kind {
 	case kList, kFixed:
 		w.p("out := make([]component.Value, len(x))")
-		w.p("for i, e := range x { out[i] = %s }", t.elem.lower("e"))
+		w.p("for i, e := range x { out[i] = %s }", t.elem.lower("h", "e"))
 		w.p("return out")
 	case kOption:
 		w.p("if x == nil { return nil }")
-		w.p("return %s", t.elem.lower("*x"))
+		w.p("return %s", t.elem.lower("h", "*x"))
 	case kResult:
 		okv, errv := "nil", "nil"
 		if t.ok != nil {
-			okv = t.ok.lower("x.Ok")
+			okv = t.ok.lower("h", "x.Ok")
 		}
 		if t.err != nil {
-			errv = t.err.lower("x.Err")
+			errv = t.err.lower("h", "x.Err")
 		}
 		w.p("if x.IsErr { return component.ResultValue{IsErr: true, Payload: %s} }", errv)
 		w.p("return component.ResultValue{Payload: %s}", okv)
 	case kTuple, kRecord:
 		var parts []string
 		for i, e := range t.elems {
-			parts = append(parts, e.lower(fmt.Sprintf("x.F%d", i)))
+			parts = append(parts, e.lower("h", fmt.Sprintf("x.F%d", i)))
 		}
 		for _, m := range t.members {
-			parts = append(parts, m.t.lower("x."+m.goName))
+			parts = append(parts, m.t.lower("h", "x."+m.goName))
 		}
 		w.p("return []component.Value{%s}", strings.Join(parts, ", "))
 	case kVariant:
@@ -918,7 +965,7 @@ func (g *gen) emitConv(w *writer, t *typ) {
 			}
 			w.p("case %d:", i)
 			w.p("p, _ := x.payload.(%s)", m.t.goType())
-			w.p("return component.VariantValue{Disc: %d, Payload: %s}", i, m.t.lower("p"))
+			w.p("return component.VariantValue{Disc: %d, Payload: %s}", i, m.t.lower("h", "p"))
 		}
 		w.p("}")
 		w.p("return component.VariantValue{Disc: uint32(x.Case)}")
@@ -926,7 +973,7 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("return uint32(x)")
 	case kMap:
 		w.p("out := make([]component.Value, 0, len(x))")
-		w.p("for k, e := range x { out = append(out, []component.Value{%s, %s}) }", t.key.lower("k"), t.elem.lower("e"))
+		w.p("for k, e := range x { out = append(out, []component.Value{%s, %s}) }", t.key.lower("h", "k"), t.elem.lower("h", "e"))
 		w.p("return out")
 	}
 	w.p("}")
@@ -1014,16 +1061,20 @@ func (b *fn) methodName() string {
 		return "New" + pascal(b.f.Resource)
 	case wit.Method, wit.Static:
 		_, m, _ := strings.Cut(name[strings.Index(name, "]")+1:], ".")
+		if b.onResource {
+			return acc + pascal(m)
+		}
 		return pascal(b.f.Resource) + acc + pascal(m)
 	}
 	return acc + pascal(name)
 }
 
-// goParams is the method's parameter list after ctx, and the names used.
-func (b *fn) goParams() (string, []string) {
+// goParams is the method's parameter list after ctx, from its skip'th WIT
+// parameter on, and the names used.
+func (b *fn) goParams(skip int) (string, []string) {
 	var parts, names []string
 	seen := map[string]bool{"ctx": true}
-	for _, p := range b.params {
+	for _, p := range b.params[skip:] {
 		n := camel(p.wit)
 		if reservedNames[n] || seen[n] {
 			n += "_"
@@ -1033,6 +1084,41 @@ func (b *fn) goParams() (string, []string) {
 		parts = append(parts, n+" "+p.t.goType())
 	}
 	return strings.Join(parts, ", "), names
+}
+
+// nestedHandles reports whether the function, as an import, passes a handle
+// below the top level of an argument or result, which the host translates.
+func (b *fn) nestedHandles() bool {
+	if b.dropFor != nil {
+		return false
+	}
+	for _, p := range b.params {
+		if importHandles(p.t) != "nil" {
+			return true
+		}
+	}
+	return b.result != nil && importHandles(b.result) != "nil"
+}
+
+// handles reports whether any argument or result of the function holds a
+// handle at all.
+func (b *fn) handles() bool {
+	for _, p := range b.params {
+		if p.t.hasHandle() {
+			return true
+		}
+	}
+	return b.result.hasHandle()
+}
+
+// importHandles is the *witgo.Handles an import adapter converts t with: nil
+// for a handle at the top level, which the engine has already translated to
+// or from its rep, and for a type with none in it.
+func importHandles(t *typ) string {
+	if t.kind == kHandle || !t.hasHandle() {
+		return "nil"
+	}
+	return "h"
 }
 
 func (b *fn) goResults() string {
@@ -1078,7 +1164,7 @@ func (g *gen) emitImport(w *writer, in *iface) {
 			w.p("%s(ctx context.Context, self %s) error", b.goName, b.dropFor.goName)
 			continue
 		}
-		params, _ := b.goParams()
+		params, _ := b.goParams(0)
 		if params != "" {
 			params = ", " + params
 		}
@@ -1125,8 +1211,16 @@ func (g *gen) emitImport(w *writer, in *iface) {
 	if calls {
 		w.p("resolve := tbl.Resolver()")
 	}
+	nested := slices.ContainsFunc(in.funcs, (*fn).nestedHandles)
+	if nested {
+		w.p("// The table the handles nested in arguments and results live in.")
+		w.p("var table *component.HandleTable")
+	}
 	ifaceName := in.name
 	w.p("return []component.Option{")
+	if nested {
+		w.p("component.WithResourcesHook(func(t *component.HandleTable) { table = t }),")
+	}
 	for _, b := range in.funcs {
 		if b.dropFor != nil {
 			r := b.dropFor
@@ -1144,9 +1238,12 @@ func (g *gen) emitImport(w *writer, in *iface) {
 		}
 		w.p("component.WithImportCustom(%q, %q, func(ctx context.Context, args []component.Value) ([]component.Value, error) {", ifaceName, b.f.Name)
 		w.p("if len(args) != %d { return nil, fmt.Errorf(\"%%s: %%d args\", %q, len(args)) }", len(b.params), b.f.Name)
-		_, pn := b.goParams()
+		if b.nestedHandles() {
+			w.p("h := &witgo.Handles{Table: table}")
+		}
+		_, pn := b.goParams(0)
 		for i, p := range b.params {
-			w.p("%s, err := %s", pn[i], p.t.lift(fmt.Sprintf("args[%d]", i)))
+			w.p("%s, err := %s", pn[i], p.t.lift(importHandles(p.t), fmt.Sprintf("args[%d]", i)))
 			w.p("if err != nil { return nil, fmt.Errorf(\"%%s: %%s: %%w\", %q, %q, err) }", b.f.Name, p.wit)
 		}
 		call := "impl." + b.goName + "(" + strings.Join(append([]string{"ctx"}, pn...), ", ") + ")"
@@ -1155,7 +1252,7 @@ func (g *gen) emitImport(w *writer, in *iface) {
 		} else {
 			w.p("r, err := %s", call)
 			w.p("if err != nil { return nil, err }")
-			w.p("return []component.Value{%s}, nil", b.result.lower("r"))
+			w.p("return []component.Value{%s}, nil", b.result.lower(importHandles(b.result), "r"))
 		}
 		w.p("}, tbl.Func([]component.TypeRef{%s}, %s), resolve),", strings.Join(refs, ", "), res)
 	}
@@ -1196,6 +1293,7 @@ func (g *gen) emitExports(w *writer) {
 	taken := map[string]bool{"Instance": true, "Close": true}
 	for _, in := range g.exports {
 		recv := "x *" + wg
+		names := taken
 		if in.name != "" {
 			acc := in.field
 			for taken[acc] {
@@ -1209,48 +1307,80 @@ func (g *gen) emitExports(w *writer) {
 			w.p("// %s is the instance's export %s.", acc, in.name)
 			w.p("func (x *%s) %s() %s { return %s{x.inst} }", wg, acc, in.goName, in.goName)
 			recv = "x " + in.goName
+			names = map[string]bool{}
 		}
-		names := map[string]bool{}
-		if in.name == "" {
-			names = taken
-		}
+		onRes := map[string]map[string]bool{}
 		for _, b := range in.funcs {
-			b.goName = b.methodName()
-			for n := b.goName; names[b.goName]; {
-				b.goName = n + "_"
+			if b.f.Kind == wit.Method {
+				b.onResource = true
+				res := g.res[wit.ResourceKey{Interface: b.f.Interface, Name: b.f.Resource}]
+				if onRes[res.goName] == nil {
+					onRes[res.goName] = map[string]bool{"Handle": true, "Drop": true}
+				}
+				g.emitExportFunc(w, "x "+res.goName, in.name, b, onRes[res.goName], 1)
+				continue
 			}
-			names[b.goName] = true
-			params, pn := b.goParams()
-			if params != "" {
-				params = ", " + params
-			}
-			var args []string
-			for i, p := range b.params {
-				args = append(args, p.t.lower(pn[i]))
-			}
-			call := fmt.Sprintf("x.inst.Call(ctx, %q", b.f.Name)
-			if in.name != "" {
-				call = fmt.Sprintf("x.inst.CallExport(ctx, %q, %q", in.name, b.f.Name)
-			}
-			if len(args) > 0 {
-				call += ", " + strings.Join(args, ", ")
-			}
-			call += ")"
-			w.p("")
-			w.p("// %s calls the export %s.", b.goName, b.f.Name)
-			w.p("func (%s) %s(ctx context.Context%s) %s {", recv, b.goName, params, b.goResults())
-			if b.result == nil {
-				w.p("_, err := %s", call)
-				w.p("return err")
-			} else {
-				w.p("res, err := %s", call)
-				w.p("if err != nil { var zero %s; return zero, err }", b.result.goType())
-				w.p("if len(res) != 1 { var zero %s; return zero, fmt.Errorf(\"%%s: %%d results\", %q, len(res)) }", b.result.goType(), b.f.Name)
-				w.p("return %s", b.result.lift("res[0]"))
-			}
-			w.p("}")
+			g.emitExportFunc(w, recv, in.name, b, names, 0)
 		}
 	}
+}
+
+// emitExportFunc writes the method calling the export b on recv: from its
+// skip'th parameter on, the first being a resource method's self, which the
+// receiver is.
+func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map[string]bool, skip int) {
+	b.goName = b.methodName()
+	for n := b.goName; names[b.goName]; {
+		b.goName = n + "_"
+	}
+	names[b.goName] = true
+	params, pn := b.goParams(skip)
+	if params != "" {
+		params = ", " + params
+	}
+	h := "nil"
+	if b.handles() {
+		h = "h"
+	}
+	var args []string
+	if skip == 1 {
+		args = append(args, "x.handle")
+	}
+	for i, p := range b.params[skip:] {
+		args = append(args, p.t.lower(h, pn[i]))
+	}
+	call := fmt.Sprintf("x.inst.Call(ctx, %q", b.f.Name)
+	table := "x.inst.Resources()"
+	if ifaceName != "" {
+		call = fmt.Sprintf("x.inst.CallExport(ctx, %q, %q", ifaceName, b.f.Name)
+		table = fmt.Sprintf("x.inst.ResourcesFor(%q)", ifaceName)
+	}
+	if len(args) > 0 {
+		call += ", " + strings.Join(args, ", ")
+	}
+	call += ")"
+	w.p("")
+	w.p("// %s calls the export %s.", b.goName, b.f.Name)
+	w.p("func (%s) %s(ctx context.Context%s) %s {", recv, b.goName, params, b.goResults())
+	if h == "h" {
+		w.p("h := &witgo.Handles{Table: %s, Inst: x.inst}", table)
+	}
+	res := "res"
+	if b.result == nil {
+		res = "_"
+	}
+	w.p("%s, err := %s", res, call)
+	if h == "h" {
+		w.p("if rerr := h.Release(); err == nil { err = rerr }")
+	}
+	if b.result == nil {
+		w.p("return err")
+	} else {
+		w.p("if err != nil { var zero %s; return zero, err }", b.result.goType())
+		w.p("if len(res) != 1 { var zero %s; return zero, fmt.Errorf(\"%%s: %%d results\", %q, len(res)) }", b.result.goType(), b.f.Name)
+		w.p("return %s", b.result.lift(h, "res[0]"))
+	}
+	w.p("}")
 }
 
 // shortName is an interface's name without namespace, package or version:

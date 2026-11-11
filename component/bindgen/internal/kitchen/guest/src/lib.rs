@@ -4,9 +4,11 @@
 
 wit_bindgen::generate!({ path: "wit", world: "kitchen" });
 
-use exports::wazy::bindgen_test::api::Guest as Api;
+use std::cell::RefCell;
+
+use exports::wazy::bindgen_test::api::{Blob, BlobBorrow, Guest as Api, GuestBlob};
 use wazy::bindgen_test::host;
-use wazy::bindgen_test::types::{Color, Everything, Perms, Point, Shape};
+use wazy::bindgen_test::types::{Color, Everything, Perms, Point, Shape, Token};
 
 struct Component;
 
@@ -16,7 +18,66 @@ impl Guest for Component {
     }
 }
 
+struct MyBlob(RefCell<String>);
+
+impl GuestBlob for MyBlob {
+    fn new(init: String) -> Self {
+        MyBlob(RefCell::new(init))
+    }
+
+    fn append(&self, s: String) {
+        self.0.borrow_mut().push_str(&s);
+    }
+
+    fn read(&self) -> String {
+        self.0.borrow().clone()
+    }
+
+    fn join(a: BlobBorrow<'_>, b: BlobBorrow<'_>) -> Blob {
+        let s = format!("{}{}", a.get::<MyBlob>().read(), b.get::<MyBlob>().read());
+        Blob::new(MyBlob(RefCell::new(s)))
+    }
+}
+
 impl Api for Component {
+    type Blob = MyBlob;
+
+    fn make_blobs(n: u32) -> Vec<Blob> {
+        (0..n).map(|i| Blob::new(MyBlob(RefCell::new(format!("b{i}"))))).collect()
+    }
+
+    fn blob_size(b: BlobBorrow<'_>) -> u32 {
+        b.get::<MyBlob>().0.borrow().len() as u32
+    }
+
+    // Host tokens the host gives up, nested in a list; dropped at the end.
+    fn tally(ts: Vec<Token>) -> u32 {
+        ts.iter().map(host::peek).sum()
+    }
+
+    // An own token the host gives up; dropping it reaches the host.
+    fn take_token(t: Token) -> u32 {
+        host::peek(&t)
+    }
+
+    // A token the guest gets from the host and hands back to it.
+    fn give_token(v: u32) -> Token {
+        host::mint(v)
+    }
+
+    fn peek_token(t: &Token) -> u32 {
+        host::peek(t)
+    }
+
+    // Tokens nested in a host import's tuple, list and result.
+    fn pair_tokens(a: u32, b: u32) -> u32 {
+        let (x, y) = host::mint_pair(a, b);
+        let both = host::peek_all(&[&x, &y]);
+        let z = host::try_mint(7).unwrap();
+        let bad = host::try_mint(0).is_err() as u32;
+        both + host::peek(&z) + bad
+    }
+
     // The host echoes; the guest marks what came back so the test can tell
     // the round trip happened.
     fn roundtrip(e: Everything) -> Everything {

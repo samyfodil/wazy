@@ -24,15 +24,42 @@ type host struct {
 	dropped  []Counter
 	echoed   []Everything
 	tokens   map[Token]uint32
+	nextTok  Token
 	dropTok  []Token
 }
 
 // Mint and Peek are host's, DropToken types': the token resource is declared
 // in types, which has no functions, and used only by host's.
 func (h *host) Mint(_ context.Context, v uint32) (Token, error) {
-	t := Token(len(h.tokens) + len(h.dropTok) + 1)
-	h.tokens[t] = v
-	return t, nil
+	h.nextTok++
+	h.tokens[h.nextTok] = v
+	return h.nextTok, nil
+}
+
+func (h *host) MintPair(ctx context.Context, a, b uint32) (witgo.Tuple2[Token, Token], error) {
+	x, _ := h.Mint(ctx, a)
+	y, _ := h.Mint(ctx, b)
+	return witgo.Tuple2[Token, Token]{F0: x, F1: y}, nil
+}
+
+func (h *host) PeekAll(ctx context.Context, ts []Token) (uint32, error) {
+	var sum uint32
+	for _, t := range ts {
+		v, err := h.Peek(ctx, t)
+		if err != nil {
+			return 0, err
+		}
+		sum += v
+	}
+	return sum, nil
+}
+
+func (h *host) TryMint(ctx context.Context, v uint32) (witgo.Result[Token, string], error) {
+	if v == 0 {
+		return witgo.Err[Token]("zero"), nil
+	}
+	t, _ := h.Mint(ctx, v)
+	return witgo.Ok[Token, string](t), nil
 }
 
 func (h *host) Peek(_ context.Context, t Token) (uint32, error) {
@@ -217,6 +244,95 @@ func TestCrossInterfaceResource(t *testing.T) {
 	require.Equal(t, uint32(10), got)
 	require.Equal(t, 2, len(h.dropTok))
 	require.Equal(t, 0, len(h.tokens), "every token the guest held was dropped")
+}
+
+// Tokens nested in a host import's tuple result, list<borrow> argument and
+// result<own> result cross as handles the bindings translate through the
+// table, and every one the guest drops reaches DropToken.
+func TestNestedImportHandles(t *testing.T) {
+	k, h := instantiate(t)
+	got, err := k.API().PairTokens(context.Background(), 2, 3)
+	require.NoError(t, err)
+	require.Equal(t, uint32(2+3+7+1), got)
+	require.Equal(t, 3, len(h.dropTok))
+	require.Equal(t, 0, len(h.tokens))
+}
+
+// The host's own tokens passed into exports: owned ones the guest drops reach
+// DropToken; a borrowed one is released after the call with the host still
+// owning it; one the guest returns comes back as the host's rep.
+func TestHostHandlesInExports(t *testing.T) {
+	k, h := instantiate(t)
+	ctx := context.Background()
+	api := k.API()
+	mint := func(v uint32) Token { tok, _ := h.Mint(ctx, v); return tok }
+
+	a, b := mint(10), mint(20)
+	sum, err := api.Tally(ctx, []Token{a, b})
+	require.NoError(t, err)
+	require.Equal(t, uint32(30), sum)
+	require.Equal(t, []Token{a, b}, h.dropTok)
+
+	c := mint(5)
+	got, err := api.TakeToken(ctx, c)
+	require.NoError(t, err)
+	require.Equal(t, uint32(5), got)
+	require.Equal(t, []Token{a, b, c}, h.dropTok)
+
+	d := mint(8)
+	for range 2 { // the lent handle is released, so it can be lent again
+		got, err = api.PeekToken(ctx, d)
+		require.NoError(t, err)
+		require.Equal(t, uint32(8), got)
+	}
+	require.Equal(t, 3, len(h.dropTok), "a borrow does not drop the host's token")
+	require.Equal(t, uint32(8), h.tokens[d])
+
+	e, err := api.GiveToken(ctx, 9)
+	require.NoError(t, err)
+	require.Equal(t, uint32(9), h.tokens[e], "the token the guest returned is the host's rep")
+	require.Equal(t, 3, len(h.dropTok))
+}
+
+// A resource the guest implements: constructed, used through its methods and
+// a static, returned in a list, borrowed by another export, and dropped.
+func TestExportedResource(t *testing.T) {
+	k, _ := instantiate(t)
+	ctx := context.Background()
+	api := k.API()
+
+	a, err := api.NewBlob(ctx, "ab")
+	require.NoError(t, err)
+	require.NoError(t, a.Append(ctx, "c"))
+	s, err := a.Read(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "abc", s)
+
+	b, err := api.NewBlob(ctx, "xy")
+	require.NoError(t, err)
+	j, err := api.BlobJoin(ctx, a, b)
+	require.NoError(t, err)
+	s, err = j.Read(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "abcxy", s)
+	n, err := api.BlobSize(ctx, j)
+	require.NoError(t, err)
+	require.Equal(t, uint32(5), n)
+
+	many, err := api.MakeBlobs(ctx, 3)
+	require.NoError(t, err)
+	require.Equal(t, 3, len(many))
+	for i, m := range many {
+		s, err := m.Read(ctx)
+		require.NoError(t, err)
+		require.Equal(t, fmt.Sprintf("b%d", i), s)
+		require.NoError(t, m.Drop(ctx))
+	}
+	for _, x := range []Blob{a, b, j} {
+		require.NoError(t, x.Drop(ctx))
+	}
+	_, err = a.Read(ctx)
+	require.Error(t, err, "a dropped handle is gone")
 }
 
 // Variant accessors report the case they were asked about only.
