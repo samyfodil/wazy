@@ -17,12 +17,22 @@
 //
 // A world's WASI imports are not bound by default: wazy's imports/wasip2
 // implements them, and its options go to Instantiate next to the bindings.
+//
+// Bindings can share an imported interface's code rather than each holding
+// a copy. GenerateTree writes each imported interface a package of its own,
+// which holds nothing that depends on the world, so every world generated
+// into the same tree shares it; and Options.With points an interface at such
+// a package that already exists. Its Go names, its converters and its
+// resource tags are the same in every world: it exports what other packages
+// need of it, the host interface it is implemented by included.
 package bindgen
 
 import (
 	"bytes"
 	"fmt"
 	"go/format"
+	"go/token"
+	"go/types"
 	"hash/fnv"
 	"slices"
 	"strings"
@@ -34,7 +44,8 @@ import (
 
 // Options says what to generate.
 type Options struct {
-	// Package is the Go package name of the generated file.
+	// Package is the Go package name of the generated file, or with
+	// GenerateTree of the world's package.
 	Package string
 	// World is the name of the world to bind, in the parsed package.
 	World string
@@ -43,12 +54,66 @@ type Options struct {
 	Skip []string
 	// TagBase is the first resource tag the bindings mint host handles
 	// under. Zero picks one from the world's name, well clear of the small
-	// tags imports/wasip2 uses.
+	// tags imports/wasip2 uses. An imported interface's own package (see
+	// GenerateTree and With) has tags of its own instead, the same in every
+	// world.
 	TagBase uint32
+	// With maps imported interfaces to the Go packages already holding their
+	// bindings, which the generated code uses rather than writing its own:
+	// an interface name ("wasi:http/types@0.2.0", or without the version to
+	// match any) to an import path. The package is GenerateTree's for the
+	// interface, from any world importing the same WIT of it.
+	With map[string]string
 }
 
-// Generate returns the Go source of the bindings for opts.World in pkg.
+// File is one file of GenerateTree's output.
+type File struct {
+	// Path is where it goes, relative to the tree's root, which is the
+	// directory of the base import path GenerateTree is given.
+	Path string
+	Src  []byte
+}
+
+// Generate returns the Go source of the bindings for opts.World in pkg: one
+// file, holding everything the bindings need but what opts.With maps to
+// other packages.
 func Generate(pkg *wit.Package, opts Options) ([]byte, error) {
+	g, err := newGen(pkg, opts, "")
+	if err != nil {
+		return nil, err
+	}
+	return g.emitUnit(g.root)
+}
+
+// GenerateTree returns the bindings for opts.World in pkg as a tree of
+// packages under the import path base: one for each imported interface, at
+// base/<namespace>/<package>/[v<version>/]<interface> -- shared by every
+// world's bindings generated into the same tree, as it holds nothing that
+// depends on the world -- and one for the world, at base/<opts.Package>,
+// holding the rest.
+func GenerateTree(pkg *wit.Package, opts Options, base string) ([]File, error) {
+	if base == "" {
+		return nil, fmt.Errorf("bindgen: no base import path")
+	}
+	g, err := newGen(pkg, opts, base)
+	if err != nil {
+		return nil, err
+	}
+	var files []File
+	for _, u := range append(slices.Clone(g.order), g.root) {
+		if u.external {
+			continue
+		}
+		src, err := g.emitUnit(u)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, File{Path: strings.TrimPrefix(u.path, base+"/") + "/bindings.go", Src: src})
+	}
+	return files, nil
+}
+
+func newGen(pkg *wit.Package, opts Options, base string) (*gen, error) {
 	if opts.Package == "" {
 		return nil, fmt.Errorf("bindgen: no Go package name")
 	}
@@ -64,26 +129,112 @@ func Generate(pkg *wit.Package, opts Options) ([]byte, error) {
 		h.Write([]byte(pkg.Name + "/" + w.Name))
 		opts.TagBase = 1<<31 | h.Sum32()&0x7fff_ff00
 	}
+	rootPath := ""
+	if base != "" {
+		rootPath = base + "/" + opts.Package
+	}
 	g := &gen{
+		root:  newUnit(rootPath, opts.Package, nil, "Imports", "Instantiate", "Result", "Tuple"),
 		opts:  opts,
 		world: w,
-		used:  map[string]bool{},
 		byKey: map[string]*typ{},
 		res:   map[wit.ResourceKey]*resource{},
+		units: map[string]*unit{},
+		tree:  base,
 	}
-	for _, name := range []string{"Imports", "Instantiate", "Result", "Tuple"} {
-		g.used[name] = true
+	g.worldGo = g.root.claim(pascal(w.Name))
+	if err := g.makeUnits(); err != nil {
+		return nil, err
 	}
-	g.worldGo = g.claim(pascal(w.Name))
+	pkgNames := map[string]bool{}
+	for _, u := range g.order {
+		pkgNames[u.name] = true
+	}
+	for _, u := range append(slices.Clone(g.order), g.root) {
+		u.pkgNames = pkgNames
+	}
 	if err := g.collect(); err != nil {
 		return nil, err
 	}
-	src := g.emit()
-	out, err := format.Source(src)
-	if err != nil {
-		return src, fmt.Errorf("bindgen: generated code does not parse (a bindgen bug): %w", err)
+	return g, nil
+}
+
+// makeUnits gives each imported interface the package Options.With maps it
+// to, or with a tree its own.
+func (g *gen) makeUnits() error {
+	matched := map[string]bool{}
+	for _, it := range g.world.Imports {
+		pkgPath, qualified := witPackage(it.Name)
+		if it.Interface == nil || !qualified {
+			continue
+		}
+		var u *unit
+		name := goPackageName(it.Name)
+		for key, path := range g.opts.With {
+			if it.Name == key || strings.HasPrefix(it.Name, key+"@") {
+				matched[key] = true
+				u = newUnit(path, name, it.Interface, "Host", "Options")
+				u.external = true
+			}
+		}
+		if u == nil {
+			if g.tree == "" {
+				continue
+			}
+			u = newUnit(g.tree+"/"+pkgPath, name, it.Interface, "Host", "Options")
+		}
+		g.units[it.Name] = u
+		g.order = append(g.order, u)
 	}
-	return out, nil
+	for key := range g.opts.With {
+		if !matched[key] {
+			return fmt.Errorf("bindgen: With: world %s imports no interface %s", g.world.Name, key)
+		}
+	}
+	return nil
+}
+
+// witPackage is where an interface's own package goes in a tree --
+// "ns:pkg/iface@1.0.0" goes in ns/pkg/v1.0.0/iface -- and whether the name
+// is a qualified one, which has a package, rather than a world's own label.
+func witPackage(name string) (string, bool) {
+	ns, rest, ok := strings.Cut(name, ":")
+	if !ok {
+		return "", false
+	}
+	pkg, iface, ok := strings.Cut(rest, "/")
+	if !ok {
+		return "", false
+	}
+	path := ns + "/" + pkg
+	if iface, ver, versioned := strings.Cut(iface, "@"); versioned {
+		return path + "/v" + ver + "/" + iface, true
+	}
+	return path + "/" + iface, true
+}
+
+// goPackageName is the Go package name of an interface's own package: its
+// short name, written as a Go identifier, prefixed with its WIT package's
+// when that alone is a Go keyword or predeclared name ("wasi:io/error" is
+// package ioerror).
+func goPackageName(name string) string {
+	ident := func(s string) string { return strings.ToLower(strings.NewReplacer("-", "", "_", "").Replace(s)) }
+	short := ident(shortName(name))
+	if !token.IsKeyword(short) && !fileIdents[short] && types.Universe.Lookup(short) == nil && short != "" {
+		return short
+	}
+	_, rest, _ := strings.Cut(name, ":")
+	pkg, _, _ := strings.Cut(rest, "/")
+	return ident(pkg) + short
+}
+
+// ifaceTag is the tag of a resource of an imported interface's own package:
+// the same in every world, as the package is, and well clear of the small
+// tags imports/wasip2 uses.
+func ifaceTag(k wit.ResourceKey) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(k.Interface + "#" + k.Name))
+	return 1<<31 | h.Sum32()&0x7fff_ffff
 }
 
 type kind int
@@ -122,7 +273,11 @@ type typ struct {
 	witName string
 	goName  string
 	id      string
-	conv    int // converter number, for an anonymous type that needs one
+	// unit is where a named type is defined, and its converters liftName
+	// and lowerName.
+	unit                *unit
+	liftName, lowerName string
+	caseType            string // a variant's Case type
 }
 
 type member struct {
@@ -131,10 +286,12 @@ type member struct {
 }
 
 type resource struct {
-	key    wit.ResourceKey
-	tag    uint32
-	goName string
-	tagGo  string
+	key                 wit.ResourceKey
+	tag                 uint32
+	unit                *unit
+	goName              string
+	tagGo               string
+	liftName, lowerName string
 	// guest is set for a resource of an exported interface: the component
 	// implements it, and the host holds handles to it.
 	guest bool
@@ -167,34 +324,143 @@ func (b *fn) skip() int {
 
 // iface is one bound interface, or the world's own functions.
 type iface struct {
-	name   string // as imported or exported; "" for world-level functions
-	goName string
-	field  string
-	funcs  []*fn
-	res    []*resource
+	name    string // as imported or exported; "" for world-level functions
+	unit    *unit
+	goName  string
+	options string // the func returning its options
+	field   string
+	funcs   []*fn
+	res     []*resource
+}
+
+// unit is one Go package the bindings are written in: the world's, or one of
+// an imported interface's own. An external unit is one whose code another
+// run of the generator wrote (Options.With): the bindings use it, and write
+// nothing of it.
+//
+// An interface's unit holds what a host needs of the interface, and nothing
+// that depends on the world importing it, so every world shares it: the
+// types it defines, its resources, the Go interface its host implements and
+// the options registering one. Its names are claimed in declaration order
+// within it alone, and exported, which is what lets another run reference
+// them without reading it.
+type unit struct {
+	path, name string
+	iface      *wit.Interface // nil for the world's
+	external   bool
+
+	used    map[string]bool
+	named   []*typ
+	res     []*resource
+	ins     []*iface
+	anon    []*typ
+	anonIdx map[*typ]int
+
+	// deps are the units its code names, in the order it first does, under
+	// the aliases it imports them by.
+	deps  []*unit
+	alias map[*unit]string
+
+	// preNamed is what an interface's unit names its types, by WIT name.
+	preNamed map[string]preName
+	// pkgNames are the names of every unit, which its code may import
+	// under them, so a parameter must not shadow them.
+	pkgNames map[string]bool
+}
+
+func newUnit(path, name string, in *wit.Interface, reserved ...string) *unit {
+	u := &unit{path: path, name: name, iface: in, used: map[string]bool{}, anonIdx: map[*typ]int{}, alias: map[*unit]string{}}
+	for _, r := range reserved {
+		u.used[r] = true
+	}
+	return u
+}
+
+// claim reserves a package-level Go name in u, suffixing a number on a clash.
+func (u *unit) claim(name string) string {
+	n := name
+	for i := 2; u.used[n]; i++ {
+		n = fmt.Sprintf("%s%d", name, i)
+	}
+	u.used[n] = true
+	return n
+}
+
+// exported reports whether u's converters and tags are part of its API: an
+// interface's are, for the units using it.
+func (u *unit) exported() bool { return u.iface != nil }
+
+// qualify is name, of unit o, as c's code writes it.
+func (c *unit) qualify(o *unit, name string) string {
+	if o == nil || o == c {
+		return name
+	}
+	a, ok := c.alias[o]
+	if !ok {
+		a = o.name
+		taken := func(a string) bool {
+			if fileIdents[a] || c.used[a] {
+				return true
+			}
+			for _, b := range c.alias {
+				if b == a {
+					return true
+				}
+			}
+			return false
+		}
+		for i := 2; taken(a); i++ {
+			a = fmt.Sprintf("%s%d", o.name, i)
+		}
+		c.alias[o] = a
+		c.deps = append(c.deps, o)
+	}
+	return a + "." + name
+}
+
+// anonName is the number of c's converter for the anonymous type t.
+func (c *unit) anonName(t *typ) string {
+	n, ok := c.anonIdx[t]
+	if !ok {
+		c.anon = append(c.anon, t)
+		n = len(c.anon)
+		c.anonIdx[t] = n
+	}
+	return fmt.Sprintf("T%d", n)
+}
+
+// fileIdents are the identifiers every generated file may use: its imports,
+// and Go's predeclared names.
+var fileIdents = map[string]bool{
+	"context": true, "fmt": true, "wazy": true, "component": true, "witgo": true,
+	"error": true, "string": true, "bool": true, "any": true, "nil": true, "true": true, "false": true,
+	"byte": true, "rune": true, "int": true, "uint32": true, "len": true, "make": true, "append": true,
 }
 
 type gen struct {
+	root    *unit
 	opts    Options
 	world   *wit.World
 	worldGo string
-	used    map[string]bool
 	byKey   map[string]*typ
-	named   []*typ
-	anon    []*typ
 	res     map[wit.ResourceKey]*resource
 	imports []*iface
 	exports []*iface
+
+	// units are the imported interfaces' own units, by interface name; the
+	// rest are the root's. tree is set when they are written too, rather
+	// than only some, from Options.With, used.
+	units map[string]*unit
+	order []*unit
+	tree  string
 }
 
-// claim reserves a package-level Go name, suffixing a number on a clash.
-func (g *gen) claim(name string) string {
-	n := name
-	for i := 2; g.used[n]; i++ {
-		n = fmt.Sprintf("%s%d", name, i)
+// unitOf is the unit that defines what interface name declares.
+func (g *gen) unitOf(name string) *unit {
+	if u := g.units[name]; u != nil {
+		return u
 	}
-	g.used[n] = true
-	return n
+	return g.root
 }
 
 // unique adds name to set, suffixed with underscores until it is not
@@ -229,19 +495,67 @@ func (g *gen) collect() error {
 				if _, ok := g.res[k]; ok {
 					continue
 				}
-				tags[k] = next
-				g.res[k] = &resource{key: k, tag: next, guest: i == 1}
-				next++
+				res := &resource{key: k, guest: i == 1, unit: g.unitOf(r.Interface)}
+				if res.unit != g.root {
+					res.tag = ifaceTag(k)
+				} else {
+					res.tag = next
+					next++
+				}
+				tags[k] = res.tag
+				g.res[k] = res
 			}
 		}
 	}
+	// An interface's own unit names what it defines before anything else is
+	// bound, in declaration order, so that the names are the same whichever
+	// world, binding whatever before it, generates it.
+	sets := map[*unit]*wit.TypeSet{}
+	for _, u := range g.order {
+		set, err := u.iface.Types(tags)
+		if err != nil {
+			return fmt.Errorf("bindgen: %w", err)
+		}
+		sets[u] = set
+		u.preNamed = map[string]preName{}
+		for i, ref := range set.Refs {
+			if ref.TypeIndex == nil || set.TypeOwners[*ref.TypeIndex] != u.iface.Name {
+				continue // an alias of a primitive, or of another interface's type
+			}
+			name := set.TypeNames[*ref.TypeIndex]
+			if _, ok := u.preNamed[name]; ok {
+				continue // an alias of one of its own
+			}
+			goName := u.claim(pascal(name))
+			u.preNamed[name] = preName{goName: goName, lift: u.claim("Lift" + goName), lower: u.claim("Lower" + goName), decl: i}
+		}
+		for _, r := range u.iface.Resources {
+			g.nameResource(g.res[wit.ResourceKey{Interface: r.Interface, Name: r.Name}])
+		}
+	}
 	for _, it := range g.world.Imports {
-		if it.Interface != nil && g.skipped(it.Name) {
+		u := g.units[it.Name]
+		switch {
+		case u != nil && u.external:
+			// Another package's: the world registers it, and binds nothing.
+			g.imports = append(g.imports, &iface{name: it.Name, unit: u})
+			continue
+		case u == nil && it.Interface != nil && g.skipped(it.Name):
 			continue
 		}
 		in, err := g.bind(it, tags, true)
 		if err != nil {
 			return err
+		}
+		if u != nil && g.skipped(it.Name) {
+			// Skipped by the world, but its unit is the interface's, for
+			// every world: bound all the same, and left out of Imports.
+			for _, r := range in.res {
+				in.funcs = append(in.funcs, &fn{dropFor: r})
+			}
+			in.goName, in.options = "Host", "Options"
+			u.ins = append(u.ins, in)
+			continue
 		}
 		g.imports = append(g.imports, in)
 	}
@@ -252,10 +566,25 @@ func (g *gen) collect() error {
 		}
 		g.exports = append(g.exports, in)
 	}
+	// An interface's own unit defines every type it declares, whether or not
+	// a func uses it, in declaration order.
+	for _, u := range g.order {
+		if u.external {
+			continue
+		}
+		set := sets[u]
+		for _, ref := range set.Refs {
+			if _, err := g.typeOf(ref, srcOf(set.Types, set.TypeNames, set.TypeOwners), u.iface.Name); err != nil {
+				return fmt.Errorf("bindgen: %s: %w", u.iface.Name, err)
+			}
+		}
+		slices.SortStableFunc(u.named, func(a, b *typ) int { return u.preNamed[a.witName].decl - u.preNamed[b.witName].decl })
+	}
 	// A resource is registered, with its destructor, by the interface that
-	// declares it, once any bound function uses it: maybe one of a later
-	// interface, as wasi:io/streams' are used by every interface after it.
-	// An interface that is left with nothing to register is only types.
+	// declares it: by its own unit's every one, and otherwise once any bound
+	// function uses it, maybe one of a later interface, as wasi:io/streams'
+	// are used by every interface after it. An interface that is left with
+	// nothing to register is only types.
 	bound := g.imports[:0]
 	for _, in := range g.imports {
 		for _, r := range in.res {
@@ -263,7 +592,7 @@ func (g *gen) collect() error {
 				in.funcs = append(in.funcs, &fn{dropFor: r})
 			}
 		}
-		if len(in.funcs) > 0 {
+		if len(in.funcs) > 0 || in.unit.external || in.unit != g.root {
 			bound = append(bound, in)
 		}
 	}
@@ -279,16 +608,31 @@ func (g *gen) collect() error {
 		if in.name != "" {
 			name = pascal(shortName(in.name))
 		}
-		in.goName = g.claim(name)
+		if in.unit == g.root {
+			in.goName = g.root.claim(name)
+			in.options = "options" + in.goName
+		} else {
+			in.goName, in.options = "Host", "Options"
+			if !in.unit.external {
+				in.unit.ins = append(in.unit.ins, in)
+			}
+		}
 		in.field = unique(fields, name)
 	}
 	for _, in := range g.exports {
+		in.unit = g.root
 		if in.name != "" {
 			in.field = pascal(shortName(in.name))
-			in.goName = g.claim(in.field)
+			in.goName = g.root.claim(in.field)
 		}
 	}
 	return nil
+}
+
+// preName is what an interface's own unit names one of its types.
+type preName struct {
+	goName, lift, lower string
+	decl                int
 }
 
 // mergeWorldFuncs folds the world's own functions, one iface each, into one.
@@ -301,7 +645,7 @@ func mergeWorldFuncs(ins []*iface, goName string) []*iface {
 			continue
 		}
 		if world == nil {
-			world = &iface{goName: goName}
+			world = &iface{goName: goName, unit: in.unit}
 		}
 		world.funcs = append(world.funcs, in.funcs...)
 	}
@@ -312,10 +656,13 @@ func mergeWorldFuncs(ins []*iface, goName string) []*iface {
 }
 
 func (g *gen) bind(it wit.WorldItem, tags wit.Tags, imported bool) (*iface, error) {
-	in := &iface{}
+	in := &iface{unit: g.root}
 	funcs := []*wit.Func{it.Func}
 	if it.Interface != nil {
 		in.name = it.Name
+		if imported {
+			in.unit = g.unitOf(it.Name)
+		}
 		funcs = it.Interface.Funcs
 		for _, r := range it.Interface.Resources {
 			res := g.res[wit.ResourceKey{Interface: r.Interface, Name: r.Name}]
@@ -345,15 +692,16 @@ func (g *gen) bindFunc(f *wit.Func, ifaceName string, tags wit.Tags, imported bo
 		return nil, err
 	}
 	b := &fn{f: f, iface: ifaceName, sig: sig, async: sig.Desc.Async}
+	src := srcOf(sig.Types, sig.TypeNames, sig.TypeOwners)
 	for _, p := range sig.Desc.Params {
-		t, err := g.typeOf(p.Type, sig, ifaceName)
+		t, err := g.typeOf(p.Type, src, ifaceName)
 		if err != nil {
 			return nil, fmt.Errorf("param %s: %w", p.Name, err)
 		}
 		b.params = append(b.params, member{wit: p.Name, t: t})
 	}
 	if r := sig.Desc.Results.Unnamed; r != nil {
-		if b.result, err = g.typeOf(*r, sig, ifaceName); err != nil {
+		if b.result, err = g.typeOf(*r, src, ifaceName); err != nil {
 			return nil, fmt.Errorf("result: %w", err)
 		}
 	}
@@ -416,8 +764,19 @@ var goPrims = map[string]string{
 	"f32": "float32", "f64": "float64", "char": "rune", "string": "string",
 }
 
-// typeOf reads ref into a typ, interning it.
-func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string) (*typ, error) {
+// typeSrc is where typeOf reads types: a Signature's, or a TypeSet's.
+type typeSrc struct {
+	resolve       component.Resolver
+	names, owners map[uint32]string
+}
+
+func srcOf(tbl *component.TypeTable, names, owners map[uint32]string) typeSrc {
+	return typeSrc{resolve: tbl.Resolver(), names: names, owners: owners}
+}
+
+// typeOf reads ref into a typ, interning it; ifaceName is the interface whose
+// func or type it is read for.
+func (g *gen) typeOf(ref component.TypeRef, src typeSrc, ifaceName string) (*typ, error) {
 	if ref.Primitive == "error-context" {
 		return g.intern(&typ{kind: kErrorContext, id: "error-context"}, ifaceName), nil
 	}
@@ -428,9 +787,12 @@ func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string
 		return g.intern(&typ{kind: kPrim, prim: ref.Primitive, id: "p:" + ref.Primitive}, ifaceName), nil
 	}
 	idx := *ref.TypeIndex
-	d := sig.Types.Resolver()(idx)
-	t := &typ{witName: sig.TypeNames[idx]}
-	sub := func(r component.TypeRef) (*typ, error) { return g.typeOf(r, sig, ifaceName) }
+	d := src.resolve(idx)
+	t := &typ{witName: src.names[idx]}
+	if t.witName != "" {
+		t.unit = g.unitOf(src.owners[idx])
+	}
+	sub := func(r component.TypeRef) (*typ, error) { return g.typeOf(r, src, ifaceName) }
 	var err error
 	switch d := d.(type) {
 	case component.ListDesc:
@@ -454,6 +816,9 @@ func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string
 		}
 	case component.TupleDesc:
 		t.kind = kTuple
+		if len(d.Elements) > witgo.MaxTuple && t.unit == nil {
+			t.unit = g.unitOf(ifaceName)
+		}
 		for _, e := range d.Elements {
 			et, err := sub(e)
 			if err != nil {
@@ -498,7 +863,7 @@ func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string
 				t.res = r // Signature only tags the resources collect found
 			}
 		}
-		if g.skipped(t.res.key.Interface) {
+		if t.res.unit == g.root && g.skipped(t.res.key.Interface) {
 			return nil, fmt.Errorf("a handle to %s.%s, of an interface left unbound", t.res.key.Interface, t.res.key.Name)
 		}
 		t.witName = ""
@@ -558,6 +923,11 @@ func (t *typ) key0() string {
 	if t.res != nil {
 		fmt.Fprintf(&b, "r%d:%v", t.res.tag, t.own)
 	}
+	if t.unit != nil {
+		// Where it is defined is part of what it is: two interfaces' equal
+		// records are two types.
+		fmt.Fprintf(&b, "@%p", t.unit)
+	}
 	return b.String()
 }
 
@@ -570,29 +940,58 @@ func (g *gen) intern(t *typ, ifaceName string) *typ {
 	case t.kind == kHandle:
 		g.nameResource(t.res)
 	case t.witName != "":
-		name := pascal(t.witName)
-		if g.used[name] && ifaceName != "" {
-			name = pascal(shortName(ifaceName)) + name
+		u := t.unit
+		if pn, ok := u.preNamed[t.witName]; ok {
+			t.goName, t.liftName, t.lowerName = pn.goName, pn.lift, pn.lower
+		} else {
+			name := pascal(t.witName)
+			if u.used[name] && ifaceName != "" {
+				name = pascal(shortName(ifaceName)) + name
+			}
+			t.goName = u.claim(name)
+			t.liftName, t.lowerName = u.convNames(t.goName)
 		}
-		t.goName = g.claim(name)
-		g.named = append(g.named, t)
+		u.named = append(u.named, t)
 	case t.kind == kTuple && len(t.elems) > witgo.MaxTuple:
-		// Longer than witgo has a type for: a struct of the bindings' own.
-		t.goName = g.claim(fmt.Sprintf("Tuple%d", len(t.elems)))
-		g.named = append(g.named, t)
+		// Longer than witgo has a type for: a struct of the bindings' own,
+		// each unit's that uses it.
+		u := t.unit
+		t.goName = u.claim(fmt.Sprintf("Tuple%d", len(t.elems)))
+		t.liftName, t.lowerName = u.convNames(t.goName)
+		u.named = append(u.named, t)
 	case t.needsConv():
-		t.conv = len(g.anon) + 1
-		g.anon = append(g.anon, t)
+		// The world's unit numbers its anonymous types as it meets them, as it
+		// always has; an interface's numbers them as its own code uses them,
+		// which does not depend on the world.
+		if g.unitOf(ifaceName) == g.root {
+			g.root.anonName(t)
+		}
 	}
 	return t
 }
 
-// nameResource gives r its Go names, the first time it is used.
-func (g *gen) nameResource(r *resource) {
-	if r.goName == "" {
-		r.goName = g.claim(pascal(r.key.Name))
-		r.tagGo = g.claim("tag" + r.goName)
+// convNames are the names of the converters of the type u calls name.
+func (u *unit) convNames(name string) (lift, lower string) {
+	if u.exported() {
+		return u.claim("Lift" + name), u.claim("Lower" + name)
 	}
+	return "lift" + name, "lower" + name
+}
+
+// nameResource gives r its Go names in its unit, the first time it is used.
+func (g *gen) nameResource(r *resource) {
+	if r.goName != "" {
+		return
+	}
+	u := r.unit
+	r.goName = u.claim(pascal(r.key.Name))
+	if u.exported() {
+		r.tagGo = u.claim("Tag" + r.goName)
+	} else {
+		r.tagGo = u.claim("tag" + r.goName)
+	}
+	r.liftName, r.lowerName = u.convNames(r.goName)
+	u.res = append(u.res, r)
 }
 
 // needsConv reports whether lifting or lowering t takes a function of its own.
@@ -609,7 +1008,7 @@ func (t *typ) needsConv() bool {
 // fixedWidth reports whether a list of t lifts as the Go slice of t itself.
 func (t *typ) fixedWidth() bool { return t.kind == kPrim && t.prim != "string" }
 
-func (t *typ) goType() string {
+func (t *typ) goType(c *unit) string {
 	switch t.kind {
 	case kPrim:
 		return goPrims[t.prim]
@@ -617,100 +1016,108 @@ func (t *typ) goType() string {
 		if t.elem.kind == kPrim && t.elem.prim == "u8" {
 			return "[]byte"
 		}
-		return "[]" + t.elem.goType()
+		return "[]" + t.elem.goType(c)
 	case kFixed:
-		return fmt.Sprintf("[%d]%s", t.n, t.elem.goType())
+		return fmt.Sprintf("[%d]%s", t.n, t.elem.goType(c))
 	case kOption:
-		return "*" + t.elem.goType()
+		return "*" + t.elem.goType(c)
 	case kResult:
-		return "witgo.Result[" + t.ok.armType() + ", " + t.err.armType() + "]"
+		return "witgo.Result[" + t.ok.armType(c) + ", " + t.err.armType(c) + "]"
 	case kTuple:
 		if t.goName != "" {
-			return t.goName
+			return c.qualify(t.unit, t.goName)
 		}
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
-			parts[i] = e.goType()
+			parts[i] = e.goType(c)
 		}
 		return fmt.Sprintf("witgo.Tuple%d[%s]", len(t.elems), strings.Join(parts, ", "))
 	case kHandle:
-		return t.res.goName
+		return c.qualify(t.res.unit, t.res.goName)
 	case kMap:
-		return "map[" + t.key.goType() + "]" + t.elem.goType()
+		return "map[" + t.key.goType(c) + "]" + t.elem.goType(c)
 	case kStream:
-		return "*witgo.StreamReader[" + t.elem.armType() + "]"
+		return "*witgo.StreamReader[" + t.elem.armType(c) + "]"
 	case kFuture:
-		return "*witgo.FutureReader[" + t.elem.armType() + "]"
+		return "*witgo.FutureReader[" + t.elem.armType(c) + "]"
 	case kErrorContext:
 		return "*component.ErrorContext"
 	}
-	return t.goName
+	return c.qualify(t.unit, t.goName)
 }
 
-func (t *typ) armType() string {
+func (t *typ) armType(c *unit) string {
 	if t == nil {
 		return "struct{}"
 	}
-	return t.goType()
+	return t.goType(c)
 }
 
-// convName is the suffix of t's lift and lower functions.
-func (t *typ) convName() string {
+// liftFn and lowerFn are t's converters, as c's code names them: a named
+// type's are its unit's, an anonymous one's c's own.
+func (t *typ) liftFn(c *unit) string {
 	if t.goName != "" {
-		return t.goName
+		return c.qualify(t.unit, t.liftName)
 	}
-	return fmt.Sprintf("T%d", t.conv)
+	return "lift" + c.anonName(t)
+}
+
+func (t *typ) lowerFn(c *unit) string {
+	if t.goName != "" {
+		return c.qualify(t.unit, t.lowerName)
+	}
+	return "lower" + c.anonName(t)
 }
 
 // lift is an expression of type (t's Go type, error) reading the
 // component.Value v, with the *witgo.Handles h for the handles in it. A nil h
 // takes a handle as the rep the engine translated it to: it is one at the top
 // level of an import's arguments.
-func (t *typ) lift(h, v string) string {
+func (t *typ) lift(c *unit, h, v string) string {
 	switch t.kind {
 	case kPrim:
 		return "witgo." + pascal(t.prim) + "(" + v + ")"
 	case kHandle:
-		return fmt.Sprintf("lift%s(%s, %s, %v)", t.res.goName, h, v, t.own)
+		return fmt.Sprintf("%s(%s, %s, %v)", c.qualify(t.res.unit, t.res.liftName), h, v, t.own)
 	case kList:
 		if t.elem.fixedWidth() {
-			return "component.ListOf[" + t.elem.goType() + "](" + v + ")"
+			return "component.ListOf[" + t.elem.goType(c) + "](" + v + ")"
 		}
 	case kStream:
-		return "witgo.ReaderOf(" + v + ", " + t.elem.elemLift() + ")"
+		return "witgo.ReaderOf(" + v + ", " + t.elem.elemLift(c) + ")"
 	case kFuture:
-		return "witgo.FutureReaderOf(" + v + ", " + t.elem.elemLift() + ")"
+		return "witgo.FutureReaderOf(" + v + ", " + t.elem.elemLift(c) + ")"
 	case kErrorContext:
 		return "witgo.ErrorContextOf(" + v + ")"
 	}
-	return "lift" + t.convName() + "(" + h + ", " + v + ")"
+	return t.liftFn(c) + "(" + h + ", " + v + ")"
 }
 
 // elemLift is a func reading a stream's or future's element of type t, nil
 // for none.
-func (t *typ) elemLift() string {
+func (t *typ) elemLift(c *unit) string {
 	switch {
 	case t == nil:
 		return "witgo.Unit"
 	case t.kind == kPrim:
 		return "witgo." + pascal(t.prim)
 	case t.kind == kList && t.elem.fixedWidth():
-		return "component.ListOf[" + t.elem.goType() + "]"
+		return "component.ListOf[" + t.elem.goType(c) + "]"
 	}
-	return "func(v component.Value) (" + t.goType() + ", error) { return " + t.lift("nil", "v") + " }"
+	return "func(v component.Value) (" + t.goType(c) + ", error) { return " + t.lift(c, "nil", "v") + " }"
 }
 
 // elemLower is elemLift's twin, writing an element.
-func (t *typ) elemLower() string {
+func (t *typ) elemLower(c *unit) string {
 	if t == nil {
 		return "witgo.LowerUnit"
 	}
-	return "func(x " + t.goType() + ") component.Value { return " + t.lower("nil", "x") + " }"
+	return "func(x " + t.goType(c) + ") component.Value { return " + t.lower(c, "nil", "x") + " }"
 }
 
 // lower is an expression of type component.Value holding the Go value x; see
 // lift for h.
-func (t *typ) lower(h, x string) string {
+func (t *typ) lower(c *unit, h, x string) string {
 	switch t.kind {
 	case kPrim:
 		switch t.prim {
@@ -721,7 +1128,7 @@ func (t *typ) lower(h, x string) string {
 		}
 		return x
 	case kHandle:
-		return fmt.Sprintf("lower%s(%s, %s, %v)", t.res.goName, h, x, !t.own)
+		return fmt.Sprintf("%s(%s, %s, %v)", c.qualify(t.res.unit, t.res.lowerName), h, x, !t.own)
 	case kEnum, kFlags:
 		return "uint32(" + x + ")"
 	case kList:
@@ -730,7 +1137,7 @@ func (t *typ) lower(h, x string) string {
 		}
 	case kFixed:
 		if t.elem.fixedWidth() {
-			return "append([]" + t.elem.goType() + "(nil), " + x + "[:]...)"
+			return "append([]" + t.elem.goType(c) + "(nil), " + x + "[:]...)"
 		}
 	case kStream, kFuture:
 		if strings.HasPrefix(x, "*") {
@@ -740,7 +1147,7 @@ func (t *typ) lower(h, x string) string {
 	case kErrorContext:
 		return "witgo.LowerErrorContext(" + x + ")"
 	}
-	return "lower" + t.convName() + "(" + h + ", " + x + ")"
+	return t.lowerFn(c) + "(" + h + ", " + x + ")"
 }
 
 func (t *typ) witString() string {
@@ -798,55 +1205,86 @@ func (w *writer) p(format string, args ...any) {
 	w.WriteByte('\n')
 }
 
-func (g *gen) emit() []byte {
+// emitUnit writes the source of c.
+func (g *gen) emitUnit(c *unit) ([]byte, error) {
 	body := &writer{}
-	g.emitResources(body)
-	for _, t := range g.named {
-		g.emitType(body, t)
+	g.emitResources(body, c)
+	for _, t := range c.named {
+		g.emitType(body, c, t)
 	}
-	for _, t := range append(slices.Clone(g.named), g.anon...) {
-		g.emitConv(body, t)
+	emitted := 0
+	convs := func() {
+		for _, t := range c.named {
+			g.emitConv(body, c, t)
+		}
+		for ; emitted < len(c.anon); emitted++ {
+			g.emitConv(body, c, c.anon[emitted])
+		}
 	}
-	g.emitImports(body)
-	g.emitExports(body)
+	if c == g.root {
+		convs()
+		g.emitImports(body)
+		g.emitExports(body)
+	} else {
+		for _, in := range c.ins {
+			g.emitImport(body, c, in)
+		}
+		convs()
+	}
+	// What the code above used last may want converters of its own.
+	for ; emitted < len(c.anon); emitted++ {
+		g.emitConv(body, c, c.anon[emitted])
+	}
 
 	w := &writer{}
 	w.p("// Code generated by wazy-bindgen. DO NOT EDIT.")
 	w.p("")
-	w.p("// Package %s binds the WIT world %s.", g.opts.Package, g.world.Name)
-	w.p("package %s", g.opts.Package)
+	if c == g.root {
+		w.p("// Package %s binds the WIT world %s.", c.name, g.world.Name)
+	} else {
+		w.p("// Package %s binds the WIT interface %s, for a host implementing it.", c.name, c.iface.Name)
+	}
+	w.p("package %s", c.name)
 	w.p("")
 	w.p("import (")
-	w.p("%q", "context")
-	if bytes.Contains(body.Bytes(), []byte("fmt.")) {
-		w.p("%q", "fmt")
+	for _, std := range []string{"context", "fmt"} {
+		if bytes.Contains(body.Bytes(), []byte(std+".")) {
+			w.p("%q", std)
+		}
 	}
 	w.p("")
-	w.p("%q", "github.com/samyfodil/wazy")
-	w.p("%q", "github.com/samyfodil/wazy/component")
+	// One group, sorted: what gofmt-style import grouping keeps as it is.
+	var imports [][2]string
+	if bytes.Contains(body.Bytes(), []byte("wazy.")) {
+		imports = append(imports, [2]string{"", "github.com/samyfodil/wazy"})
+	}
+	imports = append(imports, [2]string{"", "github.com/samyfodil/wazy/component"})
 	if bytes.Contains(body.Bytes(), []byte("witgo.")) {
-		w.p("%q", "github.com/samyfodil/wazy/component/witgo")
+		imports = append(imports, [2]string{"", "github.com/samyfodil/wazy/component/witgo"})
+	}
+	for _, d := range c.deps {
+		imports = append(imports, [2]string{c.alias[d] + " ", d.path})
+	}
+	slices.SortFunc(imports, func(a, b [2]string) int { return strings.Compare(a[1], b[1]) })
+	for _, im := range imports {
+		w.p("%s%q", im[0], im[1])
 	}
 	w.p(")")
 	w.Write(body.Bytes())
-	return w.Bytes()
-}
-
-func (g *gen) resources() []*resource {
-	var out []*resource
-	for _, r := range g.res {
-		if r.goName != "" {
-			out = append(out, r)
-		}
+	out, err := format.Source(w.Bytes())
+	if err != nil {
+		return w.Bytes(), fmt.Errorf("bindgen: generated code does not parse (a bindgen bug): %w", err)
 	}
-	slices.SortFunc(out, func(a, b *resource) int { return int(int64(a.tag) - int64(b.tag)) })
-	return out
+	return out, nil
 }
 
-func (g *gen) emitResources(w *writer) {
-	rs := g.resources()
+func (g *gen) emitResources(w *writer, c *unit) {
+	rs := slices.Clone(c.res)
 	if len(rs) == 0 {
 		return
+	}
+	if c == g.root {
+		slices.SortFunc(rs, func(a, b *resource) int { return int(int64(a.tag) - int64(b.tag)) })
 	}
 	w.p("// The tags the bindings mint resource handles under.")
 	w.p("const (")
@@ -864,7 +1302,10 @@ func (g *gen) emitResources(w *writer) {
 		w.p("// value the host returns from its constructor, and receives back as self.")
 		w.p("type %s uint32", r.goName)
 		w.p("")
-		w.p("func lift%s(h *witgo.Handles, v component.Value, own bool) (%s, error) {", r.goName, r.goName)
+		if c.exported() {
+			w.p("// %s reads a %s from v: from its handle in h, or with no h its rep.", r.liftName, r.goName)
+		}
+		w.p("func %s(h *witgo.Handles, v component.Value, own bool) (%s, error) {", r.liftName, r.goName)
 		w.p("if h == nil {")
 		w.p("x, err := witgo.U32(v)")
 		w.p("return %s(x), err", r.goName)
@@ -873,7 +1314,10 @@ func (g *gen) emitResources(w *writer) {
 		w.p("return %s(x), err", r.goName)
 		w.p("}")
 		w.p("")
-		w.p("func lower%s(h *witgo.Handles, x %s, borrow bool) component.Value {", r.goName, r.goName)
+		if c.exported() {
+			w.p("// %s writes x: as a handle minted in h, or with no h its rep.", r.lowerName)
+		}
+		w.p("func %s(h *witgo.Handles, x %s, borrow bool) component.Value {", r.lowerName, r.goName)
 		w.p("if h == nil { return uint32(x) }")
 		w.p("return h.Mint(%s, uint32(x), borrow)", r.tagGo)
 		w.p("}")
@@ -896,15 +1340,15 @@ func (g *gen) emitGuestResource(w *writer, r *resource) {
 	w.p("return x.inst.DropResource(ctx, %q, %q, x.handle)", r.key.Interface, r.key.Name)
 	w.p("}")
 	w.p("")
-	w.p("func lift%s(h *witgo.Handles, v component.Value, _ bool) (%s, error) {", r.goName, r.goName)
+	w.p("func %s(h *witgo.Handles, v component.Value, _ bool) (%s, error) {", r.liftName, r.goName)
 	w.p("x, err := witgo.U32(v)")
 	w.p("return %s{inst: h.Inst, handle: x}, err", r.goName)
 	w.p("}")
 	w.p("")
-	w.p("func lower%s(_ *witgo.Handles, x %s, _ bool) component.Value { return x.handle }", r.goName, r.goName)
+	w.p("func %s(_ *witgo.Handles, x %s, _ bool) component.Value { return x.handle }", r.lowerName, r.goName)
 }
 
-func (g *gen) emitType(w *writer, t *typ) {
+func (g *gen) emitType(w *writer, c *unit, t *typ) {
 	w.p("")
 	switch t.kind {
 	case kTuple:
@@ -915,14 +1359,14 @@ func (g *gen) emitType(w *writer, t *typ) {
 		}
 		w.p("type %s struct {", t.goName)
 		for i, e := range t.elems {
-			w.p("F%d %s", i, e.goType())
+			w.p("F%d %s", i, e.goType(c))
 		}
 		w.p("}")
 	case kRecord:
 		w.p("// %s is the WIT record %s.", t.goName, t.witName)
 		w.p("type %s struct {", t.goName)
 		for _, m := range t.members {
-			w.p("%s %s", m.goName, m.t.goType())
+			w.p("%s %s", m.goName, m.t.goType(c))
 		}
 		w.p("}")
 	case kEnum, kFlags:
@@ -935,11 +1379,12 @@ func (g *gen) emitType(w *writer, t *typ) {
 		w.p("")
 		w.p("const (")
 		for i, l := range t.labels {
-			w.p(val, g.claim(t.goName+pascal(l)), t.goName, i)
+			w.p(val, c.claim(t.goName+pascal(l)), t.goName, i)
 		}
 		w.p(")")
 	case kVariant:
-		caseType := g.claim(t.goName + "Case")
+		caseType := c.claim(t.goName + "Case")
+		t.caseType = caseType
 		w.p("// %s is the WIT variant %s: Case says which case it holds.", t.goName, t.witName)
 		w.p("type %s struct {", t.goName)
 		w.p("Case %s", caseType)
@@ -952,12 +1397,12 @@ func (g *gen) emitType(w *writer, t *typ) {
 		w.p("const (")
 		consts := make([]string, len(t.members))
 		for i, m := range t.members {
-			consts[i] = g.claim(caseType + m.goName)
+			consts[i] = c.claim(caseType + m.goName)
 			w.p("%s %s = %d", consts[i], caseType, i)
 		}
 		w.p(")")
 		for i, m := range t.members {
-			ctor := g.claim(t.goName + m.goName)
+			ctor := c.claim(t.goName + m.goName)
 			w.p("")
 			if m.t == nil {
 				w.p("// %s is the %s case of %s.", ctor, m.wit, t.goName)
@@ -965,35 +1410,38 @@ func (g *gen) emitType(w *writer, t *typ) {
 				continue
 			}
 			w.p("// %s is the %s case of %s, holding v.", ctor, m.wit, t.goName)
-			w.p("func %s(v %s) %s { return %s{Case: %s, payload: v} }", ctor, m.t.goType(), t.goName, t.goName, consts[i])
+			w.p("func %s(v %s) %s { return %s{Case: %s, payload: v} }", ctor, m.t.goType(c), t.goName, t.goName, consts[i])
 			w.p("")
 			w.p("// %s is the %s case's payload, and whether x holds that case.", m.goName, m.wit)
-			w.p("func (x %s) %s() (%s, bool) {", t.goName, m.goName, m.t.goType())
-			w.p("v, ok := x.payload.(%s)", m.t.goType())
+			w.p("func (x %s) %s() (%s, bool) {", t.goName, m.goName, m.t.goType(c))
+			w.p("v, ok := x.payload.(%s)", m.t.goType(c))
 			w.p("return v, ok && x.Case == %s", consts[i])
 			w.p("}")
 		}
 	}
 }
 
-func (g *gen) emitConv(w *writer, t *typ) {
-	gt, n := t.goType(), t.convName()
+func (g *gen) emitConv(w *writer, c *unit, t *typ) {
+	gt, lift, lower := t.goType(c), t.liftFn(c), t.lowerFn(c)
 	ws := t.witString()
 	w.p("")
-	w.p("func lift%s(h *witgo.Handles, v component.Value) (%s, error) {", n, gt)
+	if c.exported() && t.goName != "" {
+		w.p("// %s reads a %s from v, with h for the handles in it.", lift, t.goName)
+	}
+	w.p("func %s(h *witgo.Handles, v component.Value) (%s, error) {", lift, gt)
 	switch t.kind {
 	case kList:
 		w.p("vs, err := witgo.Values(v, -1, %q)", ws)
 		w.p("if err != nil { return nil, err }")
 		w.p("out := make(%s, len(vs))", gt)
 		w.p("for i, e := range vs {")
-		w.p("if out[i], err = %s; err != nil { return nil, err }", t.elem.lift("h", "e"))
+		w.p("if out[i], err = %s; err != nil { return nil, err }", t.elem.lift(c, "h", "e"))
 		w.p("}")
 		w.p("return out, nil")
 	case kFixed:
 		w.p("var out %s", gt)
 		if t.elem.fixedWidth() {
-			w.p("s, err := component.ListOf[%s](v)", t.elem.goType())
+			w.p("s, err := component.ListOf[%s](v)", t.elem.goType(c))
 			w.p("if err != nil { return out, err }")
 		} else {
 			w.p("s, err := witgo.Values(v, -1, %q)", ws)
@@ -1004,7 +1452,7 @@ func (g *gen) emitConv(w *writer, t *typ) {
 			w.p("copy(out[:], s)")
 		} else {
 			w.p("for i, e := range s {")
-			w.p("if out[i], err = %s; err != nil { return out, err }", t.elem.lift("h", "e"))
+			w.p("if out[i], err = %s; err != nil { return out, err }", t.elem.lift(c, "h", "e"))
 			w.p("}")
 		}
 		w.p("return out, nil")
@@ -1013,7 +1461,7 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		if t.elem.kind == kOption {
 			w.p("if s, ok := v.(component.Some); ok { v = s.Value }")
 		}
-		w.p("x, err := %s", t.elem.lift("h", "v"))
+		w.p("x, err := %s", t.elem.lift(c, "h", "v"))
 		w.p("if err != nil { return nil, err }")
 		w.p("return &x, nil")
 	case kResult:
@@ -1022,10 +1470,10 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("if err != nil { return out, err }")
 		w.p("out.IsErr = r.IsErr")
 		if t.ok != nil {
-			w.p("if !r.IsErr { out.Ok, err = %s }", t.ok.lift("h", "r.Payload"))
+			w.p("if !r.IsErr { out.Ok, err = %s }", t.ok.lift(c, "h", "r.Payload"))
 		}
 		if t.err != nil {
-			w.p("if r.IsErr { out.Err, err = %s }", t.err.lift("h", "r.Payload"))
+			w.p("if r.IsErr { out.Err, err = %s }", t.err.lift(c, "h", "r.Payload"))
 		}
 		w.p("return out, err")
 	case kTuple, kRecord:
@@ -1040,7 +1488,7 @@ func (g *gen) emitConv(w *writer, t *typ) {
 			} else {
 				field, et = t.members[i].goName, t.members[i].t
 			}
-			w.p("if out.%s, err = %s; err != nil { return out, err }", field, et.lift("h", fmt.Sprintf("vs[%d]", i)))
+			w.p("if out.%s, err = %s; err != nil { return out, err }", field, et.lift(c, "h", fmt.Sprintf("vs[%d]", i)))
 		}
 		w.p("return out, nil")
 	case kVariant:
@@ -1048,14 +1496,14 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("vv, err := witgo.Variant(v, %q)", ws)
 		w.p("if err != nil { return out, err }")
 		w.p("if vv.Disc >= %d { return out, fmt.Errorf(\"%%s: case %%d\", %q, vv.Disc) }", len(t.members), ws)
-		w.p("out.Case = %sCase(vv.Disc)", t.goName)
+		w.p("out.Case = %s(vv.Disc)", t.caseType)
 		w.p("switch vv.Disc {")
 		for i, m := range t.members {
 			if m.t == nil {
 				continue
 			}
 			w.p("case %d:", i)
-			w.p("p, err := %s", m.t.lift("h", "vv.Payload"))
+			w.p("p, err := %s", m.t.lift(c, "h", "vv.Payload"))
 			w.p("if err != nil { return out, err }")
 			w.p("out.payload = p")
 		}
@@ -1074,44 +1522,47 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("for _, e := range vs {")
 		w.p("kv, err := witgo.Values(e, 2, %q)", ws)
 		w.p("if err != nil { return nil, err }")
-		w.p("k, err := %s", t.key.lift("h", "kv[0]"))
+		w.p("k, err := %s", t.key.lift(c, "h", "kv[0]"))
 		w.p("if err != nil { return nil, err }")
-		w.p("if out[k], err = %s; err != nil { return nil, err }", t.elem.lift("h", "kv[1]"))
+		w.p("if out[k], err = %s; err != nil { return nil, err }", t.elem.lift(c, "h", "kv[1]"))
 		w.p("}")
 		w.p("return out, nil")
 	}
 	w.p("}")
 	w.p("")
-	w.p("func lower%s(h *witgo.Handles, x %s) component.Value {", n, gt)
+	if c.exported() && t.goName != "" {
+		w.p("// %s writes x, with h for the handles in it.", lower)
+	}
+	w.p("func %s(h *witgo.Handles, x %s) component.Value {", lower, gt)
 	switch t.kind {
 	case kList, kFixed:
 		w.p("out := make([]component.Value, len(x))")
-		w.p("for i, e := range x { out[i] = %s }", t.elem.lower("h", "e"))
+		w.p("for i, e := range x { out[i] = %s }", t.elem.lower(c, "h", "e"))
 		w.p("return out")
 	case kOption:
 		w.p("if x == nil { return nil }")
 		if t.elem.kind == kOption {
-			w.p("return component.Some{Value: %s}", t.elem.lower("h", "*x"))
+			w.p("return component.Some{Value: %s}", t.elem.lower(c, "h", "*x"))
 		} else {
-			w.p("return %s", t.elem.lower("h", "*x"))
+			w.p("return %s", t.elem.lower(c, "h", "*x"))
 		}
 	case kResult:
 		okv, errv := "nil", "nil"
 		if t.ok != nil {
-			okv = t.ok.lower("h", "x.Ok")
+			okv = t.ok.lower(c, "h", "x.Ok")
 		}
 		if t.err != nil {
-			errv = t.err.lower("h", "x.Err")
+			errv = t.err.lower(c, "h", "x.Err")
 		}
 		w.p("if x.IsErr { return component.ResultValue{IsErr: true, Payload: %s} }", errv)
 		w.p("return component.ResultValue{Payload: %s}", okv)
 	case kTuple, kRecord:
 		var parts []string
 		for i, e := range t.elems {
-			parts = append(parts, e.lower("h", fmt.Sprintf("x.F%d", i)))
+			parts = append(parts, e.lower(c, "h", fmt.Sprintf("x.F%d", i)))
 		}
 		for _, m := range t.members {
-			parts = append(parts, m.t.lower("h", "x."+m.goName))
+			parts = append(parts, m.t.lower(c, "h", "x."+m.goName))
 		}
 		w.p("return []component.Value{%s}", strings.Join(parts, ", "))
 	case kVariant:
@@ -1121,8 +1572,8 @@ func (g *gen) emitConv(w *writer, t *typ) {
 				continue
 			}
 			w.p("case %d:", i)
-			w.p("p, _ := x.payload.(%s)", m.t.goType())
-			w.p("return component.VariantValue{Disc: %d, Payload: %s}", i, m.t.lower("h", "p"))
+			w.p("p, _ := x.payload.(%s)", m.t.goType(c))
+			w.p("return component.VariantValue{Disc: %d, Payload: %s}", i, m.t.lower(c, "h", "p"))
 		}
 		w.p("}")
 		w.p("return component.VariantValue{Disc: uint32(x.Case)}")
@@ -1130,14 +1581,14 @@ func (g *gen) emitConv(w *writer, t *typ) {
 		w.p("return uint32(x)")
 	case kMap:
 		w.p("out := make([]component.Value, 0, len(x))")
-		w.p("for k, e := range x { out = append(out, []component.Value{%s, %s}) }", t.key.lower("h", "k"), t.elem.lower("h", "e"))
+		w.p("for k, e := range x { out = append(out, []component.Value{%s, %s}) }", t.key.lower(c, "h", "k"), t.elem.lower(c, "h", "e"))
 		w.p("return out")
 	}
 	w.p("}")
 }
 
 // ref is a Go expression building t's TypeRef in the TypeTable tbl.
-func (t *typ) ref(names map[*typ]string) string {
+func (t *typ) ref(c *unit, names map[*typ]string) string {
 	if v, ok := names[t]; ok {
 		return v
 	}
@@ -1145,23 +1596,23 @@ func (t *typ) ref(names map[*typ]string) string {
 	case kPrim:
 		return fmt.Sprintf("component.Prim(%q)", t.prim)
 	case kList:
-		return "tbl.List(" + t.elem.ref(names) + ")"
+		return "tbl.List(" + t.elem.ref(c, names) + ")"
 	case kFixed:
-		return fmt.Sprintf("tbl.FixedList(%s, %d)", t.elem.ref(names), t.n)
+		return fmt.Sprintf("tbl.FixedList(%s, %d)", t.elem.ref(c, names), t.n)
 	case kOption:
-		return "tbl.Option(" + t.elem.ref(names) + ")"
+		return "tbl.Option(" + t.elem.ref(c, names) + ")"
 	case kResult:
-		return "tbl.Result(" + t.ok.armRef(names) + ", " + t.err.armRef(names) + ")"
+		return "tbl.Result(" + t.ok.armRef(c, names) + ", " + t.err.armRef(c, names) + ")"
 	case kTuple:
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
-			parts[i] = e.ref(names)
+			parts[i] = e.ref(c, names)
 		}
 		return "tbl.Tuple(" + strings.Join(parts, ", ") + ")"
 	case kRecord:
 		var parts []string
 		for _, m := range t.members {
-			parts = append(parts, fmt.Sprintf("%q", m.wit), m.t.ref(names))
+			parts = append(parts, fmt.Sprintf("%q", m.wit), m.t.ref(c, names))
 		}
 		return "tbl.Record(" + strings.Join(parts, ", ") + ")"
 	case kVariant:
@@ -1170,7 +1621,7 @@ func (t *typ) ref(names map[*typ]string) string {
 			if m.t == nil {
 				parts = append(parts, fmt.Sprintf("component.VariantCaseSpec{Name: %q}", m.wit))
 			} else {
-				parts = append(parts, fmt.Sprintf("component.VariantCaseSpec{Name: %q, Type: %s}", m.wit, m.t.ref(names)))
+				parts = append(parts, fmt.Sprintf("component.VariantCaseSpec{Name: %q, Type: %s}", m.wit, m.t.ref(c, names)))
 			}
 		}
 		return "tbl.Variant(" + strings.Join(parts, ", ") + ")"
@@ -1185,45 +1636,46 @@ func (t *typ) ref(names map[*typ]string) string {
 		}
 		return "tbl." + what + "(" + strings.Join(parts, ", ") + ")"
 	case kHandle:
+		tag := c.qualify(t.res.unit, t.res.tagGo)
 		if t.own {
-			return "tbl.Own(" + t.res.tagGo + ")"
+			return "tbl.Own(" + tag + ")"
 		}
-		return "tbl.Borrow(" + t.res.tagGo + ")"
+		return "tbl.Borrow(" + tag + ")"
 	case kStream:
-		return "tbl.Stream(" + t.elem.armRef(names) + ")"
+		return "tbl.Stream(" + t.elem.armRef(c, names) + ")"
 	case kFuture:
-		return "tbl.Future(" + t.elem.armRef(names) + ")"
+		return "tbl.Future(" + t.elem.armRef(c, names) + ")"
 	case kErrorContext:
 		return `component.Prim("error-context")`
 	}
-	return "tbl.Map(" + t.key.ref(names) + ", " + t.elem.ref(names) + ")"
+	return "tbl.Map(" + t.key.ref(c, names) + ", " + t.elem.ref(c, names) + ")"
 }
 
-func (t *typ) armRef(names map[*typ]string) string {
+func (t *typ) armRef(c *unit, names map[*typ]string) string {
 	if t == nil {
 		return "component.TypeRef{}"
 	}
-	return t.ref(names)
+	return t.ref(c, names)
 }
 
 // defineRefs writes a local holding the TypeRef of each named type in t, in
 // tbl, before a ref to it, recording it in names.
-func defineRefs(w *writer, names map[*typ]string, t *typ) {
+func defineRefs(w *writer, c *unit, names map[*typ]string, t *typ) {
 	if t == nil {
 		return
 	}
-	for _, c := range []*typ{t.elem, t.key, t.ok, t.err} {
-		defineRefs(w, names, c)
+	for _, e := range []*typ{t.elem, t.key, t.ok, t.err} {
+		defineRefs(w, c, names, e)
 	}
-	for _, c := range t.elems {
-		defineRefs(w, names, c)
+	for _, e := range t.elems {
+		defineRefs(w, c, names, e)
 	}
 	for _, m := range t.members {
-		defineRefs(w, names, m.t)
+		defineRefs(w, c, names, m.t)
 	}
 	if _, ok := names[t]; t.goName != "" && !ok {
 		v := fmt.Sprintf("t%d", len(names)+1)
-		w.p("%s := %s", v, t.ref(names))
+		w.p("%s := %s", v, t.ref(c, names))
 		names[t] = v
 	}
 }
@@ -1256,17 +1708,17 @@ func (b *fn) methodName() string {
 
 // goParams is the method's parameter list after ctx, from its skip'th WIT
 // parameter on, and the names used.
-func (b *fn) goParams(skip int) (string, []string) {
+func (b *fn) goParams(c *unit, skip int) (string, []string) {
 	var parts, names []string
 	seen := map[string]bool{"ctx": true}
 	for _, p := range b.params[skip:] {
 		n := camel(p.wit)
-		if reservedNames[n] || seen[n] {
+		if reservedNames[n] || seen[n] || c.pkgNames[n] {
 			n += "_"
 		}
 		seen[n] = true
 		names = append(names, n)
-		parts = append(parts, n+" "+p.t.goType())
+		parts = append(parts, n+" "+p.t.goType(c))
 	}
 	return strings.Join(parts, ", "), names
 }
@@ -1307,13 +1759,13 @@ func importHandles(t *typ) string {
 }
 
 // resultType is the Go type of the function's result, struct{} for none.
-func (b *fn) resultType() string { return b.result.armType() }
+func (b *fn) resultType(c *unit) string { return b.result.armType(c) }
 
-func (b *fn) goResults() string {
+func (b *fn) goResults(c *unit) string {
 	if b.result == nil {
 		return "error"
 	}
-	return "(" + b.result.goType() + ", error)"
+	return "(" + b.result.goType(c) + ", error)"
 }
 
 func (g *gen) emitImports(w *writer) {
@@ -1324,15 +1776,17 @@ func (g *gen) emitImports(w *writer) {
 	w.p("// Imports are the host's implementations of the world's imports.")
 	w.p("type Imports struct {")
 	for _, in := range g.imports {
-		w.p("%s %s", in.field, in.goName)
+		w.p("%s %s", in.field, g.root.qualify(in.unit, in.goName))
 	}
 	w.p("}")
 	for _, in := range g.imports {
-		g.emitImport(w, in)
+		if in.unit == g.root {
+			g.emitImport(w, g.root, in)
+		}
 	}
 }
 
-func (g *gen) emitImport(w *writer, in *iface) {
+func (g *gen) emitImport(w *writer, c *unit, in *iface) {
 	w.p("")
 	if in.name != "" {
 		w.p("// %s is the host's implementation of %s.", in.goName, in.name)
@@ -1345,23 +1799,26 @@ func (g *gen) emitImport(w *writer, in *iface) {
 		b.goName = unique(names, b.methodName())
 		if b.dropFor != nil {
 			w.p("// %s releases a %s the guest dropped.", b.goName, b.dropFor.goName)
-			w.p("%s(ctx context.Context, self %s) error", b.goName, b.dropFor.goName)
+			w.p("%s(ctx context.Context, self %s) error", b.goName, c.qualify(b.dropFor.unit, b.dropFor.goName))
 			continue
 		}
-		params, _ := b.goParams(0)
+		params, _ := b.goParams(c, 0)
 		if params != "" {
 			params = ", " + params
 		}
 		if b.async {
 			w.p("// %s is async: it may return its result through ret after it returns.", b.goName)
-			w.p("%s(ctx context.Context%s, ret witgo.Async[%s]) error", b.goName, params, b.resultType())
+			w.p("%s(ctx context.Context%s, ret witgo.Async[%s]) error", b.goName, params, b.resultType(c))
 			continue
 		}
-		w.p("%s(ctx context.Context%s) %s", b.goName, params, b.goResults())
+		w.p("%s(ctx context.Context%s) %s", b.goName, params, b.goResults(c))
 	}
 	w.p("}")
 	w.p("")
-	w.p("func options%s(impl %s) []component.Option {", in.goName, in.goName)
+	if c.exported() {
+		w.p("// %s are the options registering impl as the host's %s.", in.options, in.name)
+	}
+	w.p("func %s(impl %s) []component.Option {", in.options, in.goName)
 	calls := slices.ContainsFunc(in.funcs, func(b *fn) bool { return b.dropFor == nil })
 	if calls {
 		w.p("tbl := component.NewTypeTable()")
@@ -1369,9 +1826,9 @@ func (g *gen) emitImport(w *writer, in *iface) {
 	names2 := map[*typ]string{}
 	for _, b := range in.funcs {
 		for _, p := range b.params {
-			defineRefs(w, names2, p.t)
+			defineRefs(w, c, names2, p.t)
 		}
-		defineRefs(w, names2, b.result)
+		defineRefs(w, c, names2, b.result)
 	}
 	if calls {
 		w.p("resolve := tbl.Resolver()")
@@ -1389,20 +1846,21 @@ func (g *gen) emitImport(w *writer, in *iface) {
 	for _, b := range in.funcs {
 		if b.dropFor != nil {
 			r := b.dropFor
-			w.p("component.WithResourceTag(%q, %q, %s),", ifaceName, r.key.Name, r.tagGo)
-			w.p("component.WithHostResourceDtor(%s, func(ctx context.Context, rep uint32) error { return impl.%s(ctx, %s(rep)) }),", r.tagGo, b.goName, r.goName)
+			tag := c.qualify(r.unit, r.tagGo)
+			w.p("component.WithResourceTag(%q, %q, %s),", ifaceName, r.key.Name, tag)
+			w.p("component.WithHostResourceDtor(%s, func(ctx context.Context, rep uint32) error { return impl.%s(ctx, %s(rep)) }),", tag, b.goName, c.qualify(r.unit, r.goName))
 			continue
 		}
 		var refs []string
 		for _, p := range b.params {
-			refs = append(refs, p.t.ref(names2))
+			refs = append(refs, p.t.ref(c, names2))
 		}
 		res := "component.TypeRef{}"
 		if b.result != nil {
-			res = b.result.ref(names2)
+			res = b.result.ref(c, names2)
 		}
 		if b.async {
-			g.emitAsyncImport(w, b, ifaceName, refs, res)
+			g.emitAsyncImport(w, c, b, ifaceName, refs, res)
 			continue
 		}
 		w.p("component.WithImportCustom(%q, %q, func(ctx context.Context, args []component.Value) ([]component.Value, error) {", ifaceName, b.f.Name)
@@ -1410,9 +1868,9 @@ func (g *gen) emitImport(w *writer, in *iface) {
 		if b.nestedHandles() {
 			w.p("h := &witgo.Handles{Table: table}")
 		}
-		_, pn := b.goParams(0)
+		_, pn := b.goParams(c, 0)
 		for i, p := range b.params {
-			w.p("%s, err := %s", pn[i], p.t.lift(importHandles(p.t), fmt.Sprintf("args[%d]", i)))
+			w.p("%s, err := %s", pn[i], p.t.lift(c, importHandles(p.t), fmt.Sprintf("args[%d]", i)))
 			w.p("if err != nil { return nil, fmt.Errorf(\"%%s: %%s: %%w\", %q, %q, err) }", b.f.Name, p.wit)
 		}
 		call := "impl." + b.goName + "(" + strings.Join(append([]string{"ctx"}, pn...), ", ") + ")"
@@ -1421,7 +1879,7 @@ func (g *gen) emitImport(w *writer, in *iface) {
 		} else {
 			w.p("r, err := %s", call)
 			w.p("if err != nil { return nil, err }")
-			w.p("return []component.Value{%s}, nil", b.result.lower(importHandles(b.result), "r"))
+			w.p("return []component.Value{%s}, nil", b.result.lower(c, importHandles(b.result), "r"))
 		}
 		w.p("}, tbl.Func([]component.TypeRef{%s}, %s), resolve),", strings.Join(refs, ", "), res)
 	}
@@ -1431,22 +1889,22 @@ func (g *gen) emitImport(w *writer, in *iface) {
 
 // emitAsyncImport writes the registration of the async import b, whose host
 // function completes the call through a witgo.Async.
-func (g *gen) emitAsyncImport(w *writer, b *fn, ifaceName string, refs []string, res string) {
+func (g *gen) emitAsyncImport(w *writer, c *unit, b *fn, ifaceName string, refs []string, res string) {
 	w.p("component.WithAsyncImportCustom(%q, %q, func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {", ifaceName, b.f.Name)
 	w.p("if len(args) != %d { return fmt.Errorf(\"%%s: %%d args\", %q, len(args)) }", len(b.params), b.f.Name)
 	if b.nestedHandles() {
 		w.p("h := &witgo.Handles{Table: table}")
 	}
-	_, pn := b.goParams(0)
+	_, pn := b.goParams(c, 0)
 	for i, p := range b.params {
-		w.p("%s, err := %s", pn[i], p.t.lift(importHandles(p.t), fmt.Sprintf("args[%d]", i)))
+		w.p("%s, err := %s", pn[i], p.t.lift(c, importHandles(p.t), fmt.Sprintf("args[%d]", i)))
 		w.p("if err != nil { return fmt.Errorf(\"%%s: %%s: %%w\", %q, %q, err) }", b.f.Name, p.wit)
 	}
 	lower := "return nil"
 	if b.result != nil {
-		lower = "return []component.Value{" + b.result.lower(importHandles(b.result), "r") + "}"
+		lower = "return []component.Value{" + b.result.lower(c, importHandles(b.result), "r") + "}"
 	}
-	w.p("ret := witgo.NewAsync(call, func(r %s) []component.Value { %s })", b.resultType(), lower)
+	w.p("ret := witgo.NewAsync(call, func(r %s) []component.Value { %s })", b.resultType(c), lower)
 	w.p("return impl.%s(%s)", b.goName, strings.Join(append(append([]string{"ctx"}, pn...), "ret"), ", "))
 	w.p("}, tbl.Func([]component.TypeRef{%s}, %s), resolve),", strings.Join(refs, ", "), res)
 }
@@ -1468,7 +1926,7 @@ func (g *gen) emitExports(w *writer) {
 		w.p("var o []component.Option")
 		for _, in := range g.imports {
 			w.p("if imports.%s == nil { return nil, fmt.Errorf(\"%s: imports.%s is nil\") }", in.field, g.world.Name, in.field)
-			w.p("o = append(o, options%s(imports.%s)...)", in.goName, in.field)
+			w.p("o = append(o, %s(imports.%s)...)", g.root.qualify(in.unit, in.options), in.field)
 		}
 	}
 	w.p("inst, err := component.Instantiate(ctx, r, wasm, append(o, opts...)...)")
@@ -1557,6 +2015,7 @@ func memberTypes(ms []member) []*typ {
 // method making one: the host keeps the writer, and passes the reader to the
 // guest or reads it itself.
 func (g *gen) emitStreamCtors(w *writer, taken map[string]bool) {
+	c := g.root
 	ts := g.asyncTypes()
 	if len(ts) == 0 {
 		return
@@ -1572,7 +2031,7 @@ func (g *gen) emitStreamCtors(w *writer, taken map[string]bool) {
 	}
 	elems := ""
 	if len(distinct) > 0 {
-		elems = g.claim("elemTypes")
+		elems = c.claim("elemTypes")
 		w.p("")
 		w.p("// %s are the element types of the world's streams and futures.", elems)
 		w.p("var %s struct {", elems)
@@ -1584,8 +2043,8 @@ func (g *gen) emitStreamCtors(w *writer, taken map[string]bool) {
 		w.p("tbl := component.NewTypeTable()")
 		names := map[*typ]string{}
 		for i, t := range distinct {
-			defineRefs(w, names, t)
-			w.p("%s.t[%d] = %s", elems, i, t.ref(names))
+			defineRefs(w, c, names, t)
+			w.p("%s.t[%d] = %s", elems, i, t.ref(c, names))
 		}
 		w.p("%s.resolve = tbl.Resolver()", elems)
 		w.p("}")
@@ -1596,7 +2055,7 @@ func (g *gen) emitStreamCtors(w *writer, taken map[string]bool) {
 			k = "Future"
 		}
 		name := unique(taken, "New"+k+t.elem.label())
-		et := t.elem.armType()
+		et := t.elem.armType(c)
 		elem, resolve := "nil", "nil"
 		if t.elem != nil {
 			elem, resolve = fmt.Sprintf("&%s.t[%d]", elems, idx[t.elem]), elems+".resolve"
@@ -1605,7 +2064,7 @@ func (g *gen) emitStreamCtors(w *writer, taken map[string]bool) {
 		w.p("// %s makes a %s: write to the writer, and pass the reader to the", name, t.witString())
 		w.p("// component or read it.")
 		w.p("func (x *%s) %s() (*witgo.%sWriter[%s], *witgo.%sReader[%s], error) {", g.worldGo, name, k, et, k, et)
-		w.p("return witgo.New%s(x.inst, %s, %s, %s, %s)", k, elem, resolve, t.elem.elemLift(), t.elem.elemLower())
+		w.p("return witgo.New%s(x.inst, %s, %s, %s, %s)", k, elem, resolve, t.elem.elemLift(c), t.elem.elemLower(c))
 		w.p("}")
 	}
 }
@@ -1646,8 +2105,9 @@ func (t *typ) label() string {
 // skip'th parameter on, the first being a resource method's self, which the
 // receiver is.
 func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map[string]bool, skip int) {
+	c := g.root
 	b.goName = unique(names, b.methodName())
-	params, pn := b.goParams(skip)
+	params, pn := b.goParams(c, skip)
 	if params != "" {
 		params = ", " + params
 	}
@@ -1661,7 +2121,7 @@ func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map
 		args = append(args, "x.handle")
 	}
 	for i, p := range b.params[skip:] {
-		args = append(args, p.t.lower(h, pn[i]))
+		args = append(args, p.t.lower(c, h, pn[i]))
 	}
 	call := fmt.Sprintf("x.inst.Call(ctx, %q", b.f.Name)
 	table := "x.inst.Resources()"
@@ -1675,7 +2135,7 @@ func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map
 	call += ")"
 	w.p("")
 	w.p("// %s calls the export %s.", b.goName, b.f.Name)
-	w.p("func (%s) %s(ctx context.Context%s) %s {", recv, b.goName, params, b.goResults())
+	w.p("func (%s) %s(ctx context.Context%s) %s {", recv, b.goName, params, b.goResults(c))
 	if h == "h" {
 		w.p("h := &witgo.Handles{Table: %s, Inst: x.inst}", table)
 	}
@@ -1690,9 +2150,9 @@ func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map
 	if b.result == nil {
 		w.p("return err")
 	} else {
-		w.p("if err != nil { var zero %s; return zero, err }", b.result.goType())
-		w.p("if len(res) != 1 { var zero %s; return zero, fmt.Errorf(\"%%s: %%d results\", %q, len(res)) }", b.result.goType(), b.f.Name)
-		w.p("return %s", b.result.lift(h, "res[0]"))
+		w.p("if err != nil { var zero %s; return zero, err }", b.result.goType(c))
+		w.p("if len(res) != 1 { var zero %s; return zero, fmt.Errorf(\"%%s: %%d results\", %q, len(res)) }", b.result.goType(c), b.f.Name)
+		w.p("return %s", b.result.lift(c, h, "res[0]"))
 	}
 	w.p("}")
 	if b.async {
@@ -1704,8 +2164,9 @@ func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map
 // returns once the call first waits, for an import the host completes later
 // from another goroutine.
 func (g *gen) emitExportAsync(w *writer, recv, ifaceName string, b *fn, names map[string]bool, args []string, table, h string) {
+	c := g.root
 	name := unique(names, b.goName+"Async")
-	params, _ := b.goParams(b.skip())
+	params, _ := b.goParams(c, b.skip())
 	if params != "" {
 		params = ", " + params
 	}
@@ -1718,7 +2179,7 @@ func (g *gen) emitExportAsync(w *writer, recv, ifaceName string, b *fn, names ma
 		call += ", " + strings.Join(args, ", ")
 	}
 	call += ")"
-	rt := b.resultType()
+	rt := b.resultType(c)
 	w.p("")
 	w.p("// %s starts the export %s and returns once it first waits; Await the result.", name, b.f.Name)
 	w.p("func (%s) %s(ctx context.Context%s) (*witgo.Pending[%s], error) {", recv, name, params, rt)
@@ -1741,7 +2202,7 @@ func (g *gen) emitExportAsync(w *writer, recv, ifaceName string, b *fn, names ma
 		w.p("return zero, nil")
 	} else {
 		w.p("if len(res) != 1 { return zero, fmt.Errorf(\"%%s: %%d results\", %q, len(res)) }", b.f.Name)
-		w.p("return %s", b.result.lift(h, "res[0]"))
+		w.p("return %s", b.result.lift(c, h, "res[0]"))
 	}
 	w.p("}), nil")
 	w.p("}")

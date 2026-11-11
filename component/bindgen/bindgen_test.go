@@ -10,6 +10,7 @@ import (
 	"go/types"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 //go:embed internal/kitchen/guest/wit internal/kitchen/bindings.go
 //go:embed internal/convtest/conv.wit internal/convtest/bindings.go
 //go:embed internal/storebind/store.wit internal/storebind/bindings.go
+//go:embed internal/storebind/tree internal/storebind/with
 var fixtures embed.FS
 
 // The committed bindings of each fixture are what Generate writes today: a
@@ -51,6 +53,54 @@ func TestGolden(t *testing.T) {
 }
 
 // generate parses the fixture WIT at path, a file or a directory of them.
+// The store fixture as a tree, and as one file using the tree's kv, are
+// what GenerateTree and Generate With write today.
+func TestGoldenTree(t *testing.T) {
+	const base = "github.com/samyfodil/wazy/component/bindgen/internal/storebind/tree"
+	files, err := generateTree(t, "internal/storebind/store.wit", Options{Package: "app", World: "app"}, base)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(files))
+	with, err := generate("internal/storebind/store.wit", Options{
+		Package: "with", World: "app",
+		With: map[string]string{"example:store/kv": base + "/example/store/v1.0.0/kv"},
+	})
+	require.NoError(t, err)
+	files = append(files, File{Path: "../with/bindings.go", Src: with})
+	for _, f := range files {
+		want, err := fixtures.ReadFile(path.Clean("internal/storebind/tree/" + f.Path))
+		require.NoError(t, err)
+		if string(want) != string(f.Src) {
+			t.Fatalf("%s is stale: regenerate it with cmd/wazy-bindgen, as storebind/shared_test.go says", f.Path)
+		}
+	}
+}
+
+// The kitchen world as a tree, and as one file using the tree's interface
+// packages, compiles: streams, futures, async, handles nested and not, and
+// error contexts, across packages.
+func TestGenerateKitchenTree(t *testing.T) {
+	const base = "example.com/k"
+	files, err := generateTree(t, "internal/kitchen/guest/wit", Options{Package: "kitchen", World: "kitchen"}, base)
+	require.NoError(t, err)
+	typecheckTree(t, base, files)
+	with, err := generate("internal/kitchen/guest/wit", Options{
+		Package: "with", World: "kitchen",
+		With: map[string]string{
+			"wazy:bindgen-test/types": base + "/wazy/bindgen-test/v0.1.0/types",
+			"wazy:bindgen-test/host":  base + "/wazy/bindgen-test/v0.1.0/host",
+		},
+	})
+	require.NoError(t, err)
+	var shared []File
+	for _, f := range files {
+		if !strings.HasPrefix(f.Path, "kitchen/") {
+			shared = append(shared, f)
+		}
+	}
+	typecheckTree(t, base, append(shared, File{Path: "with/bindings.go", Src: with}))
+	require.False(t, strings.Contains(string(with), "type Point struct"), "the types are the tree's")
+}
+
 func generate(path string, opts Options) ([]byte, error) {
 	var pkg *wit.Package
 	var err error
@@ -66,6 +116,25 @@ func generate(path string, opts Options) ([]byte, error) {
 		return nil, err
 	}
 	return Generate(pkg, opts)
+}
+
+// generateTree is GenerateTree on the fixture WIT at path.
+func generateTree(t *testing.T, path string, opts Options, base string) ([]File, error) {
+	t.Helper()
+	var pkg *wit.Package
+	var err error
+	if strings.HasSuffix(path, ".wit") {
+		var src []byte
+		if src, err = fixtures.ReadFile(path); err == nil {
+			pkg, err = wit.Parse(path, string(src))
+		}
+	} else {
+		pkg, err = wit.ParseFS(fixtures, path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return GenerateTree(pkg, opts, base)
 }
 
 func genSrc(t *testing.T, src string, opts Options) (string, error) {
@@ -90,6 +159,52 @@ var (
 	srcFset     = token.NewFileSet()
 	srcImporter = sourceImporter()
 )
+
+// typecheckTree fails t unless every package of files, a GenerateTree
+// output under base, compiles against wazy and the others.
+func typecheckTree(t *testing.T, base string, files []File) {
+	t.Helper()
+	if !haveToolchain() {
+		t.Log("no Go toolchain to type-check the generated code against")
+		return
+	}
+	ti := &treeImporter{files: map[string][]byte{}, pkgs: map[string]*types.Package{}}
+	for _, f := range files {
+		ti.files[base+"/"+path.Dir(f.Path)] = f.Src
+	}
+	for p := range ti.files {
+		if _, err := ti.Import(p); err != nil {
+			t.Fatalf("%s does not type-check: %v\n%s", p, err, ti.files[p])
+		}
+	}
+}
+
+// treeImporter type-checks a tree's packages from memory, and everything
+// else from source.
+type treeImporter struct {
+	files map[string][]byte
+	pkgs  map[string]*types.Package
+}
+
+func (ti *treeImporter) Import(p string) (*types.Package, error) {
+	if pkg, ok := ti.pkgs[p]; ok {
+		return pkg, nil
+	}
+	src, ok := ti.files[p]
+	if !ok {
+		return srcImporter.Import(p)
+	}
+	f, err := parser.ParseFile(srcFset, p+"/bindings.go", src, 0)
+	if err != nil {
+		return nil, err
+	}
+	pkg, err := (&types.Config{Importer: ti}).Check(p, srcFset, []*ast.File{f}, nil)
+	if err != nil {
+		return nil, err
+	}
+	ti.pkgs[p] = pkg
+	return pkg, nil
+}
 
 var haveToolchain = sync.OnceValue(func() bool {
 	_, err := os.Stat(filepath.Join(build.Default.GOROOT, "src", "context"))
@@ -392,6 +507,136 @@ func TestUnique(t *testing.T) {
 	set := map[string]bool{}
 	for _, want := range []string{"A", "A_", "A__"} {
 		require.Equal(t, want, unique(set, "A"))
+	}
+}
+
+// An imported interface's own package is the same whichever world it is
+// generated for: one importing more or less, in another order, skipping it
+// or not, binding other interfaces that use its types first.
+func TestGenerateTreeShared(t *testing.T) {
+	src := `package a:b;
+interface types {
+  record point { x: s32, label: string }
+  variant shape { dot(point), none }
+  resource token { constructor(n: u32); peek: func() -> u32; }
+  record unused { p: list<point> }
+}
+interface host {
+  use types.{point, shape, token};
+  record pair { a: point, b: token }
+  mint: func(p: point) -> token;
+  pick: func(s: list<shape>) -> option<pair>;
+}
+interface other { use types.{point}; f: func(p: list<point>) -> u32; }
+world first { import host; import other; export run: func() -> u32; }
+world second { import other; import types; import host; export api: interface { use types.{point, token}; g: func(p: point, t: token, types: u32) -> list<point>; } }`
+	pkg, err := wit.Parse("t.wit", src)
+	require.NoError(t, err)
+	gen := func(world string, skip []string) map[string]string {
+		files, err := GenerateTree(pkg, Options{Package: world, World: world, Skip: skip}, "example.com/b")
+		require.NoError(t, err)
+		typecheckTree(t, "example.com/b", files)
+		out := map[string]string{}
+		for _, f := range files {
+			out[f.Path] = string(f.Src)
+		}
+		return out
+	}
+	a, b := gen("first", nil), gen("second", []string{"a:b/types"})
+	for _, p := range []string{"a/b/types/bindings.go", "a/b/host/bindings.go", "a/b/other/bindings.go"} {
+		require.NotEqual(t, "", a[p], p)
+		if a[p] != b[p] {
+			t.Fatalf("%s differs between worlds:\n%s", p, firstDiff(a[p], b[p]))
+		}
+	}
+	types := a["a/b/types/bindings.go"]
+	for _, want := range []string{
+		"type Unused struct {", "func LiftPoint(h *witgo.Handles, v component.Value) (Point, error) {",
+		"type Token uint32", "TagToken uint32 = ", "type Host interface {", "func Options(impl Host) []component.Option {",
+		"NewToken(ctx context.Context, n uint32) (Token, error)", "DropToken(ctx context.Context, self Token) error",
+	} {
+		require.Contains(t, types, want)
+	}
+	require.Contains(t, a["a/b/host/bindings.go"], `types "example.com/b/a/b/types"`)
+	require.Contains(t, a["a/b/host/bindings.go"], "A types.Point")
+	world := b["second/bindings.go"]
+	for _, want := range []string{
+		"\tOther other.Host\n", "\tHost  host.Host\n", "o = append(o, host.Options(imports.Host)...)",
+		"func (x API) G(ctx context.Context, p types.Point, t types.Token, types_ uint32) ([]types.Point, error) {",
+	} {
+		require.Contains(t, world, want)
+	}
+	require.False(t, strings.Contains(world, "types.Options"), "a skipped interface is left out of Imports")
+}
+
+// A tree with an interface mapped to another package writes none of its
+// own for it, and its other packages use the mapped one.
+func TestGenerateTreeWith(t *testing.T) {
+	src := `package a:b;
+interface types { record point { x: s32 } }
+interface host { use types.{point}; get: func() -> point; }
+world w { use types.{point}; import host; export run: func() -> point; }`
+	pkg, err := wit.Parse("t.wit", src)
+	require.NoError(t, err)
+	files, err := GenerateTree(pkg, Options{Package: "w", World: "w", With: map[string]string{"a:b/types": "example.com/shared/types"}}, "example.com/b")
+	require.NoError(t, err)
+	var paths []string
+	for _, f := range files {
+		paths = append(paths, f.Path)
+		if f.Path == "a/b/host/bindings.go" {
+			require.Contains(t, string(f.Src), `types "example.com/shared/types"`)
+			require.Contains(t, string(f.Src), "Get(ctx context.Context) (types.Point, error)")
+		}
+	}
+	require.Equal(t, []string{"a/b/host/bindings.go", "w/bindings.go"}, paths)
+
+	_, err = GenerateTree(pkg, Options{Package: "w", World: "w"}, "")
+	require.EqualError(t, err, "bindgen: no base import path")
+	_, err = GenerateTree(pkg, Options{Package: "w", World: "nope"}, "example.com/b")
+	require.Error(t, err)
+}
+
+// Two packages of the same name, imported by one file, get aliases of their
+// own; and their two equal records are two types, each its interface's.
+func TestGenerateTreeAliases(t *testing.T) {
+	src := `package r:x;
+world w {
+  use a:b/types.{p};
+  use c:d/types.{p as q};
+  export f: func(a: p, b: q);
+}
+package a:b { interface types { record p { x: u32 } } }
+package c:d { interface types { record p { x: u32 } } }`
+	pkg, err := wit.Parse("t.wit", src)
+	require.NoError(t, err)
+	files, err := GenerateTree(pkg, Options{Package: "w", World: "w"}, "example.com/b")
+	require.NoError(t, err)
+	typecheckTree(t, "example.com/b", files)
+	world := string(files[len(files)-1].Src)
+	require.Contains(t, world, `types "example.com/b/a/b/types"`)
+	require.Contains(t, world, `types2 "example.com/b/c/d/types"`)
+	require.Contains(t, world, "func (x *W) F(ctx context.Context, a types.P, b types2.P) error {")
+}
+
+func TestPackageNames(t *testing.T) {
+	for name, want := range map[string]string{
+		"wasi:io/streams@0.2.0": "wasi/io/v0.2.0/streams",
+		"a:b/incoming-handler":  "a/b/incoming-handler",
+		"label":                 "",
+		"a:b":                   "",
+	} {
+		got, ok := witPackage(name)
+		require.Equal(t, want, got, name)
+		require.Equal(t, want != "", ok, name)
+	}
+	for name, want := range map[string]string{
+		"wasi:io/streams@0.2.0":      "streams",
+		"wasi:http/incoming-handler": "incominghandler",
+		"wasi:io/error@0.2.0":        "ioerror",   // error is predeclared
+		"a:my-pkg/type":              "mypkgtype", // type is a keyword
+		"a:b/fmt":                    "bfmt",      // fmt is an import of every file
+	} {
+		require.Equal(t, want, goPackageName(name), name)
 	}
 }
 
