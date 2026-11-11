@@ -92,30 +92,25 @@ func typecheck(t *testing.T, src []byte) {
 // rather than generating code that would misbehave.
 func TestGenerateRefuses(t *testing.T) {
 	for _, c := range []struct{ name, src, want string }{
-		{
-			"stream", `package a:b; world w { export f: func() -> stream<u8>; }`,
-			"f: result: stream types are not supported yet",
-		},
-		{
-			"error-context", `package a:b; world w { export f: func() -> error-context; }`,
-			"f: result: type error-context is not supported yet",
-		},
-		{"in a result", `package a:b; world w { export f: func() -> result<stream<u8>>; }`, "f: result: stream types"},
-		{"in an error arm", `package a:b; world w { export f: func() -> result<_, stream<u8>>; }`, "f: result: stream types"},
-		{"in a tuple", `package a:b; world w { export f: func() -> tuple<u8, stream<u8>>; }`, "f: result: stream types"},
+		{"error-context in a list", `package a:b; world w { export f: func(e: list<error-context>); }`, "f: param e: a stream, future or error-context nested in list<error-context>"},
+		{"stream of error-context", `package a:b; world w { export f: func(s: stream<error-context>); }`, "f: param s: a stream of error-context: an element holding"},
+		{"in a result", `package a:b; world w { export f: func() -> result<stream<u8>>; }`, "f: result: a stream, future or error-context nested in result<stream<u8>> is not supported"},
+		{"in an error arm", `package a:b; world w { export f: func() -> result<_, future<u8>>; }`, "f: result: a stream, future or error-context nested in result<_, future<u8>>"},
+		{"in a tuple", `package a:b; world w { export f: func() -> tuple<u8, stream<u8>>; }`, "f: result: a stream, future or error-context nested in tuple<u8, stream<u8>>"},
 		{
 			"in a record", `package a:b; interface t { record r { s: stream<u8> } } world w { use t.{r}; export f: func() -> r; }`,
-			"f: result: field s: stream types",
+			"f: result: a stream, future or error-context nested in r",
 		},
 		{
 			"in a variant", `package a:b; interface t { variant v { s(stream<u8>) } } world w { use t.{v}; export f: func() -> v; }`,
-			"f: result: case s: stream types",
+			"f: result: a stream, future or error-context nested in v",
 		},
-		{"in a map", `package a:b; world w { export f: func() -> map<string, stream<u8>>; }`, "f: result: stream types"},
-		{"in an option", `package a:b; world w { export f: func() -> option<stream<u8>>; }`, "f: result: stream types"},
+		{"in a map", `package a:b; world w { export f: func() -> map<string, stream<u8>>; }`, "f: result: a stream, future or error-context nested in map<string, stream<u8>>"},
+		{"in an option", `package a:b; world w { export f: func(s: option<stream<u8>>); }`, "f: param s: a stream, future or error-context nested in option<stream<u8>>"},
+		{"of streams", `package a:b; world w { export f: func() -> stream<stream<u8>>; }`, "f: result: a stream of stream<u8>: an element holding a resource handle, stream, future or error-context is not supported"},
 		{
-			"long tuple", `package a:b; world w { export f: func() -> tuple<u8, u8, u8, u8, u8, u8, u8, u8, u8>; }`,
-			"f: result: a tuple of 9 elements is longer than witgo has a type for",
+			"of handles", `package a:b; interface i { resource r; f: func() -> future<r>; } world w { export i; }`,
+			"a:b/i#f: result: a future of r: an element holding",
 		},
 		{
 			"unbound resource", `package a:b; interface t { resource r; } interface i { use t.{r}; g: func(x: borrow<r>); } world w { import i; }`,
@@ -241,6 +236,86 @@ world w { import host; export api; export top: async func() -> string; }`
 		`x.inst.CallAsync(ctx, "a:b/api#[method]job.run", x.handle, n)`,
 		"func (x *W) TopAsync(ctx context.Context) (*witgo.Pending[string], error) {",
 		`x.inst.CallAsync(ctx, "top")`,
+	} {
+		require.Contains(t, out, want)
+	}
+}
+
+// Every stream<T> and future<T> is a typed reader, whichever way it crosses;
+// the world makes them, one constructor per type, for the host to write.
+func TestGenerateStreams(t *testing.T) {
+	src := `package a:b;
+interface types { record q { n: u32, tags: list<string> } type bytes = stream<u8>; }
+interface host {
+  use types.{q, bytes};
+  pull: async func(n: u32) -> bytes;
+  push: func(s: stream<q>) -> u32;
+  later: func() -> future;
+  wait: async func(f: future<option<q>>);
+}
+interface api {
+  use types.{q};
+  feed: async func(s: stream<u8>, f: future<list<u16>>) -> u32;
+  make: async func() -> stream<q>;
+  soon: func() -> future<result<q, string>>;
+  ticks: func(s: stream);
+  odd: func(a: stream<tuple<u8, string>>, b: stream<map<string, u8>>, c: stream<list<u8, 2>>, d: stream<result>);
+}
+world w { import host; export api; }`
+	out, err := genSrc(t, src, Options{})
+	require.NoError(t, err)
+	for _, want := range []string{
+		"Pull(ctx context.Context, n uint32, ret witgo.Async[*witgo.StreamReader[uint8]]) error",
+		"Push(ctx context.Context, s *witgo.StreamReader[Q]) (uint32, error)",
+		"Later(ctx context.Context) (*witgo.FutureReader[struct{}], error)",
+		"Wait(ctx context.Context, f *witgo.FutureReader[*Q], ret witgo.Async[struct{}]) error",
+		"s, err := witgo.ReaderOf(args[0], func(v component.Value) (Q, error) { return liftQ(nil, v) })",
+		"return []component.Value{r.Raw()}, nil",
+		"tbl.Func([]component.TypeRef{tbl.Stream(t1)}, component.Prim(\"u32\"))",
+		"tbl.Future(component.TypeRef{})",
+		"func (x API) Feed(ctx context.Context, s *witgo.StreamReader[uint8], f *witgo.FutureReader[[]uint16]) (uint32, error) {",
+		`x.inst.CallExport(ctx, "a:b/api", "feed", s.Raw(), f.Raw())`,
+		`return witgo.ReaderOf(res[0], func(v component.Value) (Q, error) { return liftQ(nil, v) })`,
+		`return witgo.FutureReaderOf(res[0], func(v component.Value) (witgo.Result[Q, string], error) { return liftT`,
+		"func (x *W) NewStreamU8() (*witgo.StreamWriter[uint8], *witgo.StreamReader[uint8], error) {",
+		"func (x *W) NewStreamQ() (*witgo.StreamWriter[Q], *witgo.StreamReader[Q], error) {",
+		"func (x *W) NewFuture() (*witgo.FutureWriter[struct{}], *witgo.FutureReader[struct{}], error) {",
+		"return witgo.NewFuture(x.inst, nil, nil, witgo.Unit, witgo.LowerUnit)",
+		"func (x *W) NewFutureOptionQ() (",
+		"func (x *W) NewFutureListU16() (",
+		"component.ListOf[uint16], func(x []uint16) component.Value { return x })",
+		"func (x *W) NewFutureResultQString() (",
+		"func (x *W) NewStream() (",
+		"func (x *W) NewStreamTupleU8String() (",
+		"func (x *W) NewStreamMapStringU8() (",
+		"func (x *W) NewStreamList2U8() (",
+		"func (x *W) NewStreamResult() (",
+		"// NewStreamTupleU8String makes a stream<tuple<u8, string>>: write to the writer, and pass the reader to the",
+	} {
+		require.Contains(t, out, want)
+	}
+	// One element type serves every stream and future of it.
+	require.Equal(t, 1, strings.Count(out, "elemTypes.t[0] = component.Prim(\"u8\")"))
+}
+
+// A tuple longer than witgo's is a struct of the bindings' own, named for
+// its length, or for the WIT alias that names it.
+func TestGenerateLongTuple(t *testing.T) {
+	src := `package a:b;
+interface t { type big = tuple<u8, u8, u8, u8, u8, u8, u8, u8, string>; }
+world w {
+  use t.{big};
+  export f: func(x: tuple<u8, u8, u8, u8, u8, u8, u8, u8, u16, u32>) -> big;
+}`
+	out, err := genSrc(t, src, Options{})
+	require.NoError(t, err)
+	for _, want := range []string{
+		"// Big is the WIT tuple big, its elements in order.\ntype Big struct {",
+		"F8 string",
+		"// Tuple10 is a WIT tuple<u8, u8, u8, u8, u8, u8, u8, u8, u16, u32>, its elements in order.",
+		"F9 uint32",
+		"func (x *W) F(ctx context.Context, x_ Tuple10) (Big, error) {",
+		"func liftTuple10(h *witgo.Handles, v component.Value) (Tuple10, error) {",
 	} {
 		require.Contains(t, out, want)
 	}

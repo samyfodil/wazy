@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "=0.63.0"
+wit-bindgen = { version = "=0.63.0", features = ["async-spawn"] }
 
 [profile.release]
 opt-level = "s"

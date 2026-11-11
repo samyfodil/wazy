@@ -20,6 +20,7 @@ interface types {
     ints: list<s32>,
     chars: list<char>,
     bools: list<bool>,
+    long: tuple<u8, s8, u16, s16, u32, s32, u64, s64, string>,
   }
 }
 

@@ -72,6 +72,19 @@ const (
 	BitsD Bits = 1 << 3
 )
 
+// Tuple9 is a WIT tuple<u8, s8, u16, s16, u32, s32, u64, s64, string>, its elements in order.
+type Tuple9 struct {
+	F0 uint8
+	F1 int8
+	F2 uint16
+	F3 int16
+	F4 uint32
+	F5 int32
+	F6 uint64
+	F7 int64
+	F8 string
+}
+
 // Holder is the WIT record holder.
 type Holder struct {
 	M         map[string]Item
@@ -88,6 +101,7 @@ type Holder struct {
 	Ints      []int32
 	Chars     []rune
 	Bools     []bool
+	Long      Tuple9
 }
 
 // OtherItem is the WIT record item.
@@ -174,9 +188,49 @@ func lowerBits(h *witgo.Handles, x Bits) component.Value {
 	return uint32(x)
 }
 
+func liftTuple9(h *witgo.Handles, v component.Value) (Tuple9, error) {
+	var out Tuple9
+	vs, err := witgo.Values(v, 9, "tuple<u8, s8, u16, s16, u32, s32, u64, s64, string>")
+	if err != nil {
+		return out, err
+	}
+	if out.F0, err = witgo.U8(vs[0]); err != nil {
+		return out, err
+	}
+	if out.F1, err = witgo.S8(vs[1]); err != nil {
+		return out, err
+	}
+	if out.F2, err = witgo.U16(vs[2]); err != nil {
+		return out, err
+	}
+	if out.F3, err = witgo.S16(vs[3]); err != nil {
+		return out, err
+	}
+	if out.F4, err = witgo.U32(vs[4]); err != nil {
+		return out, err
+	}
+	if out.F5, err = witgo.S32(vs[5]); err != nil {
+		return out, err
+	}
+	if out.F6, err = witgo.U64(vs[6]); err != nil {
+		return out, err
+	}
+	if out.F7, err = witgo.S64(vs[7]); err != nil {
+		return out, err
+	}
+	if out.F8, err = witgo.String(vs[8]); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func lowerTuple9(h *witgo.Handles, x Tuple9) component.Value {
+	return []component.Value{uint32(x.F0), int32(x.F1), uint32(x.F2), int32(x.F3), x.F4, x.F5, x.F6, x.F7, x.F8}
+}
+
 func liftHolder(h *witgo.Handles, v component.Value) (Holder, error) {
 	var out Holder
-	vs, err := witgo.Values(v, 14, "holder")
+	vs, err := witgo.Values(v, 15, "holder")
 	if err != nil {
 		return out, err
 	}
@@ -222,11 +276,14 @@ func liftHolder(h *witgo.Handles, v component.Value) (Holder, error) {
 	if out.Bools, err = component.ListOf[bool](vs[13]); err != nil {
 		return out, err
 	}
+	if out.Long, err = liftTuple9(h, vs[14]); err != nil {
+		return out, err
+	}
 	return out, nil
 }
 
 func lowerHolder(h *witgo.Handles, x Holder) component.Value {
-	return []component.Value{lowerT2(h, x.M), lowerT3(h, x.F), lowerT6(h, x.O), lowerT7(h, x.Okonly), lowerT8(h, x.Bare), lowerT9(h, x.Errorly), lowerT10(h, x.T), uint32(x.B), uint32(x.L), lowerT11(h, x.Nested), append([]int8(nil), x.Fixedprim[:]...), x.Ints, x.Chars, x.Bools}
+	return []component.Value{lowerT2(h, x.M), lowerT3(h, x.F), lowerT6(h, x.O), lowerT7(h, x.Okonly), lowerT8(h, x.Bare), lowerT9(h, x.Errorly), lowerT10(h, x.T), uint32(x.B), uint32(x.L), lowerT11(h, x.Nested), append([]int8(nil), x.Fixedprim[:]...), x.Ints, x.Chars, x.Bools, lowerTuple9(h, x.Long)}
 }
 
 func liftOtherItem(h *witgo.Handles, v component.Value) (OtherItem, error) {
@@ -268,13 +325,13 @@ func lowerT1(h *witgo.Handles, x []string) component.Value {
 }
 
 func liftT2(h *witgo.Handles, v component.Value) (map[string]Item, error) {
-	vs, err := witgo.Values(v, -1, "map")
+	vs, err := witgo.Values(v, -1, "map<string, item>")
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]Item, len(vs))
 	for _, e := range vs {
-		kv, err := witgo.Values(e, 2, "map")
+		kv, err := witgo.Values(e, 2, "map<string, item>")
 		if err != nil {
 			return nil, err
 		}
@@ -324,7 +381,7 @@ func lowerT3(h *witgo.Handles, x [2]Item) component.Value {
 
 func liftT4(h *witgo.Handles, v component.Value) (witgo.Tuple2[int16, string], error) {
 	var out witgo.Tuple2[int16, string]
-	vs, err := witgo.Values(v, 2, "tuple")
+	vs, err := witgo.Values(v, 2, "tuple<s16, string>")
 	if err != nil {
 		return out, err
 	}
@@ -383,7 +440,7 @@ func lowerT6(h *witgo.Handles, x *[]Node) component.Value {
 
 func liftT7(h *witgo.Handles, v component.Value) (witgo.Result[uint64, struct{}], error) {
 	var out witgo.Result[uint64, struct{}]
-	r, err := witgo.ResultValue(v, "result")
+	r, err := witgo.ResultValue(v, "result<u64>")
 	if err != nil {
 		return out, err
 	}
@@ -420,7 +477,7 @@ func lowerT8(h *witgo.Handles, x witgo.Result[struct{}, struct{}]) component.Val
 
 func liftT9(h *witgo.Handles, v component.Value) (witgo.Result[struct{}, Level], error) {
 	var out witgo.Result[struct{}, Level]
-	r, err := witgo.ResultValue(v, "result")
+	r, err := witgo.ResultValue(v, "result<_, level>")
 	if err != nil {
 		return out, err
 	}
@@ -440,7 +497,7 @@ func lowerT9(h *witgo.Handles, x witgo.Result[struct{}, Level]) component.Value 
 
 func liftT10(h *witgo.Handles, v component.Value) (witgo.Tuple3[bool, rune, float32], error) {
 	var out witgo.Tuple3[bool, rune, float32]
-	vs, err := witgo.Values(v, 3, "tuple")
+	vs, err := witgo.Values(v, 3, "tuple<bool, char, f32>")
 	if err != nil {
 		return out, err
 	}
@@ -505,7 +562,7 @@ func lowerT12(h *witgo.Handles, x [2]int8) component.Value {
 
 func liftT13(h *witgo.Handles, v component.Value) (witgo.Tuple3[uint8, int16, uint16], error) {
 	var out witgo.Tuple3[uint8, int16, uint16]
-	vs, err := witgo.Values(v, 3, "tuple")
+	vs, err := witgo.Values(v, 3, "tuple<u8, s16, u16>")
 	if err != nil {
 		return out, err
 	}
@@ -526,13 +583,13 @@ func lowerT13(h *witgo.Handles, x witgo.Tuple3[uint8, int16, uint16]) component.
 }
 
 func liftT14(h *witgo.Handles, v component.Value) (map[uint32][]byte, error) {
-	vs, err := witgo.Values(v, -1, "map")
+	vs, err := witgo.Values(v, -1, "map<u32, list<u8>>")
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[uint32][]byte, len(vs))
 	for _, e := range vs {
-		kv, err := witgo.Values(e, 2, "map")
+		kv, err := witgo.Values(e, 2, "map<u32, list<u8>>")
 		if err != nil {
 			return nil, err
 		}
@@ -575,7 +632,8 @@ func optionsHost(impl Host) []component.Option {
 	t2 := tbl.Variant(component.VariantCaseSpec{Name: "leaf", Type: component.Prim("u8")}, component.VariantCaseSpec{Name: "pair", Type: tbl.Tuple(component.Prim("s16"), component.Prim("string"))}, component.VariantCaseSpec{Name: "none"})
 	t3 := tbl.Enum("low", "high")
 	t4 := tbl.Flags("a", "b", "c", "d")
-	t5 := tbl.Record("m", tbl.Map(component.Prim("string"), t1), "f", tbl.FixedList(t1, 2), "o", tbl.Option(tbl.List(t2)), "okonly", tbl.Result(component.Prim("u64"), component.TypeRef{}), "bare", tbl.Result(component.TypeRef{}, component.TypeRef{}), "errorly", tbl.Result(component.TypeRef{}, t3), "t", tbl.Tuple(component.Prim("bool"), component.Prim("char"), component.Prim("f32")), "b", t4, "l", t3, "nested", tbl.List(tbl.List(component.Prim("u16"))), "fixedprim", tbl.FixedList(component.Prim("s8"), 2), "ints", tbl.List(component.Prim("s32")), "chars", tbl.List(component.Prim("char")), "bools", tbl.List(component.Prim("bool")))
+	t5 := tbl.Tuple(component.Prim("u8"), component.Prim("s8"), component.Prim("u16"), component.Prim("s16"), component.Prim("u32"), component.Prim("s32"), component.Prim("u64"), component.Prim("s64"), component.Prim("string"))
+	t6 := tbl.Record("m", tbl.Map(component.Prim("string"), t1), "f", tbl.FixedList(t1, 2), "o", tbl.Option(tbl.List(t2)), "okonly", tbl.Result(component.Prim("u64"), component.TypeRef{}), "bare", tbl.Result(component.TypeRef{}, component.TypeRef{}), "errorly", tbl.Result(component.TypeRef{}, t3), "t", tbl.Tuple(component.Prim("bool"), component.Prim("char"), component.Prim("f32")), "b", t4, "l", t3, "nested", tbl.List(tbl.List(component.Prim("u16"))), "fixedprim", tbl.FixedList(component.Prim("s8"), 2), "ints", tbl.List(component.Prim("s32")), "chars", tbl.List(component.Prim("char")), "bools", tbl.List(component.Prim("bool")), "long", t5)
 	resolve := tbl.Resolver()
 	return []component.Option{
 		component.WithImportCustom("wazy:conv/host@0.1.0", "take", func(ctx context.Context, args []component.Value) ([]component.Value, error) {
@@ -591,7 +649,7 @@ func optionsHost(impl Host) []component.Option {
 				return nil, err
 			}
 			return []component.Value{lowerHolder(nil, r)}, nil
-		}, tbl.Func([]component.TypeRef{t5}, t5), resolve),
+		}, tbl.Func([]component.TypeRef{t6}, t6), resolve),
 		component.WithImportCustom("wazy:conv/host@0.1.0", "keywords", func(ctx context.Context, args []component.Value) ([]component.Value, error) {
 			if len(args) != 6 {
 				return nil, fmt.Errorf("%s: %d args", "keywords", len(args))

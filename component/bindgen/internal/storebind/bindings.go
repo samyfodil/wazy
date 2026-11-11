@@ -135,7 +135,7 @@ func lowerT2(h *witgo.Handles, x []string) component.Value {
 
 func liftT3(h *witgo.Handles, v component.Value) (witgo.Result[[]string, Error], error) {
 	var out witgo.Result[[]string, Error]
-	r, err := witgo.ResultValue(v, "result")
+	r, err := witgo.ResultValue(v, "result<list<string>, error>")
 	if err != nil {
 		return out, err
 	}

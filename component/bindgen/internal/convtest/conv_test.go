@@ -28,6 +28,7 @@ func holder() Holder {
 		Ints:      []int32{-5},
 		Chars:     []rune{'x'},
 		Bools:     []bool{true, false},
+		Long:      Tuple9{1, -1, 2, -2, 3, -3, 4, -4, "nine"},
 	}
 }
 
@@ -55,6 +56,7 @@ func TestLowerShape(t *testing.T) {
 		[]int32{-5},
 		[]rune{'x'},
 		[]bool{true, false},
+		[]component.Value{uint32(1), int32(-1), uint32(2), int32(-2), uint32(3), int32(-3), uint64(4), int64(-4), "nine"},
 	}
 	require.Equal(t, want, got)
 }

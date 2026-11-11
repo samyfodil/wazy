@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/component"
 	"github.com/samyfodil/wazy/component/witgo"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
@@ -32,6 +33,9 @@ type host struct {
 	external bool
 	gate     chan struct{}
 	pings    int
+
+	// k makes the streams and futures the host returns.
+	k *Kitchen
 }
 
 // complete runs fn now, or from another goroutine once the gate opens.
@@ -192,11 +196,68 @@ func instantiate(t *testing.T) (*Kitchen, *host) {
 	h := &host{counters: map[Counter]uint32{}, tokens: map[Token]uint32{}}
 	k, err := Instantiate(ctx, r, kitchenWasm, Imports{Types: h, Host: h})
 	require.NoError(t, err)
+	h.k = k
 	t.Cleanup(func() { k.Close(ctx) })
 	return k, h
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func (h *host) CountUp(_ context.Context, n uint32, ret witgo.Async[*witgo.StreamReader[uint8]]) error {
+	w, r, err := h.k.NewStreamU8()
+	if err != nil {
+		return err
+	}
+	bytes := make([]byte, n)
+	for i := range bytes {
+		bytes[i] = byte(i)
+	}
+	w.WriteAll(bytes, func(int, component.CopyResult) { w.Close() })
+	ret.Return(r)
+	return nil
+}
+
+func (h *host) SumPoints(_ context.Context, s *witgo.StreamReader[Point], ret witgo.Async[int32]) error {
+	s.ReadAll(2, func(ps []Point, err error) {
+		sum := int32(0)
+		for _, p := range ps {
+			sum += p.X + p.Y
+		}
+		if err != nil {
+			sum = -1
+		}
+		ret.Return(sum)
+	})
+	return nil
+}
+
+func (h *host) ColorLater(ctx context.Context, s Shape) (*witgo.FutureReader[witgo.Result[Color, string]], error) {
+	w, r, err := h.k.NewFutureResultColorString()
+	if err != nil {
+		return nil, err
+	}
+	c, _ := h.Classify(ctx, s)
+	w.Set(c, func(component.CopyResult) { w.Close() })
+	return r, nil
+}
+
+func (h *host) Explain(_ context.Context, code uint32) (*component.ErrorContext, error) {
+	return component.NewErrorContext(fmt.Sprintf("code %d", code)), nil
+}
+
+func (h *host) Describe(_ context.Context, e *component.ErrorContext) (string, error) {
+	return "described: " + e.DebugMessage(), nil
+}
+
+func (h *host) WaitFor(_ context.Context, f *witgo.FutureReader[uint32], ret witgo.Async[uint32]) error {
+	f.Get(func(_ component.CopyResult, v uint32, err error) {
+		if err != nil {
+			v = 0
+		}
+		ret.Return(v * 2)
+	})
+	return nil
+}
 
 // Every field of everything crosses to the guest, out to the host's echo,
 // back, and back to the test, at the edges of its range.
@@ -452,6 +513,105 @@ func TestAsyncBlocking(t *testing.T) {
 	top, err := k.Top(ctx, "x")
 	require.NoError(t, err)
 	require.Equal(t, "top:x", top)
+}
+
+// Streams and futures in every direction: the host's, passed to an export
+// and returned from an import; the guest's, returned from an export and
+// passed to an import.
+func TestStreams(t *testing.T) {
+	k, _ := instantiate(t)
+	ctx := context.Background()
+	api := k.API()
+
+	w, r, err := k.NewStreamU8()
+	require.NoError(t, err)
+	written := -1
+	w.WriteAll([]byte{1, 2, 3, 250}, func(n int, _ component.CopyResult) { written = n; w.Close() })
+	sum, err := api.SumBytes(ctx, r)
+	require.NoError(t, err)
+	require.Equal(t, uint32(256), sum)
+	require.Equal(t, 4, written)
+
+	ps, err := api.Points(ctx, 3)
+	require.NoError(t, err)
+	var got []Point
+	ps.ReadAll(8, func(p []Point, err error) { require.NoError(t, err); got = p })
+	require.Equal(t, []Point{{0, 0, "p0"}, {1, 2, "p1"}, {2, 4, "p2"}}, got)
+
+	rel, err := api.Relay(ctx, 5)
+	require.NoError(t, err)
+	require.Equal(t, int32(3*(0+1+2+3+4)), rel)
+
+	ticks, tr, err := k.NewStream()
+	require.NoError(t, err)
+	ticks.WriteAll(make([]struct{}, 7), func(int, component.CopyResult) { ticks.Close() })
+	n, err := api.CountTicks(ctx, tr)
+	require.NoError(t, err)
+	require.Equal(t, uint32(7), n)
+}
+
+func TestFutures(t *testing.T) {
+	k, _ := instantiate(t)
+	ctx := context.Background()
+	api := k.API()
+
+	c, err := api.ColorOf(ctx, ShapeCircle(1))
+	require.NoError(t, err)
+	require.Equal(t, witgo.Ok[Color, string](ColorRed), c)
+	c, err = api.ColorOf(ctx, ShapeEmpty())
+	require.NoError(t, err)
+	require.Equal(t, witgo.Err[Color]("empty"), c)
+
+	fw, fr, err := k.NewFutureU32()
+	require.NoError(t, err)
+	set := component.CopyResult(99)
+	fw.Set(21, func(res component.CopyResult) { set = res })
+	d, err := api.Double(ctx, fr)
+	require.NoError(t, err)
+	require.Equal(t, uint32(42), d)
+	require.Equal(t, component.CopyCompleted, set)
+	fw.Close()
+
+	v, err := api.HandOff(ctx, 4)
+	require.NoError(t, err)
+	require.Equal(t, uint32(10), v)
+
+	ready, err := api.Ready(ctx, 3)
+	require.NoError(t, err)
+	got := uint32(0)
+	ready.Get(func(res component.CopyResult, v uint32, err error) {
+		require.NoError(t, err)
+		require.Equal(t, component.CopyCompleted, res)
+		got = v
+	})
+	require.Equal(t, uint32(30), got)
+}
+
+// Error contexts both ways: made by the guest and read by the host, made by
+// the host and read by the guest, and the host's passed back to it.
+func TestErrorContext(t *testing.T) {
+	k, _ := instantiate(t)
+	ctx := context.Background()
+	api := k.API()
+
+	e, err := api.Fail(ctx, "oops")
+	require.NoError(t, err)
+	require.Equal(t, "guest: oops", e.DebugMessage())
+
+	msg, err := api.Reason(ctx, component.NewErrorContext("from the host"))
+	require.NoError(t, err)
+	require.Equal(t, "from the host", msg)
+
+	msg, err = api.Reason(ctx, e)
+	require.NoError(t, err)
+	require.Equal(t, "guest: oops", msg)
+
+	msg, err = api.RelayError(ctx, 7)
+	require.NoError(t, err)
+	require.Equal(t, "described: code 7", msg)
+
+	_, err = api.Reason(ctx, nil)
+	require.Error(t, err)
 }
 
 // Async imports completed from other goroutines, through the CallAsync forms:

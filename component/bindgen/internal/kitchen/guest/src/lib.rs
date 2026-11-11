@@ -6,6 +6,9 @@ wit_bindgen::generate!({ path: "wit", world: "kitchen" });
 
 use std::cell::RefCell;
 
+use wit_bindgen::rt::async_support::ErrorContext;
+use wit_bindgen::{FutureReader, StreamReader};
+
 use exports::wazy::bindgen_test::api::{Blob, BlobBorrow, Guest as Api, GuestBlob};
 use wazy::bindgen_test::host;
 use wazy::bindgen_test::types::{Color, Everything, Perms, Point, Shape, Token};
@@ -165,7 +168,78 @@ impl Api for Component {
         host::peek(&x) + host::peek(&y)
     }
 
+    async fn sum_bytes(s: StreamReader<u8>) -> u32 {
+        s.collect().await.iter().map(|&b| b as u32).sum()
+    }
+
+    // The stream outlives the call: a spawned task writes it after the
+    // reader is returned.
+    async fn points(n: u32) -> StreamReader<Point> {
+        let (mut w, r) = wit_stream::new();
+        wit_bindgen::spawn_local(async move {
+            w.write_all((0..n).map(|i| point(i as i32)).collect()).await;
+        });
+        r
+    }
+
+    // Bytes from the host's stream become points in a stream back to it,
+    // written while the host reads.
+    async fn relay(n: u32) -> i32 {
+        let bytes = host::count_up(n).await.collect().await;
+        let (mut w, r) = wit_stream::new();
+        wit_bindgen::spawn_local(async move {
+            w.write_all(bytes.iter().map(|&b| point(b as i32)).collect()).await;
+        });
+        host::sum_points(r).await
+    }
+
+    async fn color_of(s: Shape) -> Result<Color, String> {
+        host::color_later(&s).await
+    }
+
+    async fn double(f: FutureReader<u32>) -> u32 {
+        f.await * 2
+    }
+
+    // A future the guest makes and sets while the host waits on it.
+    async fn hand_off(v: u32) -> u32 {
+        let (w, r) = wit_future::new(|| 0);
+        wit_bindgen::spawn_local(async move {
+            w.write(v + 1).await.unwrap();
+        });
+        host::wait_for(r).await
+    }
+
+    async fn ready(v: u32) -> FutureReader<u32> {
+        let (w, r) = wit_future::new(|| 0);
+        wit_bindgen::spawn_local(async move {
+            w.write(v * 10).await.unwrap();
+        });
+        r
+    }
+
+    async fn count_ticks(s: StreamReader<()>) -> u32 {
+        s.collect().await.len() as u32
+    }
+
+    async fn fail(msg: String) -> ErrorContext {
+        ErrorContext::new(&format!("guest: {msg}"))
+    }
+
+    fn reason(e: ErrorContext) -> String {
+        e.debug_message()
+    }
+
+    // The host's error context, back to the host.
+    fn relay_error(code: u32) -> String {
+        host::describe(host::explain(code))
+    }
+
     fn nothing() {}
+}
+
+fn point(i: i32) -> Point {
+    Point { x: i, y: i * 2, label: format!("p{i}") }
 }
 
 export!(Component);

@@ -58,6 +58,20 @@ interface host {
   slow-shape: async func(s: shape) -> result<color, string>;
   slow-ping: async func();
   slow-mint: async func(a: u32, b: u32) -> tuple<token, token>;
+
+  /// The bytes 0..n, in a stream the host makes and writes.
+  count-up: async func(n: u32) -> stream<u8>;
+  /// The host reads every point, and returns the sum of their coordinates.
+  sum-points: async func(s: stream<point>) -> s32;
+  /// A future the host sets to the shape's color, or its error.
+  color-later: func(s: shape) -> future<result<color, string>>;
+  /// The host reads the future, and returns its value doubled.
+  wait-for: async func(f: future<u32>) -> u32;
+
+  /// An error context of the host's, saying what code means.
+  explain: func(code: u32) -> error-context;
+  /// The message of an error context the guest passes.
+  describe: func(e: error-context) -> string;
 }
 
 interface api {
@@ -84,6 +98,19 @@ interface api {
   fetch-shape: async func(s: shape) -> result<color, string>;
   fire: async func() -> u32;
   fetch-tokens: async func(a: u32, b: u32) -> u32;
+
+  sum-bytes: async func(s: stream<u8>) -> u32;
+  points: async func(n: u32) -> stream<point>;
+  relay: async func(n: u32) -> s32;
+  color-of: async func(s: shape) -> result<color, string>;
+  double: async func(f: future<u32>) -> u32;
+  hand-off: async func(v: u32) -> u32;
+  ready: async func(v: u32) -> future<u32>;
+  count-ticks: async func(s: stream) -> u32;
+
+  fail: async func(msg: string) -> error-context;
+  reason: func(e: error-context) -> string;
+  relay-error: func(code: u32) -> string;
 
   roundtrip: func(e: everything) -> everything;
   area: func(s: shape) -> f64;

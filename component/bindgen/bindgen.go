@@ -7,7 +7,8 @@
 //   - for each import, a Go interface the host implements, and the options
 //     that register it;
 //   - for the exports, a type wrapping the component.Instance, with a method
-//     per exported function.
+//     per exported function, and one making each stream and future type the
+//     world passes.
 //
 // The generated code depends only on package component and package witgo.
 // cmd/wazy-bindgen runs Generate from the command line, for go generate.
@@ -98,13 +99,16 @@ const (
 	kFlags
 	kHandle
 	kMap
+	kStream
+	kFuture
+	kErrorContext
 )
 
 // typ is a WIT type, as the generator writes Go for it.
 type typ struct {
 	kind    kind
 	prim    string
-	elem    *typ   // list, fixed list, option; map's value
+	elem    *typ   // list, fixed list, option, stream, future; map's value
 	key     *typ   // map
 	ok, err *typ   // result; nil for an arm WIT leaves out
 	elems   []*typ // tuple
@@ -179,7 +183,6 @@ type gen struct {
 	res     map[wit.ResourceKey]*resource
 	imports []*iface
 	exports []*iface
-	tuples  bool
 }
 
 // claim reserves a package-level Go name, suffixing a number on a clash.
@@ -331,14 +334,54 @@ func (g *gen) bindFunc(f *wit.Func, ifaceName string, tags wit.Tags, imported bo
 		if err != nil {
 			return nil, fmt.Errorf("param %s: %w", p.Name, err)
 		}
+		if err := topLevelOnly(t); err != nil {
+			return nil, fmt.Errorf("param %s: %w", p.Name, err)
+		}
 		b.params = append(b.params, member{wit: p.Name, t: t})
 	}
 	if r := sig.Desc.Results.Unnamed; r != nil {
 		if b.result, err = g.typeOf(*r, sig, ifaceName); err != nil {
 			return nil, fmt.Errorf("result: %w", err)
 		}
+		if err := topLevelOnly(b.result); err != nil {
+			return nil, fmt.Errorf("result: %w", err)
+		}
 	}
 	return b, nil
+}
+
+// topLevelOnly refuses a stream, future or error-context below the top
+// level of t: the engine passes one only as a whole argument or result.
+func topLevelOnly(t *typ) error {
+	if t.kind != kStream && t.kind != kFuture && t.kind != kErrorContext && t.hasAsync() {
+		return fmt.Errorf("a stream, future or error-context nested in %s is not supported: wazy passes one only as a whole argument or result", t.witString())
+	}
+	return nil
+}
+
+func (t *typ) hasAsync() bool {
+	if t == nil {
+		return false
+	}
+	if t.kind == kStream || t.kind == kFuture || t.kind == kErrorContext {
+		return true
+	}
+	for _, c := range []*typ{t.elem, t.key, t.ok, t.err} {
+		if c.hasAsync() {
+			return true
+		}
+	}
+	for _, c := range t.elems {
+		if c.hasAsync() {
+			return true
+		}
+	}
+	for _, m := range t.members {
+		if m.t.hasAsync() {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *typ) hasHandle() bool {
@@ -374,6 +417,9 @@ var goPrims = map[string]string{
 
 // typeOf reads ref into a typ, interning it.
 func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string) (*typ, error) {
+	if ref.Primitive == "error-context" {
+		return g.intern(&typ{kind: kErrorContext, id: "error-context"}, ifaceName), nil
+	}
 	if ref.Primitive != "" {
 		if _, ok := goPrims[ref.Primitive]; !ok {
 			return nil, fmt.Errorf("type %s is not supported yet", ref.Primitive)
@@ -407,9 +453,6 @@ func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string
 		}
 	case component.TupleDesc:
 		t.kind = kTuple
-		if len(d.Elements) > witgo.MaxTuple {
-			return nil, fmt.Errorf("a tuple of %d elements is longer than witgo has a type for", len(d.Elements))
-		}
 		for _, e := range d.Elements {
 			et, err := sub(e)
 			if err != nil {
@@ -417,7 +460,6 @@ func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string
 			}
 			t.elems = append(t.elems, et)
 		}
-		g.tuples = true
 	case component.RecordDesc:
 		t.kind = kRecord
 		for _, f := range d.Fields {
@@ -464,6 +506,23 @@ func (g *gen) typeOf(ref component.TypeRef, sig *wit.Signature, ifaceName string
 		if t.key, err = sub(d.Key); err == nil { // WIT keys are primitives
 			t.elem, err = sub(d.Value)
 		}
+	case component.StreamDesc, component.FutureDesc:
+		t.kind = kStream
+		elem := (*component.TypeRef)(nil)
+		if s, ok := d.(component.StreamDesc); ok {
+			elem = s.Element
+		} else {
+			t.kind, elem = kFuture, d.(component.FutureDesc).Element
+		}
+		if elem != nil {
+			if t.elem, err = sub(*elem); err != nil {
+				return nil, err
+			}
+			if t.elem.hasHandle() || t.elem.hasAsync() {
+				return nil, fmt.Errorf("a %s of %s: an element holding a resource handle, stream, future or error-context is not supported", d.Kind(), t.elem.witString())
+			}
+		}
+		t.witName = ""
 	default:
 		return nil, fmt.Errorf("%s types are not supported yet", d.Kind())
 	}
@@ -516,6 +575,10 @@ func (g *gen) intern(t *typ, ifaceName string) *typ {
 		}
 		t.goName = g.claim(name)
 		g.named = append(g.named, t)
+	case t.kind == kTuple && len(t.elems) > witgo.MaxTuple:
+		// Longer than witgo has a type for: a struct of the bindings' own.
+		t.goName = g.claim(fmt.Sprintf("Tuple%d", len(t.elems)))
+		g.named = append(g.named, t)
 	case t.needsConv():
 		t.conv = len(g.anon) + 1
 		g.anon = append(g.anon, t)
@@ -534,7 +597,7 @@ func (g *gen) nameResource(r *resource) {
 // needsConv reports whether lifting or lowering t takes a function of its own.
 func (t *typ) needsConv() bool {
 	switch t.kind {
-	case kPrim, kHandle:
+	case kPrim, kHandle, kStream, kFuture, kErrorContext:
 		return false
 	case kList:
 		return !t.elem.fixedWidth()
@@ -561,6 +624,9 @@ func (t *typ) goType() string {
 	case kResult:
 		return "witgo.Result[" + t.ok.armType() + ", " + t.err.armType() + "]"
 	case kTuple:
+		if t.goName != "" {
+			return t.goName
+		}
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
 			parts[i] = e.goType()
@@ -570,6 +636,12 @@ func (t *typ) goType() string {
 		return t.res.goName
 	case kMap:
 		return "map[" + t.key.goType() + "]" + t.elem.goType()
+	case kStream:
+		return "*witgo.StreamReader[" + t.elem.armType() + "]"
+	case kFuture:
+		return "*witgo.FutureReader[" + t.elem.armType() + "]"
+	case kErrorContext:
+		return "*component.ErrorContext"
 	}
 	return t.goName
 }
@@ -603,8 +675,36 @@ func (t *typ) lift(h, v string) string {
 		if t.elem.fixedWidth() {
 			return "component.ListOf[" + t.elem.goType() + "](" + v + ")"
 		}
+	case kStream:
+		return "witgo.ReaderOf(" + v + ", " + t.elem.elemLift() + ")"
+	case kFuture:
+		return "witgo.FutureReaderOf(" + v + ", " + t.elem.elemLift() + ")"
+	case kErrorContext:
+		return "witgo.ErrorContextOf(" + v + ")"
 	}
 	return "lift" + t.convName() + "(" + h + ", " + v + ")"
+}
+
+// elemLift is a func reading a stream's or future's element of type t, nil
+// for none.
+func (t *typ) elemLift() string {
+	switch {
+	case t == nil:
+		return "witgo.Unit"
+	case t.kind == kPrim:
+		return "witgo." + pascal(t.prim)
+	case t.kind == kList && t.elem.fixedWidth():
+		return "component.ListOf[" + t.elem.goType() + "]"
+	}
+	return "func(v component.Value) (" + t.goType() + ", error) { return " + t.lift("nil", "v") + " }"
+}
+
+// elemLower is elemLift's twin, writing an element.
+func (t *typ) elemLower() string {
+	if t == nil {
+		return "witgo.LowerUnit"
+	}
+	return "func(x " + t.goType() + ") component.Value { return " + t.lower("nil", "x") + " }"
 }
 
 // lower is an expression of type component.Value holding the Go value x; see
@@ -631,6 +731,10 @@ func (t *typ) lower(h, x string) string {
 		if t.elem.fixedWidth() {
 			return "append([]" + t.elem.goType() + "(nil), " + x + "[:]...)"
 		}
+	case kStream, kFuture:
+		return x + ".Raw()"
+	case kErrorContext:
+		return "witgo.LowerErrorContext(" + x + ")"
 	}
 	return "lower" + t.convName() + "(" + h + ", " + x + ")"
 }
@@ -649,11 +753,36 @@ func (t *typ) witString() string {
 	case kOption:
 		return "option<" + t.elem.witString() + ">"
 	case kResult:
-		return "result"
+		if t.ok == nil && t.err == nil {
+			return "result"
+		}
+		ok := "_"
+		if t.ok != nil {
+			ok = t.ok.witString()
+		}
+		if t.err == nil {
+			return "result<" + ok + ">"
+		}
+		return "result<" + ok + ", " + t.err.witString() + ">"
 	case kTuple:
-		return "tuple"
+		parts := make([]string, len(t.elems))
+		for i, e := range t.elems {
+			parts[i] = e.witString()
+		}
+		return "tuple<" + strings.Join(parts, ", ") + ">"
 	case kMap:
-		return "map"
+		return "map<" + t.key.witString() + ", " + t.elem.witString() + ">"
+	case kStream, kFuture:
+		k := "stream"
+		if t.kind == kFuture {
+			k = "future"
+		}
+		if t.elem == nil {
+			return k
+		}
+		return k + "<" + t.elem.witString() + ">"
+	case kErrorContext:
+		return "error-context"
 	}
 	return t.res.key.Name // a handle: every other kind is named, or above
 }
@@ -774,6 +903,17 @@ func (g *gen) emitGuestResource(w *writer, r *resource) {
 func (g *gen) emitType(w *writer, t *typ) {
 	w.p("")
 	switch t.kind {
+	case kTuple:
+		if t.witName != "" {
+			w.p("// %s is the WIT tuple %s, its elements in order.", t.goName, t.witName)
+		} else {
+			w.p("// %s is a WIT %s, its elements in order.", t.goName, t.witString())
+		}
+		w.p("type %s struct {", t.goName)
+		for i, e := range t.elems {
+			w.p("F%d %s", i, e.goType())
+		}
+		w.p("}")
 	case kRecord:
 		w.p("// %s is the WIT record %s.", t.goName, t.witName)
 		w.p("type %s struct {", t.goName)
@@ -1045,6 +1185,12 @@ func (t *typ) ref(names map[*typ]string) string {
 			return "tbl.Own(" + t.res.tagGo + ")"
 		}
 		return "tbl.Borrow(" + t.res.tagGo + ")"
+	case kStream:
+		return "tbl.Stream(" + t.elem.armRef(names) + ")"
+	case kFuture:
+		return "tbl.Future(" + t.elem.armRef(names) + ")"
+	case kErrorContext:
+		return `component.Prim("error-context")`
 	}
 	return "tbl.Map(" + t.key.ref(names) + ", " + t.elem.ref(names) + ")"
 }
@@ -1054,6 +1200,28 @@ func (t *typ) armRef(names map[*typ]string) string {
 		return "component.TypeRef{}"
 	}
 	return t.ref(names)
+}
+
+// defineRefs writes a local holding the TypeRef of each named type in t, in
+// tbl, before a ref to it, recording it in names.
+func defineRefs(w *writer, names map[*typ]string, t *typ) {
+	if t == nil {
+		return
+	}
+	for _, c := range []*typ{t.elem, t.key, t.ok, t.err} {
+		defineRefs(w, names, c)
+	}
+	for _, c := range t.elems {
+		defineRefs(w, names, c)
+	}
+	for _, m := range t.members {
+		defineRefs(w, names, m.t)
+	}
+	if _, ok := names[t]; t.goName != "" && !ok {
+		v := fmt.Sprintf("t%d", len(names)+1)
+		w.p("%s := %s", v, t.ref(names))
+		names[t] = v
+	}
 }
 
 // methodName is the Go name of a host or export method for f.
@@ -1199,35 +1367,11 @@ func (g *gen) emitImport(w *writer, in *iface) {
 		w.p("tbl := component.NewTypeTable()")
 	}
 	names2 := map[*typ]string{}
-	n := 0
-	var define func(t *typ)
-	define = func(t *typ) {
-		if t == nil {
-			return
-		}
-		for _, c := range []*typ{t.elem, t.key, t.ok, t.err} {
-			define(c)
-		}
-		for _, c := range t.elems {
-			define(c)
-		}
-		for _, m := range t.members {
-			define(m.t)
-		}
-		if t.goName != "" {
-			if _, ok := names2[t]; !ok {
-				n++
-				v := fmt.Sprintf("t%d", n)
-				w.p("%s := %s", v, t.ref(names2))
-				names2[t] = v
-			}
-		}
-	}
 	for _, b := range in.funcs {
 		for _, p := range b.params {
-			define(p.t)
+			defineRefs(w, names2, p.t)
 		}
-		define(b.result)
+		defineRefs(w, names2, b.result)
 	}
 	if calls {
 		w.p("resolve := tbl.Resolver()")
@@ -1338,6 +1482,7 @@ func (g *gen) emitExports(w *writer) {
 	w.p("// Close closes the instance.")
 	w.p("func (x *%s) Close(ctx context.Context) error { return x.inst.Close(ctx) }", wg)
 	taken := map[string]bool{"Instance": true, "Close": true}
+	g.emitStreamCtors(w, taken)
 	for _, in := range g.exports {
 		recv := "x *" + wg
 		names := taken
@@ -1370,6 +1515,125 @@ func (g *gen) emitExports(w *writer) {
 			g.emitExportFunc(w, recv, in.name, b, names, 0)
 		}
 	}
+}
+
+// asyncTypes is every stream and future type the world's functions pass, in
+// the order they are first met.
+func (g *gen) asyncTypes() []*typ {
+	var out []*typ
+	seen := map[*typ]bool{}
+	for _, in := range append(slices.Clone(g.imports), g.exports...) {
+		for _, b := range in.funcs {
+			for _, t := range append(memberTypes(b.params), b.result) {
+				if t != nil && (t.kind == kStream || t.kind == kFuture) && !seen[t] {
+					seen[t] = true
+					out = append(out, t)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func memberTypes(ms []member) []*typ {
+	out := make([]*typ, len(ms))
+	for i, m := range ms {
+		out[i] = m.t
+	}
+	return out
+}
+
+// emitStreamCtors writes, for each stream and future type, the world's
+// method making one: the host keeps the writer, and passes the reader to the
+// guest or reads it itself.
+func (g *gen) emitStreamCtors(w *writer, taken map[string]bool) {
+	ts := g.asyncTypes()
+	if len(ts) == 0 {
+		return
+	}
+	// The element types, once each: two streams of one type share it.
+	var distinct []*typ
+	idx := map[*typ]int{}
+	for _, t := range ts {
+		if _, ok := idx[t.elem]; t.elem != nil && !ok {
+			idx[t.elem] = len(distinct)
+			distinct = append(distinct, t.elem)
+		}
+	}
+	elems := ""
+	if len(distinct) > 0 {
+		elems = g.claim("elemTypes")
+		w.p("")
+		w.p("// %s are the element types of the world's streams and futures.", elems)
+		w.p("var %s struct {", elems)
+		w.p("resolve component.Resolver")
+		w.p("t [%d]component.TypeRef", len(distinct))
+		w.p("}")
+		w.p("")
+		w.p("func init() {")
+		w.p("tbl := component.NewTypeTable()")
+		names := map[*typ]string{}
+		for i, t := range distinct {
+			defineRefs(w, names, t)
+			w.p("%s.t[%d] = %s", elems, i, t.ref(names))
+		}
+		w.p("%s.resolve = tbl.Resolver()", elems)
+		w.p("}")
+	}
+	for _, t := range ts {
+		k := "Stream"
+		if t.kind == kFuture {
+			k = "Future"
+		}
+		name := "New" + k + t.elem.label()
+		for n := name; taken[name]; {
+			name = n + "_"
+		}
+		taken[name] = true
+		et := t.elem.armType()
+		elem, resolve := "nil", "nil"
+		if t.elem != nil {
+			elem, resolve = fmt.Sprintf("&%s.t[%d]", elems, idx[t.elem]), elems+".resolve"
+		}
+		w.p("")
+		w.p("// %s makes a %s: write to the writer, and pass the reader to the", name, t.witString())
+		w.p("// component or read it.")
+		w.p("func (x *%s) %s() (*witgo.%sWriter[%s], *witgo.%sReader[%s], error) {", g.worldGo, name, k, et, k, et)
+		w.p("return witgo.New%s(x.inst, %s, %s, %s, %s)", k, elem, resolve, t.elem.elemLift(), t.elem.elemLower())
+		w.p("}")
+	}
+}
+
+// label is a Go name for t, for a stream constructor's.
+func (t *typ) label() string {
+	if t == nil {
+		return ""
+	}
+	if t.goName != "" {
+		return t.goName
+	}
+	switch t.kind {
+	case kPrim:
+		return pascal(t.prim)
+	case kHandle:
+		return t.res.goName
+	case kList:
+		return "List" + t.elem.label()
+	case kFixed:
+		return fmt.Sprintf("List%d", t.n) + t.elem.label()
+	case kOption:
+		return "Option" + t.elem.label()
+	case kResult:
+		return "Result" + t.ok.label() + t.err.label()
+	case kMap:
+		return "Map" + t.key.label() + t.elem.label()
+	}
+	var b strings.Builder
+	b.WriteString("Tuple")
+	for _, e := range t.elems {
+		b.WriteString(e.label())
+	}
+	return b.String()
 }
 
 // emitExportFunc writes the method calling the export b on recv: from its
