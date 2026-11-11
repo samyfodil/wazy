@@ -137,6 +137,11 @@ type VariantValue = abi.VariantValue
 // proceed", and ResultValue for a WIT-declared failure.
 type ResultValue = abi.ResultValue
 
+// Some is some(v) for an option whose payload is itself an option, where nil
+// would be none at either level: Some{nil} is some(none). Such an option lifts
+// with it; any option takes it, or a bare value, when lowered.
+type Some = abi.Some
+
 // Prim is the ergonomic spelling of a primitive TypeRef: Prim("u32"),
 // Prim("string"). Valid names are bool, s8, s16, s32, s64, u8, u16, u32,
 // u64, f32, f64, char, string.

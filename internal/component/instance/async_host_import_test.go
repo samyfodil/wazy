@@ -547,7 +547,7 @@ func TestWaitableSetWaitHostFunc_DrivesToPendingEvent(t *testing.T) {
 		return nil
 	})
 
-	waitFn := waitableSetWaitHostFunc(in, binary.Canon{})
+	waitFn := waitableSetWaitHostFunc(in, binary.Canon{}, nil)
 	stack := []uint64{uint64(set), 0} // ptr=0
 	waitFn.fn.Call(context.Background(), mod, stack)
 	if eventCode(stack[0]) != eventSubtask {
@@ -565,7 +565,7 @@ func TestWaitableSetWaitHostFunc_DeadlockTraps(t *testing.T) {
 	in := newAsyncInst()
 	in.activeTask = &task{}
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
-	waitFn := waitableSetWaitHostFunc(in, binary.Canon{})
+	waitFn := waitableSetWaitHostFunc(in, binary.Canon{}, nil)
 	requirePanicContains(t, "deadlock", func() {
 		waitFn.fn.Call(context.Background(), mod, []uint64{uint64(set), 0})
 	})
@@ -575,7 +575,7 @@ func TestWaitableSetWaitHostFunc_BadKindTraps(t *testing.T) {
 	in := newAsyncInst()
 	in.activeTask = &task{}
 	res := in.resources.addEntry(&resourceEntry{})
-	waitFn := waitableSetWaitHostFunc(in, binary.Canon{})
+	waitFn := waitableSetWaitHostFunc(in, binary.Canon{}, nil)
 	requirePanicContains(t, "is not a waitable set", func() {
 		waitFn.fn.Call(context.Background(), nil, []uint64{uint64(res), 0})
 	})
@@ -583,7 +583,7 @@ func TestWaitableSetWaitHostFunc_BadKindTraps(t *testing.T) {
 
 func TestWaitableSetWaitHostFunc_MayLeaveFalseTraps(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false, resources: newHandleTable()}
-	waitFn := waitableSetWaitHostFunc(in, binary.Canon{})
+	waitFn := waitableSetWaitHostFunc(in, binary.Canon{}, nil)
 	requirePanicContains(t, "may not be left", func() {
 		waitFn.fn.Call(context.Background(), nil, []uint64{0, 0})
 	})
@@ -598,7 +598,7 @@ func TestWaitableSetPollHostFunc_NoneThenEvent(t *testing.T) {
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(sub), uint64(set))
 
-	pollFn := waitableSetPollHostFunc(in, binary.Canon{})
+	pollFn := waitableSetPollHostFunc(in, binary.Canon{}, nil)
 	stack := []uint64{uint64(set), 0}
 	pollFn.fn.Call(context.Background(), mod, stack)
 	if eventCode(stack[0]) != eventNone {
@@ -617,7 +617,7 @@ func TestWaitableSetPollHostFunc_BadKindTraps(t *testing.T) {
 	in := newAsyncInst()
 	in.activeTask = &task{}
 	res := in.resources.addEntry(&resourceEntry{})
-	pollFn := waitableSetPollHostFunc(in, binary.Canon{})
+	pollFn := waitableSetPollHostFunc(in, binary.Canon{}, nil)
 	requirePanicContains(t, "is not a waitable set", func() {
 		pollFn.fn.Call(context.Background(), nil, []uint64{uint64(res), 0})
 	})
@@ -625,7 +625,7 @@ func TestWaitableSetPollHostFunc_BadKindTraps(t *testing.T) {
 
 func TestWaitableSetPollHostFunc_MayLeaveFalseTraps(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: false, resources: newHandleTable()}
-	pollFn := waitableSetPollHostFunc(in, binary.Canon{})
+	pollFn := waitableSetPollHostFunc(in, binary.Canon{}, nil)
 	requirePanicContains(t, "may not be left", func() {
 		pollFn.fn.Call(context.Background(), nil, []uint64{0, 0})
 	})

@@ -535,7 +535,11 @@ func lowerFlatEnum(v Value, desc binary.EnumDesc) ([]CoreValue, error) {
 // lowerFlatImpl's OptionDesc case); nil computes it on the branch that needs
 // it.
 func lowerFlatOption(v Value, elemType binary.TypeDesc, elemFlat []string, resolve Resolver, realloc Realloc, mem []byte) ([]CoreValue, error) {
-	if v == nil {
+	some := v != nil
+	if s, ok := v.(Some); ok {
+		v, some = s.Value, true
+	}
+	if !some {
 		// None: discriminant 0, then zero-padding for the element's width --
 		// the one branch that needs the element's flat kinds itself.
 		elemFlatTypes := elemFlat
@@ -1252,7 +1256,11 @@ func liftFlatOption(vi valueIter, elemType binary.TypeDesc, elemFlat []string, r
 		return nil, nil
 	case 1:
 		// Some
-		return liftFlatImpl(vi, elemType, elemFlat, resolve, mem)
+		x, err := liftFlatImpl(vi, elemType, elemFlat, resolve, mem)
+		if _, nested := elemType.(binary.OptionDesc); nested && err == nil {
+			return Some{x}, nil
+		}
+		return x, err
 	default:
 		return nil, fmt.Errorf("liftFlat option: invalid discriminant %d", disc)
 	}

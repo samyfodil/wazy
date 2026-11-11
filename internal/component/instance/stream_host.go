@@ -37,6 +37,30 @@ func (in *Instance) requireSchedulable(op string) {
 	}
 }
 
+// settle drives the tasks a host stream op made ready -- a guest's parked
+// copy it completed, say -- when the op ran between calls, so a task that
+// returned and is still writing (see invokeAsyncCallback) makes progress
+// without a further call. Inside a call, a host callback or a resumed task,
+// whoever drives the scheduler already will. A trap in a resumed task poisons the instance,
+// and the next call reports it.
+func (in *Instance) settle() {
+	if in == nil || in.activeTask != nil || in.sched.pumping || in.inHostCall > 0 || in.asyncActive.Load() {
+		return
+	}
+	if err := in.sched.drainReady(); err != nil && in.lateErr == nil {
+		in.lateErr = err
+	}
+}
+
+// cannotEnter is the error for a call into an instance that refuses entry,
+// carrying the trap that poisoned it after its call returned, if one did.
+func (in *Instance) cannotEnter(export string) error {
+	if in.lateErr != nil {
+		return fmt.Errorf("component/instance: export %q: cannot enter component instance: %w", export, in.lateErr)
+	}
+	return fmt.Errorf("component/instance: export %q: cannot enter component instance", export)
+}
+
 // StreamWriter is the host-held writable end of a stream whose readable end
 // lives (or will live) in a guest table. NOT a table entry, NOT a waitable:
 // completion surfaces as Go callbacks, not events.
@@ -100,22 +124,74 @@ func resolveNewElem(resolve abi.Resolver, elem binary.TypeDesc) (elemSz, align u
 // result (host_import.go's allocHandleResult does the same). elem is nil for
 // a bare stream.
 func (in *Instance) NewStream(elem binary.TypeDesc) (*StreamWriter, abi.Value, error) {
-	elemSz, align, numeric, err := resolveNewElem(in.resolve, elem)
+	return in.newStream(elem, in.resolve)
+}
+
+// NewStreamOf is NewStream for an element type named in the host's own type
+// space: elem is resolved by resolve, such as a TypeTable's, rather than by
+// the component's. elem is nil for a bare stream. It returns both ends: the
+// host reads the reader itself, or hands it to the guest as a call argument
+// or an import's result, after which it is the guest's.
+func (in *Instance) NewStreamOf(elem *binary.TypeRef, resolve abi.Resolver) (*StreamWriter, *StreamReader, error) {
+	d, err := newElemDesc(elem, resolve)
 	if err != nil {
 		return nil, nil, err
 	}
-	shared := &sharedStream{elem: elem, elemSz: elemSz, align: align, numeric: numeric}
+	w, _, err := in.newStream(d, resolve)
+	if err != nil {
+		return nil, nil, err
+	}
+	return w, &StreamReader{in: in, shared: w.shared, state: copyIdle}, nil
+}
+
+func (in *Instance) newStream(elem binary.TypeDesc, resolve abi.Resolver) (*StreamWriter, abi.Value, error) {
+	elemSz, align, numeric, err := resolveNewElem(resolve, elem)
+	if err != nil {
+		return nil, nil, err
+	}
+	shared := &sharedStream{elem: elem, elemSz: elemSz, align: align, numeric: numeric, elemResolve: resolve}
 	return &StreamWriter{in: in, shared: shared, state: copyIdle}, shared, nil
 }
 
 // NewFuture is NewStream's future twin.
 func (in *Instance) NewFuture(elem binary.TypeDesc) (*FutureWriter, abi.Value, error) {
-	elemSz, align, numeric, err := resolveNewElem(in.resolve, elem)
+	return in.newFuture(elem, in.resolve)
+}
+
+// NewFutureOf is NewStreamOf's future twin.
+func (in *Instance) NewFutureOf(elem *binary.TypeRef, resolve abi.Resolver) (*FutureWriter, *FutureReader, error) {
+	d, err := newElemDesc(elem, resolve)
 	if err != nil {
 		return nil, nil, err
 	}
-	shared := &sharedFuture{elem: elem, elemSz: elemSz, align: align, numeric: numeric}
+	w, _, err := in.newFuture(d, resolve)
+	if err != nil {
+		return nil, nil, err
+	}
+	return w, &FutureReader{in: in, shared: w.shared, state: copyIdle}, nil
+}
+
+func (in *Instance) newFuture(elem binary.TypeDesc, resolve abi.Resolver) (*FutureWriter, abi.Value, error) {
+	elemSz, align, numeric, err := resolveNewElem(resolve, elem)
+	if err != nil {
+		return nil, nil, err
+	}
+	shared := &sharedFuture{elem: elem, elemSz: elemSz, align: align, numeric: numeric, elemResolve: resolve}
 	return &FutureWriter{in: in, shared: shared, state: copyIdle}, shared, nil
+}
+
+func newElemDesc(elem *binary.TypeRef, resolve abi.Resolver) (binary.TypeDesc, error) {
+	if elem == nil {
+		return nil, nil
+	}
+	if elem.Primitive == "" && resolve == nil {
+		return nil, fmt.Errorf("stream/future element type: no resolver for type index")
+	}
+	d, err := resolveTypeRef(elem, resolve)
+	if err != nil {
+		return nil, fmt.Errorf("stream/future element type: %w", err)
+	}
+	return d, nil
 }
 
 func (w *StreamWriter) copying() bool { return w.state == copyCopying || w.state == copyCancelling }
@@ -130,8 +206,13 @@ func (w *StreamWriter) copying() bool { return w.state == copyCopying || w.state
 //
 // A second Write before onDone fires panics: rendezvous streams have no
 // host-side queue, by design.
+//
+// onDone runs on the driving goroutine -- inline, or from inside the guest's
+// stream builtin -- so it counts as a host call while it runs: it may write,
+// read, close, or resolve an AsyncCall. So does every host end's callback.
 func (w *StreamWriter) Write(vals []abi.Value, onDone func(res CopyResult, n uint32)) {
 	w.in.requireSchedulable("StreamWriter.Write")
+	defer w.in.settle()
 	if w.state != copyIdle {
 		panic(fmt.Errorf("component/instance: StreamWriter.Write called while a previous Write is still pending"))
 	}
@@ -142,7 +223,9 @@ func (w *StreamWriter) Write(vals []abi.Value, onDone func(res CopyResult, n uin
 		if res == copyDropped {
 			w.state = copyDone
 		}
+		w.in.inHostCall++ // a host call: see Write
 		onDone(CopyResult(res), buf.progressed())
+		w.in.inHostCall--
 	}
 	// onCopy fires only if THIS Write itself parked (no reader was ready
 	// yet) and a LATER guest/host read drains our buffer -- reclaim
@@ -164,6 +247,7 @@ func (w *StreamWriter) Write(vals []abi.Value, onDone func(res CopyResult, n uin
 // DROPPED; subsequent guest reads get DROPPED immediately. Idempotent.
 func (w *StreamWriter) Close() {
 	w.in.requireSchedulable("StreamWriter.Close")
+	defer w.in.settle()
 	if w.copying() {
 		panic(fmt.Errorf("component/instance: StreamWriter.Close called during a pending Write; Cancel it first"))
 	}
@@ -175,6 +259,7 @@ func (w *StreamWriter) Close() {
 // CANCELLED and the partial progress. No-op if the Write already completed.
 func (w *StreamWriter) Cancel() {
 	w.in.requireSchedulable("StreamWriter.Cancel")
+	defer w.in.settle()
 	if w.state != copyCopying {
 		return
 	}
@@ -189,6 +274,7 @@ func (r *StreamReader) copying() bool { return r.state == copyCopying || r.state
 // Read requests up to n elements. Same one-shot/park contract as Write.
 func (r *StreamReader) Read(n uint32, onDone func(res CopyResult, vals []abi.Value)) {
 	r.in.requireSchedulable("StreamReader.Read")
+	defer r.in.settle()
 	if r.state != copyIdle {
 		panic(fmt.Errorf("component/instance: StreamReader.Read called while a previous Read is still pending"))
 	}
@@ -199,7 +285,9 @@ func (r *StreamReader) Read(n uint32, onDone func(res CopyResult, vals []abi.Val
 		if res == copyDropped {
 			r.state = copyDone
 		}
+		r.in.inHostCall++ // a host call: see Write
 		onDone(CopyResult(res), buf.vals)
+		r.in.inHostCall--
 	}
 	// See StreamWriter.Write's onCopy doc: reclaim-then-fire inline is the
 	// host end's delivery step.
@@ -217,6 +305,7 @@ func (r *StreamReader) Read(n uint32, onDone func(res CopyResult, vals []abi.Val
 // with DROPPED.
 func (r *StreamReader) Close() {
 	r.in.requireSchedulable("StreamReader.Close")
+	defer r.in.settle()
 	if r.copying() {
 		panic(fmt.Errorf("component/instance: StreamReader.Close called during a pending Read; Cancel it first"))
 	}
@@ -227,6 +316,7 @@ func (r *StreamReader) Close() {
 // Cancel revokes a parked Read.
 func (r *StreamReader) Cancel() {
 	r.in.requireSchedulable("StreamReader.Cancel")
+	defer r.in.settle()
 	if r.state != copyCopying {
 		return
 	}
@@ -240,6 +330,7 @@ func (r *StreamReader) Cancel() {
 // the guest reads (or reports DROPPED if the reader closed first).
 func (w *FutureWriter) Set(v abi.Value, onDone func(res CopyResult)) {
 	w.in.requireSchedulable("FutureWriter.Set")
+	defer w.in.settle()
 	if w.state != copyIdle {
 		panic(fmt.Errorf("component/instance: FutureWriter.Set called more than once"))
 	}
@@ -247,7 +338,9 @@ func (w *FutureWriter) Set(v abi.Value, onDone func(res CopyResult)) {
 	w.state = copyCopying
 	err := w.shared.write(nil, buf, func(res copyResult) {
 		w.state = copyDone // a future is one-shot: completed or dropped, both terminal
+		w.in.inHostCall++  // a host call: see Write
 		onDone(CopyResult(res))
+		w.in.inHostCall--
 	})
 	if err != nil {
 		panic(fmt.Errorf("component/instance: FutureWriter.Set: %w", err))
@@ -258,6 +351,7 @@ func (w *FutureWriter) Set(v abi.Value, onDone func(res CopyResult)) {
 // (WritableFutureEnd.drop's trap_if(state != DONE)) -- panics otherwise.
 func (w *FutureWriter) Close() {
 	w.in.requireSchedulable("FutureWriter.Close")
+	defer w.in.settle()
 	if w.state != copyDone {
 		panic(fmt.Errorf("component/instance: FutureWriter.Close called before Set completed (or observed DROPPED)"))
 	}
@@ -269,6 +363,7 @@ func (r *FutureReader) copying() bool { return r.state == copyCopying || r.state
 // Get requests the future's one value.
 func (r *FutureReader) Get(onDone func(res CopyResult, v abi.Value)) {
 	r.in.requireSchedulable("FutureReader.Get")
+	defer r.in.settle()
 	if r.state != copyIdle {
 		panic(fmt.Errorf("component/instance: FutureReader.Get called more than once"))
 	}
@@ -280,7 +375,9 @@ func (r *FutureReader) Get(onDone func(res CopyResult, v abi.Value)) {
 		if len(buf.vals) == 1 {
 			v = buf.vals[0]
 		}
+		r.in.inHostCall++ // a host call: see Write
 		onDone(CopyResult(res), v)
+		r.in.inHostCall--
 	})
 	if err != nil {
 		panic(fmt.Errorf("component/instance: FutureReader.Get: %w", err))
@@ -291,6 +388,7 @@ func (r *FutureReader) Get(onDone func(res CopyResult, v abi.Value)) {
 // with DROPPED.
 func (r *FutureReader) Close() {
 	r.in.requireSchedulable("FutureReader.Close")
+	defer r.in.settle()
 	if r.copying() {
 		panic(fmt.Errorf("component/instance: FutureReader.Close called during a pending Get; Cancel it first"))
 	}
@@ -301,6 +399,7 @@ func (r *FutureReader) Close() {
 // Cancel revokes a parked Get.
 func (r *FutureReader) Cancel() {
 	r.in.requireSchedulable("FutureReader.Cancel")
+	defer r.in.settle()
 	if r.state != copyCopying {
 		return
 	}

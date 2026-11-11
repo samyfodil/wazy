@@ -169,6 +169,23 @@ func (t *TypeTable) Flags(names ...string) TypeRef {
 	return t.Add(binary.FlagsDesc{Names: names})
 }
 
+// Stream interns stream<elem>. Pass the zero TypeRef for a bare stream.
+func (t *TypeTable) Stream(elem TypeRef) TypeRef {
+	return t.Add(binary.StreamDesc{Element: optRef(elem)})
+}
+
+// Future interns future<elem>. Pass the zero TypeRef for a bare future.
+func (t *TypeTable) Future(elem TypeRef) TypeRef {
+	return t.Add(binary.FutureDesc{Element: optRef(elem)})
+}
+
+func optRef(r TypeRef) *TypeRef {
+	if r == (TypeRef{}) {
+		return nil
+	}
+	return &r
+}
+
 // Own interns own<R> for the resource identified by tag -- the same tag
 // passed to WithResourceTag and used when minting handles.
 func (t *TypeTable) Own(tag uint32) TypeRef {

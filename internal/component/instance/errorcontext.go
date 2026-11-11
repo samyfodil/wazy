@@ -14,20 +14,29 @@ import (
 // canon_error_context_* (~2770). See
 // docs/component-model-async-runtime-design.md §2.3.
 
-// errorContext is the reference ErrorContext: a table entry holding a debug
+// ErrorContext is the reference ErrorContext: a table entry holding a debug
 // message. Lift is a GET (the sender KEEPS its handle, unlike a stream's
-// readable end); lower is an addEntry sharing the same *errorContext -- copy
+// readable end); lower is an addEntry sharing the same *ErrorContext -- copy
 // semantics, two live handles, each dropped independently.
-type errorContext struct {
+//
+// The host gets one as an import's error-context argument or an export's
+// result, and passes one, or a string to make one of, the other way.
+type ErrorContext struct {
 	debugMessage string
 }
 
-func (*errorContext) entryKind() entryKind { return entryErrorContext }
+// NewErrorContext is an error context of the host's, with message msg.
+func NewErrorContext(msg string) *ErrorContext { return &ErrorContext{debugMessage: msg} }
+
+// DebugMessage is the message the error context was made with.
+func (e *ErrorContext) DebugMessage() string { return e.debugMessage }
+
+func (*ErrorContext) entryKind() entryKind { return entryErrorContext }
 
 // errorContextNewHostFunc backs error-context.new (CanonKindErrorContextNew,
 // 0x1c). Core sig (ptr:i32, len:i32) -> i32: load the message string from the
 // canon's memory opt (bounds + UTF-8 traps per load_string_from_range), then
-// addEntry(&errorContext{debugMessage: s}).
+// addEntry(&ErrorContext{debugMessage: s}).
 //
 // Deviation, pinned by the design doc: the reference's DETERMINISTIC_PROFILE
 // stores ” and skips the load entirely (no traps); wazy always loads (traps
@@ -57,7 +66,7 @@ func errorContextNewHostFunc(in *Instance, memMod api.Module) hostFuncDef {
 			panic(fmt.Errorf("component/instance: error-context.new: load message: %w", err))
 		}
 		msg, _ := s.(string)
-		stack[0] = uint64(in.resources.addEntry(&errorContext{debugMessage: msg}))
+		stack[0] = uint64(in.resources.addEntry(&ErrorContext{debugMessage: msg}))
 	})
 	return hostFuncDef{fn: fn, params: []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, results: []api.ValueType{api.ValueTypeI32}}
 }
@@ -74,7 +83,7 @@ func errorContextDebugMessageHostFunc(in *Instance, memMod api.Module, reallocFn
 		}
 		h, ptr := api.DecodeU32(stack[0]), api.DecodeU32(stack[1])
 		raw, ok := in.resources.getEntry(h)
-		ec, isEC := raw.(*errorContext)
+		ec, isEC := raw.(*ErrorContext)
 		if !ok || !isEC {
 			panic(fmt.Errorf("component/instance: error-context.debug-message: handle %d is not an error-context", h))
 		}
@@ -100,7 +109,7 @@ func errorContextDropHostFunc(in *Instance) hostFuncDef {
 		requireMayLeave(in, "error-context.drop")
 		h := api.DecodeU32(stack[0])
 		raw, ok := in.resources.getEntry(h)
-		_, isEC := raw.(*errorContext)
+		_, isEC := raw.(*ErrorContext)
 		if !ok || !isEC {
 			panic(fmt.Errorf("component/instance: error-context.drop: handle %d is not an error-context", h))
 		}

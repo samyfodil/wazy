@@ -1,0 +1,156 @@
+package wazy:bindgen-test@0.1.0;
+
+interface types {
+  /// A host resource with no functions of its own: host mints and reads it.
+  resource token;
+  record point { x: s32, y: s32, label: string }
+  enum color { red, green, blue }
+  flags perms { read, write, exec }
+  variant shape { circle(f64), rect(point), empty }
+  /// A stream and a future, nested in a record.
+  record body { data: stream<u8>, trailer: future<u32> }
+  record everything {
+    b: bool,
+    tiny: s8,
+    utiny: u8,
+    short: s16,
+    ushort: u16,
+    int: s32,
+    uint: u32,
+    long: s64,
+    ulong: u64,
+    single: f32,
+    double: f64,
+    c: char,
+    s: string,
+    bytes: list<u8>,
+    words: list<string>,
+    points: list<point>,
+    maybe: option<point>,
+    nothing: option<u32>,
+    pair: tuple<u32, string>,
+    fixed: list<u16, 3>,
+    col: color,
+    per: perms,
+    shapes: list<shape>,
+  }
+}
+
+interface host {
+  use types.{point, color, perms, shape, everything, token, body};
+
+  resource counter {
+    constructor(start: u32);
+    bump: func(by: u32) -> u32;
+    zero: static func() -> counter;
+  }
+
+  echo: func(e: everything) -> everything;
+  classify: func(s: shape) -> result<color, string>;
+  checked: func(n: u32) -> result<_, string>;
+  pick: func(c: color, p: perms) -> option<string>;
+  mint: func(v: u32) -> token;
+  peek: func(t: borrow<token>) -> u32;
+  mint-pair: func(a: u32, b: u32) -> tuple<token, token>;
+  peek-all: func(ts: list<borrow<token>>) -> u32;
+  try-mint: func(v: u32) -> result<token, string>;
+  deepen: func(x: option<option<u32>>) -> option<option<u32>>;
+
+  slow-add: async func(a: u32, b: u32) -> u32;
+  slow-shape: async func(s: shape) -> result<color, string>;
+  slow-ping: async func();
+  slow-mint: async func(a: u32, b: u32) -> tuple<token, token>;
+
+  /// The bytes 0..n, in a stream the host makes and writes.
+  count-up: async func(n: u32) -> stream<u8>;
+  /// The host reads every point, and returns the sum of their coordinates.
+  sum-points: async func(s: stream<point>) -> s32;
+  /// A future the host sets to the shape's color, or its error.
+  color-later: func(s: shape) -> future<result<color, string>>;
+  /// The host reads the future, and returns its value doubled.
+  wait-for: async func(f: future<u32>) -> u32;
+
+  /// An error context of the host's, saying what code means.
+  explain: func(code: u32) -> error-context;
+  /// The message of an error context the guest passes.
+  describe: func(e: error-context) -> string;
+
+  /// A body of the bytes 0..n, with the trailer n*7.
+  open-body: async func(n: u32) -> result<body, string>;
+  /// The sum of a body's bytes and its trailer.
+  sum-body: async func(b: body) -> u32;
+  /// The error contexts e0 to e(n-1).
+  errors: func(n: u32) -> list<error-context>;
+  /// The messages of the error contexts, joined with commas.
+  messages: func(es: list<error-context>) -> string;
+  /// sum-body plus a to d: past the flat limit, so the arguments spill.
+  spill-body: async func(a: u32, b: u32, c: u32, d: u32, x: body) -> u32;
+  /// messages, with sixteen more arguments than it needs.
+  spill-errors: func(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32, i: u32, j: u32, k: u32, l: u32, m: u32, n: u32, o: u32, p: u32, es: list<error-context>) -> string;
+}
+
+interface api {
+  use types.{point, color, perms, shape, everything, token, body};
+
+  /// A resource the guest implements: a growable string.
+  resource blob {
+    constructor(init: string);
+    append: func(s: string);
+    read: func() -> string;
+    join: static func(a: borrow<blob>, b: borrow<blob>) -> blob;
+    measure: async func() -> u32;
+  }
+
+  make-blobs: func(n: u32) -> list<blob>;
+  blob-size: func(b: borrow<blob>) -> u32;
+  tally: func(ts: list<token>) -> u32;
+  take-token: func(t: token) -> u32;
+  give-token: func(v: u32) -> token;
+  peek-token: func(t: borrow<token>) -> u32;
+  pair-tokens: func(a: u32, b: u32) -> u32;
+  nest: func(x: option<option<u32>>) -> option<option<u32>>;
+  fetch: async func(a: u32, b: u32) -> u32;
+  fetch-shape: async func(s: shape) -> result<color, string>;
+  fire: async func() -> u32;
+  fetch-tokens: async func(a: u32, b: u32) -> u32;
+
+  sum-bytes: async func(s: stream<u8>) -> u32;
+  points: async func(n: u32) -> stream<point>;
+  relay: async func(n: u32) -> s32;
+  color-of: async func(s: shape) -> result<color, string>;
+  double: async func(f: future<u32>) -> u32;
+  hand-off: async func(v: u32) -> u32;
+  ready: async func(v: u32) -> future<u32>;
+  count-ticks: async func(s: stream) -> u32;
+
+  fail: async func(msg: string) -> error-context;
+  reason: func(e: error-context) -> string;
+  relay-error: func(code: u32) -> string;
+
+  read-body: async func(b: body) -> u32;
+  make-body: async func(n: u32) -> body;
+  pipe-body: async func(n: u32) -> u32;
+  join-errors: func(es: list<error-context>) -> string;
+  relay-errors: func(n: u32) -> string;
+  some-error: async func(fail: bool) -> option<error-context>;
+  pipe-spilled: async func(n: u32) -> u32;
+  relay-spilled: func(n: u32) -> string;
+
+  roundtrip: func(e: everything) -> everything;
+  area: func(s: shape) -> f64;
+  check: func(n: u32) -> result<u32, string>;
+  first: func(xs: list<point>) -> option<point>;
+  swap: func(t: tuple<string, u32>) -> tuple<u32, string>;
+  use-counter: func(start: u32, by: u32) -> u32;
+  classify-all: func(xs: list<shape>) -> list<result<color, string>>;
+  pick-name: func(c: color, p: perms) -> option<string>;
+  use-tokens: func(a: u32, b: u32) -> u32;
+  nothing: func();
+}
+
+world kitchen {
+  import host;
+  export api;
+  export ping: func(s: string) -> string;
+  export top: async func(s: string) -> string;
+}

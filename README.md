@@ -76,7 +76,7 @@ out, err := inst.Call(ctx, "run")
 fmt.Println(out[0].(string))
 ```
 
-Declare that contract yourself in a `.wit` file and implement the host half in Go: [`examples/custom-wit`](examples/custom-wit). Plain core modules and WASI 0.1 work the same way, through `r.Instantiate` and `mod.ExportedFunction` — [`examples/basic`](examples/basic). More in [`examples/`](examples/README.md).
+Declare that contract yourself in a `.wit` file and implement the host half in Go: [`examples/custom-wit`](examples/custom-wit), or let [`cmd/wazy-bindgen`](cmd/wazy-bindgen) generate the Go types and interfaces for it. Plain core modules and WASI 0.1 work the same way, through `r.Instantiate` and `mod.ExportedFunction` — [`examples/basic`](examples/basic). More in [`examples/`](examples/README.md).
 
 ## Why run Wasm inside your Go process?
 

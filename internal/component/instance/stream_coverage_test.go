@@ -387,26 +387,52 @@ func TestComposition_StreamFutureSeams(t *testing.T) {
 	if _, err := providerHandleToRep(sub, binary.FutureDesc{}, "not-a-handle"); err == nil {
 		t.Fatal("expected a trap: non-uint32 provider handle (future)")
 	}
+
+	// A sync lift already took the readable end, or read the error context.
+	sr := &StreamReader{shared: &sharedStream{}}
+	if v, err := providerHandleToRep(sub, binary.StreamDesc{}, sr); err != nil || v != sr.shared {
+		t.Fatalf("lifted stream: %v", err)
+	}
+	fr := &FutureReader{shared: &sharedFuture{}}
+	if v, err := providerHandleToRep(sub, binary.FutureDesc{}, fr); err != nil || v != fr.shared {
+		t.Fatalf("lifted future: %v", err)
+	}
+	ecDesc := binary.PrimitiveDesc{Prim: "error-context"}
+	ec := NewErrorContext("e")
+	if v, err := providerHandleToRep(sub, ecDesc, ec); err != nil || v != ec {
+		t.Fatalf("lifted error-context: %v", err)
+	}
+	// An async lift's task.return hands back the provider's handle.
+	eh := sub.resources.addEntry(ec)
+	if v, err := providerHandleToRep(sub, ecDesc, eh); err != nil || v != ec {
+		t.Fatalf("error-context handle: %v", err)
+	}
+	if _, err := providerHandleToRep(sub, ecDesc, uint32(999)); err == nil {
+		t.Fatal("expected a trap: a handle that is not an error-context")
+	}
+	if v, err := providerHandleToRep(sub, binary.PrimitiveDesc{Prim: "u32"}, uint32(4)); err != nil || v != uint32(4) {
+		t.Fatalf("u32 result: %v", err)
+	}
 }
 
 // ---- host_import.go: resolveHandleArg / allocHandleResult error paths ----
 
 func TestResolveHandleArg_StreamFutureErrorContext_ErrorPaths(t *testing.T) {
 	tbl := newHandleTable()
-	if _, err := resolveHandleArg(nil, tbl, nil, binary.StreamDesc{}, "not-uint32"); err == nil {
+	if _, err := resolveHandleArg(nil, tbl, nil, nil, binary.StreamDesc{}, "not-uint32"); err == nil {
 		t.Fatal("expected a trap: non-uint32 stream arg")
 	}
-	if _, err := resolveHandleArg(nil, tbl, nil, binary.FutureDesc{}, "not-uint32"); err == nil {
+	if _, err := resolveHandleArg(nil, tbl, nil, nil, binary.FutureDesc{}, "not-uint32"); err == nil {
 		t.Fatal("expected a trap: non-uint32 future arg")
 	}
-	if _, err := resolveHandleArg(nil, tbl, nil, binary.PrimitiveDesc{Prim: "error-context"}, "not-uint32"); err == nil {
+	if _, err := resolveHandleArg(nil, tbl, nil, nil, binary.PrimitiveDesc{Prim: "error-context"}, "not-uint32"); err == nil {
 		t.Fatal("expected a trap: non-uint32 error-context arg")
 	}
 	// Unknown handle.
-	if _, err := resolveHandleArg(nil, tbl, nil, binary.StreamDesc{}, uint32(999)); err == nil {
+	if _, err := resolveHandleArg(nil, tbl, nil, nil, binary.StreamDesc{}, uint32(999)); err == nil {
 		t.Fatal("expected a trap: unknown stream handle")
 	}
-	if _, err := resolveHandleArg(nil, tbl, nil, binary.PrimitiveDesc{Prim: "error-context"}, uint32(999)); err == nil {
+	if _, err := resolveHandleArg(nil, tbl, nil, nil, binary.PrimitiveDesc{Prim: "error-context"}, uint32(999)); err == nil {
 		t.Fatal("expected a trap: unknown error-context handle")
 	}
 }
@@ -434,13 +460,13 @@ func TestAllocHandleResult_StreamFutureErrorContext(t *testing.T) {
 		t.Fatal("allocHandleResult(future) did not wrap the shared object")
 	}
 
-	// error-context: string constructs fresh; *errorContext shares.
+	// error-context: string constructs fresh; *ErrorContext shares.
 	vs, err := allocHandleResult(tbl, binary.PrimitiveDesc{Prim: "error-context"}, "boom")
 	if err != nil {
 		t.Fatal(err)
 	}
 	rawS, _ := tbl.getEntry(vs.(uint32))
-	if rawS.(*errorContext).debugMessage != "boom" {
+	if rawS.(*ErrorContext).debugMessage != "boom" {
 		t.Fatal("allocHandleResult(error-context, string) did not set the message")
 	}
 
@@ -666,8 +692,8 @@ func TestPhase2EntryKinds(t *testing.T) {
 	if (&futureEnd{}).entryKind() != entryFutureEnd {
 		t.Error("futureEnd.entryKind mismatch")
 	}
-	if (&errorContext{}).entryKind() != entryErrorContext {
-		t.Error("errorContext.entryKind mismatch")
+	if (&ErrorContext{}).entryKind() != entryErrorContext {
+		t.Error("ErrorContext.entryKind mismatch")
 	}
 	fe := &futureEnd{}
 	if fe.waitablePtr() != &fe.waitable {
@@ -788,28 +814,28 @@ func TestTakeReadableFutureEnd_Traps(t *testing.T) {
 	in := newAsyncInst()
 	r, w := newBareFutureEnds(in)
 
-	if _, err := takeReadableFutureEnd(in, in.resources, nil, w); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, nil, in.resolve, w); err == nil {
 		t.Fatal("expected a trap transferring a writable future end as readable")
 	}
-	if _, err := takeReadableFutureEnd(in, in.resources, binary.PrimitiveDesc{Prim: "u32"}, r); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, binary.PrimitiveDesc{Prim: "u32"}, in.resolve, r); err == nil {
 		t.Fatal("expected an element-type-mismatch trap")
 	}
 
 	readFn := futureCopyHostFunc(in, sideReadable, eventFutureRead, nil, 0, 0, true, true, nil, nil)
 	callBuiltin(readFn, uint64(r), 0)
-	if _, err := takeReadableFutureEnd(in, in.resources, nil, r); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, nil, in.resolve, r); err == nil {
 		t.Fatal("expected a trap transferring a COPYING readable future end")
 	}
 
 	r2, _ := newBareFutureEnds(in)
 	set := uint32(callBuiltin(waitableSetNewHostFunc(in), 0)[0])
 	callBuiltin(waitableJoinHostFunc(in), uint64(r2), uint64(set))
-	if _, err := takeReadableFutureEnd(in, in.resources, nil, r2); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, nil, in.resolve, r2); err == nil {
 		t.Fatal("expected a trap transferring a waitable-set-joined readable future end")
 	}
 
 	r3, _ := newBareFutureEnds(in)
-	shared, err := takeReadableFutureEnd(in, in.resources, nil, r3)
+	shared, err := takeReadableFutureEnd(in, in.resources, nil, in.resolve, r3)
 	if err != nil {
 		t.Fatalf("clean transfer failed: %v", err)
 	}
@@ -820,14 +846,14 @@ func TestTakeReadableFutureEnd_Traps(t *testing.T) {
 		t.Fatal("transferred handle should be removed from the sender's table")
 	}
 	// Unknown handle.
-	if _, err := takeReadableFutureEnd(in, in.resources, nil, 999999); err == nil {
+	if _, err := takeReadableFutureEnd(in, in.resources, nil, in.resolve, 999999); err == nil {
 		t.Fatal("expected a trap: unknown future handle")
 	}
 }
 
 func TestTakeReadableStreamEnd_UnknownHandle(t *testing.T) {
 	in := newAsyncInst()
-	if _, err := takeReadableStreamEnd(in, in.resources, nil, 999999); err == nil {
+	if _, err := takeReadableStreamEnd(in, in.resources, nil, in.resolve, 999999); err == nil {
 		t.Fatal("expected a trap: unknown stream handle")
 	}
 }
@@ -962,7 +988,7 @@ func TestResolveNewElem_SizeAndAlignmentErrors(t *testing.T) {
 
 func TestErrorContextDebugMessage_TrapsWithoutMemory(t *testing.T) {
 	in := &Instance{sched: &sched{}, mayLeave: true, resources: newHandleTable()}
-	h := in.resources.addEntry(&errorContext{debugMessage: "x"})
+	h := in.resources.addEntry(&ErrorContext{debugMessage: "x"})
 	dmFn := errorContextDebugMessageHostFunc(in, nil, nil)
 	requirePanicContains(t, "no memory", func() {
 		dmFn.fn.Call(context.Background(), nil, []uint64{uint64(h), 0, 0, 0})

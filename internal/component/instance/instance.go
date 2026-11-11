@@ -448,6 +448,10 @@ type Instance struct {
 	// §3.2). Phase 2 addition; always 0 for a component with no async host
 	// import in flight.
 	inHostCall int
+
+	// lateErr is the trap of a task that ran after its call returned, driven
+	// by a host stream op (see settle): the next call reports it.
+	lateErr error
 }
 
 // CoreModuleCount returns the number of embedded core modules (real,
@@ -693,6 +697,7 @@ type boundExport struct {
 	resultUsesMemory bool
 	resultFlatKinds  []string
 	resultStep       abi.LiftStep // compiled result-lift plan (see abi.CompileLift)
+	resultNest       *asyncNest   // the streams, futures and error contexts nested in the result
 	resultErr        error
 }
 
@@ -733,6 +738,7 @@ type boundExportABI struct {
 	resultUsesMemory bool
 	resultFlatKinds  []string
 	resultStep       abi.LiftStep
+	resultNest       *asyncNest
 	resultErr        error
 }
 
@@ -755,14 +761,6 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			continue
 		}
 		m.paramTypes[i] = pt
-		if typeContainsAsyncValueNested(pt, resolve, 0) {
-			// Phase 2 bind-time ceiling: a stream/future/error-context
-			// nested inside a composite param is refused loudly rather than
-			// silently passed through as a bare uint32 (see
-			// typeContainsAsyncValueNested's doc).
-			m.paramErrs[i] = fmt.Errorf("param %d: stream/future/error-context nested inside a composite type is not supported by this milestone", i)
-			continue
-		}
 		m.paramUsesMemory[i] = usesMemory(pt, resolve)
 		// Compile the per-param lower plan once (the spill decision's Flatten
 		// happens here, not per call). A compile error is recorded like a
@@ -818,10 +816,7 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			return m
 		}
 		m.resultType = rt
-		if typeContainsAsyncValueNested(rt, resolve, 0) {
-			m.resultErr = fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
-			return m
-		}
+		m.resultNest = newAsyncNest(rt, resolve)
 		m.resultUsesMemory = usesMemory(rt, resolve)
 		flatKinds, err := abi.Flatten(rt, resolve)
 		if err != nil {
@@ -921,12 +916,9 @@ func typeRefContainsResource(ref *binary.TypeRef, resolve abi.Resolver, depth in
 }
 
 // typeContainsAsyncValueNested reports whether t contains a stream/future/
-// error-context type STRICTLY BELOW the top level -- the Phase 2 bind-time
-// ceiling (docs/component-model-async-phase2-design.md §2.2): the abi layer
-// lifts these as bare uint32 handles with no table transfer, which is
-// silently wrong once nested inside a record/list/variant/tuple/option/
-// result, so a bound export/import's param or result type may carry a
-// stream/future/error-context only at its own top level (depth == 0).
+// error-context type STRICTLY BELOW the top level: one the abi lifts and
+// lowers as a bare uint32 handle inside a record/list/variant/tuple/option/
+// result, which an asyncNest then moves across (async_nested.go).
 func typeContainsAsyncValueNested(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
 	if depth > maxResourceWalkDepth {
 		return false
@@ -994,11 +986,41 @@ func typeRefContainsAsyncValueNested(ref *binary.TypeRef, resolve abi.Resolver, 
 // The value is rebuilt (not mutated in place) only along paths that carry a
 // resource; leaf and resource-free subtrees are returned unchanged. Own handles
 // use TakeOwn (ownership transfers to the guest), borrow handles use Rep.
-func (in *Instance) resolveArgHandles(v abi.Value, t binary.TypeDesc) (abi.Value, error) {
-	return in.resolveArgHandlesDepth(v, t, 0)
+//
+// A borrow of a host resource is lent for the call: see lendHostBorrow, which
+// creates *scope the first time it needs one.
+func (in *Instance) resolveArgHandles(v abi.Value, t binary.TypeDesc, scope **task) (abi.Value, error) {
+	return in.resolveArgHandlesDepth(v, t, 0, scope)
 }
 
-func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth int) (abi.Value, error) {
+// lendHostBorrow lends the callee the host resource behind the handle v the
+// host holds: a borrow handle scoped to this call, which the callee drops
+// before it returns (lower_borrow, definitions.py ~1813-1815). Passing v
+// itself would let that drop take the host's own handle, and run the
+// resource's destructor.
+//
+// The handle's own entry names the resource -- the tag the host minted it
+// under -- since an export's parameter types use the component's indices.
+func (in *Instance) lendHostBorrow(v abi.Value, rt uint32, scope **task) (abi.Value, error) {
+	h, ok := v.(uint32)
+	if !ok {
+		return nil, fmt.Errorf("borrow<%d> arg: expected a uint32 handle, got %T", rt, v)
+	}
+	raw, ok := in.resources.getEntry(h)
+	e, isRes := raw.(*resourceEntry)
+	if !ok || !isRes {
+		return nil, fmt.Errorf("borrow<%d> arg: handle %d does not name a resource the host holds", rt, h)
+	}
+	if e.borrowScope != nil {
+		return v, nil // already a loan for this call: a delegated borrow (composition.go)
+	}
+	if *scope == nil {
+		*scope = &task{inst: in}
+	}
+	return in.resources.NewBorrowScoped(e.typeIdx, e.rep, *scope), nil
+}
+
+func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth int, scope **task) (abi.Value, error) {
 	if depth > maxResourceWalkDepth {
 		return v, nil
 	}
@@ -1022,9 +1044,9 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		}
 		rt, _ := resourceTypeIdxOf(t)
 		if in.isGuestResource == nil || !in.isGuestResource(rt) {
-			return v, nil
+			return in.lendHostBorrow(v, rt, scope)
 		}
-		return resolveHandleArg(in, in.resources, in.resCanon, t, v)
+		return resolveHandleArg(in, in.resources, in.resCanon, in.resolve, t, v)
 
 	case binary.StreamDesc:
 		// A stream<T> Call/CallAsync arg arrives as the *sharedStream
@@ -1032,16 +1054,26 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		// takeReadableStreamEnd) -- mint a fresh READABLE end for it in
 		// THIS (the callee's) table, mirroring lower_stream
 		// (docs/component-model-async-phase2-design.md §2.1/§3.1).
-		shared, ok := v.(*sharedStream)
-		if !ok {
-			return nil, fmt.Errorf("stream arg: expected a *sharedStream (from NewStream or a transferred readable end), got %T", v)
+		var shared *sharedStream
+		switch sv := v.(type) {
+		case *sharedStream:
+			shared = sv
+		case *StreamReader:
+			shared = sv.shared
+		default:
+			return nil, fmt.Errorf("stream arg: expected a *sharedStream (from NewStream or a transferred readable end) or *StreamReader, got %T", v)
 		}
 		return in.resources.addEntry(&streamEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
 
 	case binary.FutureDesc:
-		shared, ok := v.(*sharedFuture)
-		if !ok {
-			return nil, fmt.Errorf("future arg: expected a *sharedFuture (from NewFuture or a transferred readable end), got %T", v)
+		var shared *sharedFuture
+		switch sv := v.(type) {
+		case *sharedFuture:
+			shared = sv
+		case *FutureReader:
+			shared = sv.shared
+		default:
+			return nil, fmt.Errorf("future arg: expected a *sharedFuture (from NewFuture or a transferred readable end) or *FutureReader, got %T", v)
 		}
 		return in.resources.addEntry(&futureEnd{side: sideReadable, state: copyIdle, shared: shared}), nil
 
@@ -1049,16 +1081,16 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if d.Prim != "error-context" {
 			return v, nil
 		}
-		// An error-context arg arrives either as an existing *errorContext
+		// An error-context arg arrives either as an existing *ErrorContext
 		// (copy semantics: mint a second handle sharing it) or a bare string
 		// (host-authored message: wrap it fresh).
 		switch ev := v.(type) {
-		case *errorContext:
+		case *ErrorContext:
 			return in.resources.addEntry(ev), nil
 		case string:
-			return in.resources.addEntry(&errorContext{debugMessage: ev}), nil
+			return in.resources.addEntry(&ErrorContext{debugMessage: ev}), nil
 		default:
-			return nil, fmt.Errorf("error-context arg: expected a *errorContext or string, got %T", v)
+			return nil, fmt.Errorf("error-context arg: expected a *ErrorContext or string, got %T", v)
 		}
 
 	case binary.ListDesc:
@@ -1072,7 +1104,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		}
 		out := make([]abi.Value, len(list))
 		for i, e := range list {
-			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1); err != nil {
+			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -1080,7 +1112,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 
 	case binary.FixedListDesc:
 		// Its value has a dynamic list's shape, so it is walked as one.
-		return in.resolveArgHandlesDepth(v, binary.ListDesc{Element: d.Element}, depth)
+		return in.resolveArgHandlesDepth(v, binary.ListDesc{Element: d.Element}, depth, scope)
 
 	case binary.MapDesc:
 		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc): each
@@ -1096,7 +1128,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		out := make([]abi.Value, len(entries))
 		var err error
 		for i, e := range entries {
-			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1); err != nil {
+			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -1117,7 +1149,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 			if err != nil {
 				return nil, err
 			}
-			if out[i], err = in.resolveArgHandlesDepth(out[i], ft, depth+1); err != nil {
+			if out[i], err = in.resolveArgHandlesDepth(out[i], ft, depth+1, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -1138,7 +1170,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 			if err != nil {
 				return nil, err
 			}
-			if out[i], err = in.resolveArgHandlesDepth(out[i], et, depth+1); err != nil {
+			if out[i], err = in.resolveArgHandlesDepth(out[i], et, depth+1, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -1152,7 +1184,11 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if err != nil {
 			return nil, err
 		}
-		return in.resolveArgHandlesDepth(v, et, depth+1)
+		if s, ok := v.(abi.Some); ok {
+			x, err := in.resolveArgHandlesDepth(s.Value, et, depth+1, scope)
+			return abi.Some{Value: x}, err
+		}
+		return in.resolveArgHandlesDepth(v, et, depth+1, scope)
 
 	case binary.VariantDesc:
 		vv, ok := v.(abi.VariantValue)
@@ -1163,7 +1199,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if err != nil {
 			return nil, err
 		}
-		p, err := in.resolveArgHandlesDepth(vv.Payload, ct, depth+1)
+		p, err := in.resolveArgHandlesDepth(vv.Payload, ct, depth+1, scope)
 		if err != nil {
 			return nil, err
 		}
@@ -1185,7 +1221,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if err != nil {
 			return nil, err
 		}
-		p, err := in.resolveArgHandlesDepth(rv.Payload, at, depth+1)
+		p, err := in.resolveArgHandlesDepth(rv.Payload, at, depth+1, scope)
 		if err != nil {
 			return nil, err
 		}
@@ -1247,7 +1283,7 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	be.paramsSpill, be.paramTuple = m.paramsSpill, m.paramTuple
 
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
-	be.resultStep = m.resultStep
+	be.resultStep, be.resultNest = m.resultStep, m.resultNest
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
@@ -1792,7 +1828,7 @@ func (in *Instance) invoke(ctx context.Context, be *boundExport, exportName stri
 	// poisoned instance refuses entry outright, independent of whether this
 	// particular call would otherwise even be well-formed.
 	if target.poisoned {
-		return nil, fmt.Errorf("component/instance: export %q: cannot enter component instance", exportName)
+		return nil, in.cannotEnter(exportName)
 	}
 	fd := be.fd
 	if len(args) != len(fd.Params) {
@@ -1882,7 +1918,11 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	// instead of lowerParams allocating its own backing array.
 	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
 	*coreArgsPtr = (*coreArgsPtr)[:0]
-	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName, *coreArgsPtr)
+	var scope *task
+	if in.syncBase != nil && in.activeTask == in.syncBase {
+		scope = in.syncBase
+	}
+	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName, *coreArgsPtr, &scope)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
 		return nil, err
@@ -1923,6 +1963,13 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
 		err = wrapUnreachableTrap(err)
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
+	}
+	// The sync lift's own trap_if(num_borrows > 0) at task exit: a host
+	// resource lent to the call must have been dropped by now.
+	if scope != nil && scope.numBorrows > 0 {
+		putUint64Slice(stackPtr)
+		in.poisoned = true
+		return nil, fmt.Errorf("component/instance: export %q: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
 	}
 	// rawResults ALIASES the pooled stack, so stack must not be returned to the
 	// pool until liftResult (and post-return) have finished reading it.
@@ -1969,7 +2016,10 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 // the backing array; callers that don't care (e.g. tests exercising an
 // error branch directly) can just pass nil, which behaves exactly like the
 // old var coreArgs []abi.CoreValue starting point.
-func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue) ([]abi.CoreValue, error) {
+//
+// scope is the call's borrow scope: the task's, or created when a host
+// resource is first lent (see lendHostBorrow).
+func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue, scope **task) ([]abi.CoreValue, error) {
 	coreArgs := dst
 	var err error
 
@@ -1990,7 +2040,7 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 			}
 			tupleVal[i] = args[i]
 			if i < len(be.paramHasResource) && be.paramHasResource[i] {
-				if tupleVal[i], err = in.resolveArgHandles(args[i], be.paramTypes[i]); err != nil {
+				if tupleVal[i], err = in.resolveArgHandles(args[i], be.paramTypes[i], scope); err != nil {
 					return nil, fmt.Errorf("component/instance: export %q param %d: %w", exportName, i, err)
 				}
 			}
@@ -2014,7 +2064,7 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 		// depth) to the guest's rep -- the guest's core func takes reps for
 		// resources it owns. See resolveArgHandles.
 		if i < len(be.paramHasResource) && be.paramHasResource[i] {
-			argVal, err = in.resolveArgHandles(argVal, be.paramTypes[i])
+			argVal, err = in.resolveArgHandles(argVal, be.paramTypes[i], scope)
 			if err != nil {
 				return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)
 			}
@@ -2082,7 +2132,7 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q result: load spilled result: %w", exportName, err)
 		}
-		if err := in.validateLiftedStreamFutureResult(rt, val, exportName); err != nil {
+		if val, err = in.takeAsyncResult(rt, val, be.resultNest, exportName); err != nil {
 			return nil, err
 		}
 		return []abi.Value{val}, nil
@@ -2114,61 +2164,33 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q result: lift: %w", exportName, err)
 	}
-	if err := in.validateLiftedStreamFutureResult(rt, val, exportName); err != nil {
+	if val, err = in.takeAsyncResult(rt, val, be.resultNest, exportName); err != nil {
 		return nil, err
 	}
 	return []abi.Value{val}, nil
 }
 
-// validateLiftedStreamFutureResult applies lift_async_value's trap_if(state
-// != IDLE)/trap_if(in_waitable_set()) checks (definitions.py ~1519) to a
-// top-level export's RESULT when its declared type is a bare stream<T>/
-// future<T> -- the one crossing liftResult's generic flat/spilled lift paths
-// above don't otherwise validate (they treat StreamDesc/FutureDesc exactly
-// like OwnDesc/BorrowDesc: an opaque i32, per abi.liftFlatImpl). Unlike
-// takeReadableStreamEnd/takeReadableFutureEnd (used for the arg-crossing and
-// guest<->guest delegated-result paths, composition.go/host_import.go, where
-// ownership of the table slot genuinely transfers to the other side), this
-// does NOT remove the handle from the guest's own table -- matching wazy's
-// existing convention for a top-level own<T> result (also left in the table,
-// for the host to manage explicitly via DropResource/ResourceRep-style
-// accessors) rather than the reference's unconditional handles.remove(i).
-func (in *Instance) validateLiftedStreamFutureResult(rt binary.TypeDesc, val abi.Value, exportName string) error {
-	switch d := rt.(type) {
-	case binary.StreamDesc:
-		h, ok := val.(uint32)
-		if !ok {
-			return nil // not a handle-shaped value (shouldn't happen; let the caller's own bookkeeping catch it)
-		}
-		var elemDesc binary.TypeDesc
-		if d.Element != nil {
-			ed, err := resolveTypeRef(d.Element, in.resolve)
-			if err != nil {
-				return fmt.Errorf("component/instance: export %q result: stream element type: %w", exportName, err)
-			}
-			elemDesc = ed
-		}
-		if _, err := peekReadableStreamEnd(in, in.resources, elemDesc, h); err != nil {
-			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
-		}
-	case binary.FutureDesc:
-		h, ok := val.(uint32)
-		if !ok {
-			return nil
-		}
-		var elemDesc binary.TypeDesc
-		if d.Element != nil {
-			ed, err := resolveTypeRef(d.Element, in.resolve)
-			if err != nil {
-				return fmt.Errorf("component/instance: export %q result: future element type: %w", exportName, err)
-			}
-			elemDesc = ed
-		}
-		if _, err := peekReadableFutureEnd(in, in.resources, elemDesc, h); err != nil {
-			return fmt.Errorf("component/instance: export %q result: %w", exportName, err)
-		}
+// takeAsyncResult lifts the streams, futures and error contexts in an
+// export's result out of the guest's table for its caller, at lift time, as
+// lift_async_value and lift_error_context do (definitions.py ~1519): a
+// readable end is removed and becomes the caller's *StreamReader or
+// *FutureReader; an error context is read, the guest keeping its handle. At
+// lift time, because the guest may drop that handle as soon as it has
+// returned. The abi's generic lift paths read all three as an opaque i32,
+// like own<T>/borrow<T>; unlike those, the caller cannot do anything with the
+// bare index. nest moves the ones nested in a composite result.
+func (in *Instance) takeAsyncResult(rt binary.TypeDesc, val abi.Value, nest *asyncNest, exportName string) (abi.Value, error) {
+	var err error
+	switch {
+	case isAsyncValue(rt):
+		val, err = liftAsyncValue(in, in.resources, in.resolve, rt, val)
+	case nest != nil:
+		val, err = nest.lift(in, in.resources, val)
 	}
-	return nil
+	if err != nil {
+		return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
+	}
+	return val, nil
 }
 
 // DropResource drops an own<resource> handle the host received from a guest

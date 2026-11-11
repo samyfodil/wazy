@@ -20,6 +20,7 @@ WebAssembly runtime for Go.
 - `experimental/` — opt-in, unstable API.
 - `imports/wasi_snapshot_preview1/` — WASI preview1 host module.
 - `component/` — the public Component Model API (`Instantiate`, host imports, value shapes).
+- `component/wit/` — WIT parsing; `component/bindgen/` + `cmd/wazy-bindgen` generate Go bindings for a world, against the `component/witgo` runtime types.
 - `internal/component/` — the component implementation: `binary/` decoding, `abi/` canonical lift/lower, `instance/` graph instantiation and resources.
 - `imports/wasip2/` — WASI 0.2 host implementation, written against the public `component` API.
 - `internal/engine/native/` — the optimizing compiler (amd64 + arm64 JIT).
