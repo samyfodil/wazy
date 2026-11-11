@@ -87,8 +87,10 @@ func TestCLI(t *testing.T) {
 	missingWasm := filepath.Join(dir, "missing.wasm")
 	_, missingWasmErr := os.ReadFile(missingWasm)
 	notDir := os.WriteFile(filepath.Join(out, "x"), nil, 0o644)
+	notDirTree := os.MkdirAll(filepath.Join(out, "x", "y"), 0o755)
 	require.Error(t, missing)
 	require.Error(t, notDir)
+	require.Error(t, notDirTree)
 
 	for _, c := range []struct {
 		args []string
@@ -102,7 +104,7 @@ func TestCLI(t *testing.T) {
 		{[]string{"-with", "nope"}, 2, `want interface=import/path, got "nope"`},
 		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-with", "c:d/none=x"}, 1, "world app imports no interface c:d/none"},
 		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-out", filepath.Join(dir, "nomod")}, 1, "no go.mod at or above"},
-		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-out", filepath.Join(out, "x"), "-import", "x.com/t"}, 1, "not a directory"},
+		{[]string{"-wit", witFile, "-world", "app", "-package", "p", "-out", filepath.Join(out, "x"), "-import", "x.com/t"}, 1, notDirTree.Error()},
 		{[]string{"-wit", "missing.wit", "-world", "w", "-package", "p"}, 1, missing.Error()},
 		{[]string{"-wit", bad, "-world", "w", "-package", "p"}, 1, "wit:"},
 		{[]string{"-wasm", wasm, "-wit", witFile, "-package", "p"}, 1, "-wit and -wasm are exclusive"},
