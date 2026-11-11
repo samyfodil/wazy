@@ -5,6 +5,7 @@
 package witgo
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/samyfodil/wazy/component"
@@ -211,3 +212,59 @@ func (h *Handles) Release() error {
 	h.lent = nil
 	return first
 }
+
+// Async completes one call of an async import: the host may return its result
+// before the import function returns, or later -- from another goroutine,
+// when the call was started with CallAsync.
+type Async[T any] struct {
+	call  *component.AsyncCall
+	lower func(T) []component.Value
+}
+
+// NewAsync is the Async generated code hands an async import's host
+// function, lowering its result with lower.
+func NewAsync[T any](call *component.AsyncCall, lower func(T) []component.Value) Async[T] {
+	return Async[T]{call: call, lower: lower}
+}
+
+// Return completes the call with v. It may be called once.
+func (a Async[T]) Return(v T) { a.call.Resolve(a.lower(v)) }
+
+// Cancelled completes the call as cancelled, once the guest has asked to
+// cancel it (see OnCancel).
+func (a Async[T]) Cancelled() { a.call.ResolveCancelled() }
+
+// OnCancel registers fn to run if the guest cancels the call.
+func (a Async[T]) OnCancel(fn func()) { a.call.OnCancel(fn) }
+
+// Defer runs fn on the instance's scheduler, where Return may be called
+// without CallAsync.
+func (a Async[T]) Defer(fn func()) { a.call.Defer(fn) }
+
+// Pending is an async export call in flight, started with CallAsync.
+type Pending[T any] struct {
+	p    *component.PendingCall
+	lift func([]component.Value) (T, error)
+}
+
+// NewPending is the Pending generated code returns, lifting the call's
+// results with lift.
+func NewPending[T any](p *component.PendingCall, lift func([]component.Value) (T, error)) *Pending[T] {
+	return &Pending[T]{p: p, lift: lift}
+}
+
+// Await drives the call until it returns, and gives its result.
+func (p *Pending[T]) Await(ctx context.Context) (T, error) {
+	res, err := p.p.Await(ctx)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return p.lift(res)
+}
+
+// Done is closed once the call has returned.
+func (p *Pending[T]) Done() <-chan struct{} { return p.p.Done() }
+
+// Cancel asks the guest to cancel the call.
+func (p *Pending[T]) Cancel(ctx context.Context) error { return p.p.Cancel(ctx) }

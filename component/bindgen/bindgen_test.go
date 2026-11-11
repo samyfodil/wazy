@@ -93,10 +93,6 @@ func typecheck(t *testing.T, src []byte) {
 func TestGenerateRefuses(t *testing.T) {
 	for _, c := range []struct{ name, src, want string }{
 		{
-			"async", `package a:b; world w { export f: async func(); }`,
-			"f: async functions are not supported yet",
-		},
-		{
 			"stream", `package a:b; world w { export f: func() -> stream<u8>; }`,
 			"f: result: stream types are not supported yet",
 		},
@@ -206,6 +202,45 @@ world w { import i; }`
 		"one, err := liftR(nil, args[1], false)",
 		"x_, err := liftR(nil, args[0], false)",
 		"return []component.Value{lowerR(nil, r, false)}, nil",
+	} {
+		require.Contains(t, out, want)
+	}
+}
+
+// Async functions generate: an import's host function completes through a
+// witgo.Async; an export has its blocking method and a CallAsync form.
+func TestGenerateAsync(t *testing.T) {
+	src := `package a:b;
+interface types { record q { n: u32 } resource r; }
+interface host {
+  use types.{q, r};
+  get: async func(x: u32) -> result<q, string>;
+  poke: async func();
+  pair: async func() -> tuple<r, r>;
+}
+interface api {
+  use types.{q};
+  resource job { constructor(); run: async func(n: u32) -> u32; }
+  fetch: async func(x: u32) -> option<q>;
+  fire: async func();
+}
+world w { import host; export api; export top: async func() -> string; }`
+	out, err := genSrc(t, src, Options{})
+	require.NoError(t, err)
+	for _, want := range []string{
+		"Get(ctx context.Context, x_ uint32, ret witgo.Async[witgo.Result[Q, string]]) error",
+		"Poke(ctx context.Context, ret witgo.Async[struct{}]) error",
+		`component.WithAsyncImportCustom("a:b/host", "get", func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {`,
+		"ret := witgo.NewAsync(call, func(r struct{}) []component.Value { return nil })",
+		"h := &witgo.Handles{Table: table}",
+		"func (x API) Fetch(ctx context.Context, x_ uint32) (*Q, error) {",
+		"func (x API) FetchAsync(ctx context.Context, x_ uint32) (*witgo.Pending[*Q], error) {",
+		`p, err := x.inst.CallAsync(ctx, "a:b/api#fetch", x_)`,
+		"func (x API) FireAsync(ctx context.Context) (*witgo.Pending[struct{}], error) {",
+		"func (x Job) RunAsync(ctx context.Context, n uint32) (*witgo.Pending[uint32], error) {",
+		`x.inst.CallAsync(ctx, "a:b/api#[method]job.run", x.handle, n)`,
+		"func (x *W) TopAsync(ctx context.Context) (*witgo.Pending[string], error) {",
+		`x.inst.CallAsync(ctx, "top")`,
 	} {
 		require.Contains(t, out, want)
 	}

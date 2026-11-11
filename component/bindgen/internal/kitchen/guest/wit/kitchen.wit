@@ -53,6 +53,11 @@ interface host {
   peek-all: func(ts: list<borrow<token>>) -> u32;
   try-mint: func(v: u32) -> result<token, string>;
   deepen: func(x: option<option<u32>>) -> option<option<u32>>;
+
+  slow-add: async func(a: u32, b: u32) -> u32;
+  slow-shape: async func(s: shape) -> result<color, string>;
+  slow-ping: async func();
+  slow-mint: async func(a: u32, b: u32) -> tuple<token, token>;
 }
 
 interface api {
@@ -64,6 +69,7 @@ interface api {
     append: func(s: string);
     read: func() -> string;
     join: static func(a: borrow<blob>, b: borrow<blob>) -> blob;
+    measure: async func() -> u32;
   }
 
   make-blobs: func(n: u32) -> list<blob>;
@@ -74,6 +80,10 @@ interface api {
   peek-token: func(t: borrow<token>) -> u32;
   pair-tokens: func(a: u32, b: u32) -> u32;
   nest: func(x: option<option<u32>>) -> option<option<u32>>;
+  fetch: async func(a: u32, b: u32) -> u32;
+  fetch-shape: async func(s: shape) -> result<color, string>;
+  fire: async func() -> u32;
+  fetch-tokens: async func(a: u32, b: u32) -> u32;
 
   roundtrip: func(e: everything) -> everything;
   area: func(s: shape) -> f64;
@@ -91,4 +101,5 @@ world kitchen {
   import host;
   export api;
   export ping: func(s: string) -> string;
+  export top: async func(s: string) -> string;
 }

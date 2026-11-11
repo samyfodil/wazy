@@ -16,6 +16,11 @@ impl Guest for Component {
     fn ping(s: String) -> String {
         format!("pong:{s}")
     }
+
+    async fn top(s: String) -> String {
+        host::slow_ping().await;
+        format!("top:{s}")
+    }
 }
 
 struct MyBlob(RefCell<String>);
@@ -31,6 +36,11 @@ impl GuestBlob for MyBlob {
 
     fn read(&self) -> String {
         self.0.borrow().clone()
+    }
+
+    async fn measure(&self) -> u32 {
+        let n = self.0.borrow().len() as u32;
+        host::slow_add(n, 0).await
     }
 
     fn join(a: BlobBorrow<'_>, b: BlobBorrow<'_>) -> Blob {
@@ -133,6 +143,26 @@ impl Api for Component {
     // Through the host's deepen, which adds one to a some(some(n)).
     fn nest(x: Option<Option<u32>>) -> Option<Option<u32>> {
         host::deepen(x)
+    }
+
+    async fn fetch(a: u32, b: u32) -> u32 {
+        host::slow_add(a, b).await
+    }
+
+    async fn fetch_shape(s: Shape) -> Result<Color, String> {
+        host::slow_shape(s).await
+    }
+
+    // Two pings, so the call waits on the host twice.
+    async fn fire() -> u32 {
+        host::slow_ping().await;
+        host::slow_ping().await;
+        2
+    }
+
+    async fn fetch_tokens(a: u32, b: u32) -> u32 {
+        let (x, y) = host::slow_mint(a, b).await;
+        host::peek(&x) + host::peek(&y)
     }
 
     fn nothing() {}

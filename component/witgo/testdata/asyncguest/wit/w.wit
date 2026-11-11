@@ -1,0 +1,10 @@
+package wazy:async-probe@0.1.0;
+
+interface host {
+  slow: async func(x: u32) -> u32;
+}
+
+world probe {
+  import host;
+  export fetch: async func(x: u32) -> u32;
+}

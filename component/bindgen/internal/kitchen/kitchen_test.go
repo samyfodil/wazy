@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/component/witgo"
-	"github.com/samyfodil/wazy/imports/wasip2"
 	"github.com/samyfodil/wazy/internal/testing/require"
 )
 
@@ -26,6 +26,49 @@ type host struct {
 	tokens   map[Token]uint32
 	nextTok  Token
 	dropTok  []Token
+
+	// external makes the async imports complete from another goroutine,
+	// after gate is closed when it is set; pings counts SlowPing.
+	external bool
+	gate     chan struct{}
+	pings    int
+}
+
+// complete runs fn now, or from another goroutine once the gate opens.
+func (h *host) complete(fn func()) {
+	if !h.external {
+		fn()
+		return
+	}
+	go func() {
+		if h.gate != nil {
+			<-h.gate
+		}
+		fn()
+	}()
+}
+
+func (h *host) SlowAdd(_ context.Context, a, b uint32, ret witgo.Async[uint32]) error {
+	h.complete(func() { ret.Return(a + b) })
+	return nil
+}
+
+func (h *host) SlowShape(ctx context.Context, s Shape, ret witgo.Async[witgo.Result[Color, string]]) error {
+	r, _ := h.Classify(ctx, s)
+	h.complete(func() { ret.Return(r) })
+	return nil
+}
+
+func (h *host) SlowPing(_ context.Context, ret witgo.Async[struct{}]) error {
+	h.pings++
+	h.complete(func() { ret.Return(struct{}{}) })
+	return nil
+}
+
+func (h *host) SlowMint(ctx context.Context, a, b uint32, ret witgo.Async[witgo.Tuple2[Token, Token]]) error {
+	pair, _ := h.MintPair(ctx, a, b)
+	h.complete(func() { ret.Return(pair) })
+	return nil
 }
 
 // Mint and Peek are host's, DropToken types': the token resource is declared
@@ -147,7 +190,7 @@ func instantiate(t *testing.T) (*Kitchen, *host) {
 	r := wazy.NewRuntime(ctx)
 	t.Cleanup(func() { r.Close(ctx) })
 	h := &host{counters: map[Counter]uint32{}, tokens: map[Token]uint32{}}
-	k, err := Instantiate(ctx, r, kitchenWasm, Imports{Types: h, Host: h}, wasip2.WithWASI(wasip2.WASIConfig{})...)
+	k, err := Instantiate(ctx, r, kitchenWasm, Imports{Types: h, Host: h})
 	require.NoError(t, err)
 	t.Cleanup(func() { k.Close(ctx) })
 	return k, h
@@ -369,6 +412,103 @@ func TestNestedOption(t *testing.T) {
 	require.NotNil(t, got)
 	require.NotNil(t, *got)
 	require.Equal(t, uint32(6), **got)
+}
+
+// Async imports completed before they return, through the blocking forms of
+// the async exports.
+func TestAsyncBlocking(t *testing.T) {
+	k, h := instantiate(t)
+	ctx := context.Background()
+	api := k.API()
+
+	sum, err := api.Fetch(ctx, 2, 3)
+	require.NoError(t, err)
+	require.Equal(t, uint32(5), sum)
+
+	c, err := api.FetchShape(ctx, ShapeCircle(1))
+	require.NoError(t, err)
+	require.Equal(t, witgo.Ok[Color, string](ColorRed), c)
+	c, err = api.FetchShape(ctx, ShapeEmpty())
+	require.NoError(t, err)
+	require.Equal(t, witgo.Err[Color]("empty"), c)
+
+	n, err := api.Fire(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), n)
+	require.Equal(t, 2, h.pings)
+
+	tok, err := api.FetchTokens(ctx, 3, 4)
+	require.NoError(t, err)
+	require.Equal(t, uint32(7), tok)
+	require.Equal(t, 2, len(h.dropTok))
+
+	b, err := api.NewBlob(ctx, "abcd")
+	require.NoError(t, err)
+	m, err := b.Measure(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint32(4), m)
+	require.NoError(t, b.Drop(ctx))
+
+	top, err := k.Top(ctx, "x")
+	require.NoError(t, err)
+	require.Equal(t, "top:x", top)
+}
+
+// Async imports completed from other goroutines, through the CallAsync forms:
+// the call stays pending until the host completes it.
+func TestAsyncExternal(t *testing.T) {
+	k, h := instantiate(t)
+	h.external = true
+	ctx := context.Background()
+	api := k.API()
+
+	h.gate = make(chan struct{})
+	p, err := api.FetchAsync(ctx, 20, 22)
+	require.NoError(t, err)
+	select {
+	case <-p.Done():
+		t.Fatal("the call returned before the host completed its import")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(h.gate)
+	sum, err := p.Await(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint32(42), sum)
+	h.gate = nil
+
+	ps, err := api.FetchShapeAsync(ctx, ShapeRect(Point{}))
+	require.NoError(t, err)
+	c, err := ps.Await(ctx)
+	require.NoError(t, err)
+	require.Equal(t, witgo.Ok[Color, string](ColorGreen), c)
+
+	pf, err := api.FireAsync(ctx)
+	require.NoError(t, err)
+	n, err := pf.Await(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), n)
+
+	pt, err := api.FetchTokensAsync(ctx, 5, 6)
+	require.NoError(t, err)
+	tok, err := pt.Await(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint32(11), tok)
+	require.Equal(t, 2, len(h.dropTok))
+
+	b, err := api.NewBlob(ctx, "xyz")
+	require.NoError(t, err)
+	pm, err := b.MeasureAsync(ctx)
+	require.NoError(t, err)
+	m, err := pm.Await(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint32(3), m)
+	require.NoError(t, b.Drop(ctx))
+
+	ptop, err := k.TopAsync(ctx, "y")
+	require.NoError(t, err)
+	top, err := ptop.Await(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "top:y", top)
 }
 
 // Variant accessors report the case they were asked about only.

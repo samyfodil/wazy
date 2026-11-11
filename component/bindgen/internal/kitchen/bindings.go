@@ -763,6 +763,14 @@ type Host interface {
 	PeekAll(ctx context.Context, ts []Token) (uint32, error)
 	TryMint(ctx context.Context, v uint32) (witgo.Result[Token, string], error)
 	Deepen(ctx context.Context, x_ **uint32) (**uint32, error)
+	// SlowAdd is async: it may return its result through ret after it returns.
+	SlowAdd(ctx context.Context, a uint32, b uint32, ret witgo.Async[uint32]) error
+	// SlowShape is async: it may return its result through ret after it returns.
+	SlowShape(ctx context.Context, s Shape, ret witgo.Async[witgo.Result[Color, string]]) error
+	// SlowPing is async: it may return its result through ret after it returns.
+	SlowPing(ctx context.Context, ret witgo.Async[struct{}]) error
+	// SlowMint is async: it may return its result through ret after it returns.
+	SlowMint(ctx context.Context, a uint32, b uint32, ret witgo.Async[witgo.Tuple2[Token, Token]]) error
 	// DropCounter releases a Counter the guest dropped.
 	DropCounter(ctx context.Context, self Counter) error
 }
@@ -972,6 +980,55 @@ func optionsHost(impl Host) []component.Option {
 			}
 			return []component.Value{lowerT14(nil, r)}, nil
 		}, tbl.Func([]component.TypeRef{tbl.Option(tbl.Option(component.Prim("u32")))}, tbl.Option(tbl.Option(component.Prim("u32")))), resolve),
+		component.WithAsyncImportCustom("wazy:bindgen-test/host@0.1.0", "slow-add", func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {
+			if len(args) != 2 {
+				return fmt.Errorf("%s: %d args", "slow-add", len(args))
+			}
+			a, err := witgo.U32(args[0])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "slow-add", "a", err)
+			}
+			b, err := witgo.U32(args[1])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "slow-add", "b", err)
+			}
+			ret := witgo.NewAsync(call, func(r uint32) []component.Value { return []component.Value{r} })
+			return impl.SlowAdd(ctx, a, b, ret)
+		}, tbl.Func([]component.TypeRef{component.Prim("u32"), component.Prim("u32")}, component.Prim("u32")), resolve),
+		component.WithAsyncImportCustom("wazy:bindgen-test/host@0.1.0", "slow-shape", func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%s: %d args", "slow-shape", len(args))
+			}
+			s, err := liftShape(nil, args[0])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "slow-shape", "s", err)
+			}
+			ret := witgo.NewAsync(call, func(r witgo.Result[Color, string]) []component.Value { return []component.Value{lowerT8(nil, r)} })
+			return impl.SlowShape(ctx, s, ret)
+		}, tbl.Func([]component.TypeRef{t4}, tbl.Result(t2, component.Prim("string"))), resolve),
+		component.WithAsyncImportCustom("wazy:bindgen-test/host@0.1.0", "slow-ping", func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {
+			if len(args) != 0 {
+				return fmt.Errorf("%s: %d args", "slow-ping", len(args))
+			}
+			ret := witgo.NewAsync(call, func(r struct{}) []component.Value { return nil })
+			return impl.SlowPing(ctx, ret)
+		}, tbl.Func([]component.TypeRef{}, component.TypeRef{}), resolve),
+		component.WithAsyncImportCustom("wazy:bindgen-test/host@0.1.0", "slow-mint", func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {
+			if len(args) != 2 {
+				return fmt.Errorf("%s: %d args", "slow-mint", len(args))
+			}
+			h := &witgo.Handles{Table: table}
+			a, err := witgo.U32(args[0])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "slow-mint", "a", err)
+			}
+			b, err := witgo.U32(args[1])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "slow-mint", "b", err)
+			}
+			ret := witgo.NewAsync(call, func(r witgo.Tuple2[Token, Token]) []component.Value { return []component.Value{lowerT11(h, r)} })
+			return impl.SlowMint(ctx, a, b, ret)
+		}, tbl.Func([]component.TypeRef{component.Prim("u32"), component.Prim("u32")}, tbl.Tuple(tbl.Own(tagToken), tbl.Own(tagToken))), resolve),
 		component.WithResourceTag("wazy:bindgen-test/host@0.1.0", "counter", tagCounter),
 		component.WithHostResourceDtor(tagCounter, func(ctx context.Context, rep uint32) error { return impl.DropCounter(ctx, Counter(rep)) }),
 	}
@@ -1074,6 +1131,44 @@ func (x API) BlobJoin(ctx context.Context, a Blob, b Blob) (Blob, error) {
 		return zero, fmt.Errorf("%s: %d results", "[static]blob.join", len(res))
 	}
 	return liftBlob(h, res[0], true)
+}
+
+// Measure calls the export [method]blob.measure.
+func (x Blob) Measure(ctx context.Context) (uint32, error) {
+	h := &witgo.Handles{Table: x.inst.ResourcesFor("wazy:bindgen-test/api@0.1.0"), Inst: x.inst}
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "[method]blob.measure", x.handle)
+	if rerr := h.Release(); err == nil {
+		err = rerr
+	}
+	if err != nil {
+		var zero uint32
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero uint32
+		return zero, fmt.Errorf("%s: %d results", "[method]blob.measure", len(res))
+	}
+	return witgo.U32(res[0])
+}
+
+// MeasureAsync starts the export [method]blob.measure and returns once it first waits; Await the result.
+func (x Blob) MeasureAsync(ctx context.Context) (*witgo.Pending[uint32], error) {
+	h := &witgo.Handles{Table: x.inst.ResourcesFor("wazy:bindgen-test/api@0.1.0"), Inst: x.inst}
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#[method]blob.measure", x.handle)
+	if err != nil {
+		h.Release()
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (uint32, error) {
+		var zero uint32
+		if err := h.Release(); err != nil {
+			return zero, err
+		}
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "[method]blob.measure", len(res))
+		}
+		return witgo.U32(res[0])
+	}), nil
 }
 
 // MakeBlobs calls the export make-blobs.
@@ -1210,6 +1305,122 @@ func (x API) Nest(ctx context.Context, x_ **uint32) (**uint32, error) {
 		return zero, fmt.Errorf("%s: %d results", "nest", len(res))
 	}
 	return liftT14(nil, res[0])
+}
+
+// Fetch calls the export fetch.
+func (x API) Fetch(ctx context.Context, a uint32, b uint32) (uint32, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "fetch", a, b)
+	if err != nil {
+		var zero uint32
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero uint32
+		return zero, fmt.Errorf("%s: %d results", "fetch", len(res))
+	}
+	return witgo.U32(res[0])
+}
+
+// FetchAsync starts the export fetch and returns once it first waits; Await the result.
+func (x API) FetchAsync(ctx context.Context, a uint32, b uint32) (*witgo.Pending[uint32], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#fetch", a, b)
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (uint32, error) {
+		var zero uint32
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "fetch", len(res))
+		}
+		return witgo.U32(res[0])
+	}), nil
+}
+
+// FetchShape calls the export fetch-shape.
+func (x API) FetchShape(ctx context.Context, s Shape) (witgo.Result[Color, string], error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "fetch-shape", lowerShape(nil, s))
+	if err != nil {
+		var zero witgo.Result[Color, string]
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero witgo.Result[Color, string]
+		return zero, fmt.Errorf("%s: %d results", "fetch-shape", len(res))
+	}
+	return liftT8(nil, res[0])
+}
+
+// FetchShapeAsync starts the export fetch-shape and returns once it first waits; Await the result.
+func (x API) FetchShapeAsync(ctx context.Context, s Shape) (*witgo.Pending[witgo.Result[Color, string]], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#fetch-shape", lowerShape(nil, s))
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (witgo.Result[Color, string], error) {
+		var zero witgo.Result[Color, string]
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "fetch-shape", len(res))
+		}
+		return liftT8(nil, res[0])
+	}), nil
+}
+
+// Fire calls the export fire.
+func (x API) Fire(ctx context.Context) (uint32, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "fire")
+	if err != nil {
+		var zero uint32
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero uint32
+		return zero, fmt.Errorf("%s: %d results", "fire", len(res))
+	}
+	return witgo.U32(res[0])
+}
+
+// FireAsync starts the export fire and returns once it first waits; Await the result.
+func (x API) FireAsync(ctx context.Context) (*witgo.Pending[uint32], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#fire")
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (uint32, error) {
+		var zero uint32
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "fire", len(res))
+		}
+		return witgo.U32(res[0])
+	}), nil
+}
+
+// FetchTokens calls the export fetch-tokens.
+func (x API) FetchTokens(ctx context.Context, a uint32, b uint32) (uint32, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "fetch-tokens", a, b)
+	if err != nil {
+		var zero uint32
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero uint32
+		return zero, fmt.Errorf("%s: %d results", "fetch-tokens", len(res))
+	}
+	return witgo.U32(res[0])
+}
+
+// FetchTokensAsync starts the export fetch-tokens and returns once it first waits; Await the result.
+func (x API) FetchTokensAsync(ctx context.Context, a uint32, b uint32) (*witgo.Pending[uint32], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#fetch-tokens", a, b)
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (uint32, error) {
+		var zero uint32
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "fetch-tokens", len(res))
+		}
+		return witgo.U32(res[0])
+	}), nil
 }
 
 // Roundtrip calls the export roundtrip.
@@ -1356,4 +1567,33 @@ func (x *Kitchen) Ping(ctx context.Context, s string) (string, error) {
 		return zero, fmt.Errorf("%s: %d results", "ping", len(res))
 	}
 	return witgo.String(res[0])
+}
+
+// Top calls the export top.
+func (x *Kitchen) Top(ctx context.Context, s string) (string, error) {
+	res, err := x.inst.Call(ctx, "top", s)
+	if err != nil {
+		var zero string
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero string
+		return zero, fmt.Errorf("%s: %d results", "top", len(res))
+	}
+	return witgo.String(res[0])
+}
+
+// TopAsync starts the export top and returns once it first waits; Await the result.
+func (x *Kitchen) TopAsync(ctx context.Context, s string) (*witgo.Pending[string], error) {
+	p, err := x.inst.CallAsync(ctx, "top", s)
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (string, error) {
+		var zero string
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "top", len(res))
+		}
+		return witgo.String(res[0])
+	}), nil
 }

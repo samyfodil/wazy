@@ -268,6 +268,15 @@ type AsyncHostFunc func(ctx context.Context, args []abi.Value, call *AsyncCall) 
 // WithImport-registered fn (or a sync-lowered import to a
 // WithAsyncImport-registered fn) fails loud at bind time -- see graph.go's
 // computeCanonHostFunc.
+// WithAsyncImportCustom is WithAsyncImport with a caller-built FuncDesc and
+// Resolver, as WithImportCustom is WithImport's: the only form that can
+// express a nested composite.
+func WithAsyncImportCustom(iface, name string, fn AsyncHostFunc, fd binary.FuncDesc, resolve abi.Resolver) Option {
+	return func(c *config) {
+		c.imports[mkImportKey(iface, name)] = &hostImport{asyncFn: fn, customFD: &fd, customResolve: resolve}
+	}
+}
+
 func WithAsyncImport(iface, name string, fn AsyncHostFunc, params, results []binary.TypeDesc) Option {
 	return func(c *config) {
 		c.imports[mkImportKey(iface, name)] = &hostImport{asyncFn: fn, params: params, results: results}

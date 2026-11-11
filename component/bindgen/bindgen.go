@@ -146,6 +146,17 @@ type fn struct {
 	// onResource is set for a guest resource's method, which the bindings
 	// make a method of the resource's Go type.
 	onResource bool
+	async      bool
+	skipSelf   bool
+}
+
+// skip is how many WIT parameters the Go method leaves out: a resource
+// method's self, which its receiver is.
+func (b *fn) skip() int {
+	if b.skipSelf {
+		return 1
+	}
+	return 0
 }
 
 // iface is one bound interface, or the world's own functions.
@@ -314,10 +325,7 @@ func (g *gen) bindFunc(f *wit.Func, ifaceName string, tags wit.Tags, imported bo
 	if err != nil {
 		return nil, err
 	}
-	if sig.Desc.Async {
-		return nil, fmt.Errorf("async functions are not supported yet")
-	}
-	b := &fn{f: f, iface: ifaceName, sig: sig}
+	b := &fn{f: f, iface: ifaceName, sig: sig, async: sig.Desc.Async}
 	for _, p := range sig.Desc.Params {
 		t, err := g.typeOf(p.Type, sig, ifaceName)
 		if err != nil {
@@ -1126,6 +1134,9 @@ func importHandles(t *typ) string {
 	return "h"
 }
 
+// resultType is the Go type of the function's result, struct{} for none.
+func (b *fn) resultType() string { return b.result.armType() }
+
 func (b *fn) goResults() string {
 	if b.result == nil {
 		return "error"
@@ -1172,6 +1183,11 @@ func (g *gen) emitImport(w *writer, in *iface) {
 		params, _ := b.goParams(0)
 		if params != "" {
 			params = ", " + params
+		}
+		if b.async {
+			w.p("// %s is async: it may return its result through ret after it returns.", b.goName)
+			w.p("%s(ctx context.Context%s, ret witgo.Async[%s]) error", b.goName, params, b.resultType())
+			continue
 		}
 		w.p("%s(ctx context.Context%s) %s", b.goName, params, b.goResults())
 	}
@@ -1241,6 +1257,10 @@ func (g *gen) emitImport(w *writer, in *iface) {
 		if b.result != nil {
 			res = b.result.ref(names2)
 		}
+		if b.async {
+			g.emitAsyncImport(w, b, ifaceName, refs, res)
+			continue
+		}
 		w.p("component.WithImportCustom(%q, %q, func(ctx context.Context, args []component.Value) ([]component.Value, error) {", ifaceName, b.f.Name)
 		w.p("if len(args) != %d { return nil, fmt.Errorf(\"%%s: %%d args\", %q, len(args)) }", len(b.params), b.f.Name)
 		if b.nestedHandles() {
@@ -1263,6 +1283,28 @@ func (g *gen) emitImport(w *writer, in *iface) {
 	}
 	w.p("}")
 	w.p("}")
+}
+
+// emitAsyncImport writes the registration of the async import b, whose host
+// function completes the call through a witgo.Async.
+func (g *gen) emitAsyncImport(w *writer, b *fn, ifaceName string, refs []string, res string) {
+	w.p("component.WithAsyncImportCustom(%q, %q, func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {", ifaceName, b.f.Name)
+	w.p("if len(args) != %d { return fmt.Errorf(\"%%s: %%d args\", %q, len(args)) }", len(b.params), b.f.Name)
+	if b.nestedHandles() {
+		w.p("h := &witgo.Handles{Table: table}")
+	}
+	_, pn := b.goParams(0)
+	for i, p := range b.params {
+		w.p("%s, err := %s", pn[i], p.t.lift(importHandles(p.t), fmt.Sprintf("args[%d]", i)))
+		w.p("if err != nil { return fmt.Errorf(\"%%s: %%s: %%w\", %q, %q, err) }", b.f.Name, p.wit)
+	}
+	lower := "return nil"
+	if b.result != nil {
+		lower = "return []component.Value{" + b.result.lower(importHandles(b.result), "r") + "}"
+	}
+	w.p("ret := witgo.NewAsync(call, func(r %s) []component.Value { %s })", b.resultType(), lower)
+	w.p("return impl.%s(%s)", b.goName, strings.Join(append(append([]string{"ctx"}, pn...), "ret"), ", "))
+	w.p("}, tbl.Func([]component.TypeRef{%s}, %s), resolve),", strings.Join(refs, ", "), res)
 }
 
 func (g *gen) emitExports(w *writer) {
@@ -1343,6 +1385,7 @@ func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map
 	if params != "" {
 		params = ", " + params
 	}
+	b.skipSelf = skip == 1
 	h := "nil"
 	if b.handles() {
 		h = "h"
@@ -1385,6 +1428,60 @@ func (g *gen) emitExportFunc(w *writer, recv, ifaceName string, b *fn, names map
 		w.p("if len(res) != 1 { var zero %s; return zero, fmt.Errorf(\"%%s: %%d results\", %q, len(res)) }", b.result.goType(), b.f.Name)
 		w.p("return %s", b.result.lift(h, "res[0]"))
 	}
+	w.p("}")
+	if b.async {
+		g.emitExportAsync(w, recv, ifaceName, b, names, args, table, h)
+	}
+}
+
+// emitExportAsync writes the CallAsync form of the async export b: it
+// returns once the call first waits, for an import the host completes later
+// from another goroutine.
+func (g *gen) emitExportAsync(w *writer, recv, ifaceName string, b *fn, names map[string]bool, args []string, table, h string) {
+	name := b.goName + "Async"
+	for n := name; names[name]; {
+		name = n + "_"
+	}
+	names[name] = true
+	params, _ := b.goParams(b.skip())
+	if params != "" {
+		params = ", " + params
+	}
+	export := b.f.Name
+	if ifaceName != "" {
+		export = ifaceName + "#" + b.f.Name
+	}
+	call := fmt.Sprintf("x.inst.CallAsync(ctx, %q", export)
+	if len(args) > 0 {
+		call += ", " + strings.Join(args, ", ")
+	}
+	call += ")"
+	rt := b.resultType()
+	w.p("")
+	w.p("// %s starts the export %s and returns once it first waits; Await the result.", name, b.f.Name)
+	w.p("func (%s) %s(ctx context.Context%s) (*witgo.Pending[%s], error) {", recv, name, params, rt)
+	if h == "h" {
+		w.p("h := &witgo.Handles{Table: %s, Inst: x.inst}", table)
+	}
+	w.p("p, err := %s", call)
+	w.p("if err != nil {")
+	if h == "h" {
+		w.p("h.Release()")
+	}
+	w.p("return nil, err")
+	w.p("}")
+	w.p("return witgo.NewPending(p, func(res []component.Value) (%s, error) {", rt)
+	w.p("var zero %s", rt)
+	if h == "h" {
+		w.p("if err := h.Release(); err != nil { return zero, err }")
+	}
+	if b.result == nil {
+		w.p("return zero, nil")
+	} else {
+		w.p("if len(res) != 1 { return zero, fmt.Errorf(\"%%s: %%d results\", %q, len(res)) }", b.f.Name)
+		w.p("return %s", b.result.lift(h, "res[0]"))
+	}
+	w.p("}), nil")
 	w.p("}")
 }
 
