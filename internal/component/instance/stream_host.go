@@ -61,20 +61,6 @@ func (in *Instance) cannotEnter(export string) error {
 	return fmt.Errorf("component/instance: export %q: cannot enter component instance", export)
 }
 
-// deliver runs a host end's completion callback. The engine runs it on the
-// driving goroutine -- inline from the host's own op, or from inside the
-// guest's stream builtin -- so it counts as a host call: the callback may
-// write, read, close, or resolve an AsyncCall.
-func (in *Instance) deliver(fn func()) {
-	if in == nil {
-		fn()
-		return
-	}
-	in.inHostCall++
-	defer func() { in.inHostCall-- }()
-	fn()
-}
-
 // StreamWriter is the host-held writable end of a stream whose readable end
 // lives (or will live) in a guest table. NOT a table entry, NOT a waitable:
 // completion surfaces as Go callbacks, not events.
@@ -220,6 +206,10 @@ func (w *StreamWriter) copying() bool { return w.state == copyCopying || w.state
 //
 // A second Write before onDone fires panics: rendezvous streams have no
 // host-side queue, by design.
+//
+// onDone runs on the driving goroutine -- inline, or from inside the guest's
+// stream builtin -- so it counts as a host call while it runs: it may write,
+// read, close, or resolve an AsyncCall. So does every host end's callback.
 func (w *StreamWriter) Write(vals []abi.Value, onDone func(res CopyResult, n uint32)) {
 	w.in.requireSchedulable("StreamWriter.Write")
 	defer w.in.settle()
@@ -233,7 +223,9 @@ func (w *StreamWriter) Write(vals []abi.Value, onDone func(res CopyResult, n uin
 		if res == copyDropped {
 			w.state = copyDone
 		}
-		w.in.deliver(func() { onDone(CopyResult(res), buf.progressed()) })
+		w.in.inHostCall++ // a host call: see Write
+		onDone(CopyResult(res), buf.progressed())
+		w.in.inHostCall--
 	}
 	// onCopy fires only if THIS Write itself parked (no reader was ready
 	// yet) and a LATER guest/host read drains our buffer -- reclaim
@@ -293,7 +285,9 @@ func (r *StreamReader) Read(n uint32, onDone func(res CopyResult, vals []abi.Val
 		if res == copyDropped {
 			r.state = copyDone
 		}
-		r.in.deliver(func() { onDone(CopyResult(res), buf.vals) })
+		r.in.inHostCall++ // a host call: see Write
+		onDone(CopyResult(res), buf.vals)
+		r.in.inHostCall--
 	}
 	// See StreamWriter.Write's onCopy doc: reclaim-then-fire inline is the
 	// host end's delivery step.
@@ -344,7 +338,9 @@ func (w *FutureWriter) Set(v abi.Value, onDone func(res CopyResult)) {
 	w.state = copyCopying
 	err := w.shared.write(nil, buf, func(res copyResult) {
 		w.state = copyDone // a future is one-shot: completed or dropped, both terminal
-		w.in.deliver(func() { onDone(CopyResult(res)) })
+		w.in.inHostCall++ // a host call: see Write
+		onDone(CopyResult(res))
+		w.in.inHostCall--
 	})
 	if err != nil {
 		panic(fmt.Errorf("component/instance: FutureWriter.Set: %w", err))
@@ -379,7 +375,9 @@ func (r *FutureReader) Get(onDone func(res CopyResult, v abi.Value)) {
 		if len(buf.vals) == 1 {
 			v = buf.vals[0]
 		}
-		r.in.deliver(func() { onDone(CopyResult(res), v) })
+		r.in.inHostCall++ // a host call: see Write
+		onDone(CopyResult(res), v)
+		r.in.inHostCall--
 	})
 	if err != nil {
 		panic(fmt.Errorf("component/instance: FutureReader.Get: %w", err))

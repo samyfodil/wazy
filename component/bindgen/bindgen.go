@@ -334,29 +334,14 @@ func (g *gen) bindFunc(f *wit.Func, ifaceName string, tags wit.Tags, imported bo
 		if err != nil {
 			return nil, fmt.Errorf("param %s: %w", p.Name, err)
 		}
-		if err := topLevelOnly(t); err != nil {
-			return nil, fmt.Errorf("param %s: %w", p.Name, err)
-		}
 		b.params = append(b.params, member{wit: p.Name, t: t})
 	}
 	if r := sig.Desc.Results.Unnamed; r != nil {
 		if b.result, err = g.typeOf(*r, sig, ifaceName); err != nil {
 			return nil, fmt.Errorf("result: %w", err)
 		}
-		if err := topLevelOnly(b.result); err != nil {
-			return nil, fmt.Errorf("result: %w", err)
-		}
 	}
 	return b, nil
-}
-
-// topLevelOnly refuses a stream, future or error-context below the top
-// level of t: the engine passes one only as a whole argument or result.
-func topLevelOnly(t *typ) error {
-	if t.kind != kStream && t.kind != kFuture && t.kind != kErrorContext && t.hasAsync() {
-		return fmt.Errorf("a stream, future or error-context nested in %s is not supported: wazy passes one only as a whole argument or result", t.witString())
-	}
-	return nil
 }
 
 func (t *typ) hasAsync() bool {
@@ -732,6 +717,9 @@ func (t *typ) lower(h, x string) string {
 			return "append([]" + t.elem.goType() + "(nil), " + x + "[:]...)"
 		}
 	case kStream, kFuture:
+		if strings.HasPrefix(x, "*") {
+			x = "(" + x + ")"
+		}
 		return x + ".Raw()"
 	case kErrorContext:
 		return "witgo.LowerErrorContext(" + x + ")"
@@ -1517,18 +1505,32 @@ func (g *gen) emitExports(w *writer) {
 	}
 }
 
-// asyncTypes is every stream and future type the world's functions pass, in
-// the order they are first met.
+// asyncTypes is every stream and future type the world's functions pass, at
+// any depth, in the order they are first met.
 func (g *gen) asyncTypes() []*typ {
 	var out []*typ
 	seen := map[*typ]bool{}
+	var walk func(t *typ)
+	walk = func(t *typ) {
+		if t == nil || seen[t] {
+			return
+		}
+		seen[t] = true
+		if t.kind == kStream || t.kind == kFuture {
+			out = append(out, t)
+			return
+		}
+		for _, c := range append([]*typ{t.elem, t.key, t.ok, t.err}, t.elems...) {
+			walk(c)
+		}
+		for _, m := range t.members {
+			walk(m.t)
+		}
+	}
 	for _, in := range append(slices.Clone(g.imports), g.exports...) {
 		for _, b := range in.funcs {
 			for _, t := range append(memberTypes(b.params), b.result) {
-				if t != nil && (t.kind == kStream || t.kind == kFuture) && !seen[t] {
-					seen[t] = true
-					out = append(out, t)
-				}
+				walk(t)
 			}
 		}
 	}

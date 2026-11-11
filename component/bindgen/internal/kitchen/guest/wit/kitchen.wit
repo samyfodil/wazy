@@ -7,6 +7,8 @@ interface types {
   enum color { red, green, blue }
   flags perms { read, write, exec }
   variant shape { circle(f64), rect(point), empty }
+  /// A stream and a future, nested in a record.
+  record body { data: stream<u8>, trailer: future<u32> }
   record everything {
     b: bool,
     tiny: s8,
@@ -35,7 +37,7 @@ interface types {
 }
 
 interface host {
-  use types.{point, color, perms, shape, everything, token};
+  use types.{point, color, perms, shape, everything, token, body};
 
   resource counter {
     constructor(start: u32);
@@ -72,10 +74,23 @@ interface host {
   explain: func(code: u32) -> error-context;
   /// The message of an error context the guest passes.
   describe: func(e: error-context) -> string;
+
+  /// A body of the bytes 0..n, with the trailer n*7.
+  open-body: async func(n: u32) -> result<body, string>;
+  /// The sum of a body's bytes and its trailer.
+  sum-body: async func(b: body) -> u32;
+  /// The error contexts e0 to e(n-1).
+  errors: func(n: u32) -> list<error-context>;
+  /// The messages of the error contexts, joined with commas.
+  messages: func(es: list<error-context>) -> string;
+  /// sum-body plus a to d: past the flat limit, so the arguments spill.
+  spill-body: async func(a: u32, b: u32, c: u32, d: u32, x: body) -> u32;
+  /// messages, with sixteen more arguments than it needs.
+  spill-errors: func(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32, i: u32, j: u32, k: u32, l: u32, m: u32, n: u32, o: u32, p: u32, es: list<error-context>) -> string;
 }
 
 interface api {
-  use types.{point, color, perms, shape, everything, token};
+  use types.{point, color, perms, shape, everything, token, body};
 
   /// A resource the guest implements: a growable string.
   resource blob {
@@ -111,6 +126,15 @@ interface api {
   fail: async func(msg: string) -> error-context;
   reason: func(e: error-context) -> string;
   relay-error: func(code: u32) -> string;
+
+  read-body: async func(b: body) -> u32;
+  make-body: async func(n: u32) -> body;
+  pipe-body: async func(n: u32) -> u32;
+  join-errors: func(es: list<error-context>) -> string;
+  relay-errors: func(n: u32) -> string;
+  some-error: async func(fail: bool) -> option<error-context>;
+  pipe-spilled: async func(n: u32) -> u32;
+  relay-spilled: func(n: u32) -> string;
 
   roundtrip: func(e: everything) -> everything;
   area: func(s: shape) -> f64;

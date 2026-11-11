@@ -96,10 +96,11 @@ n, err := app.API().SumBytes(ctx, r)
 
 An export may return before it has finished writing a stream it returned: its call returns at
 `task.return`, and the host's reads drive the rest. An `error-context` is a `*component.ErrorContext`.
+All three may sit anywhere in a value: a record field, a list, a `result` arm.
 
 WASI imports are left out (`-skip wasi:` by default), since `imports/wasip2` implements them: pass
-`wasip2.WithWASI(...)` to `Instantiate` after the imports. A stream, future or error-context nested
-inside another type, rather than a whole argument or result, is not supported by the engine yet;
+`wasip2.WithWASI(...)` to `Instantiate` after the imports. A stream or future whose elements hold a
+resource handle, a stream, a future or an error context is not supported by the engine yet;
 `wazy-bindgen` says so and names the function rather than guessing.
 
 The rest of this page is what those bindings do, by hand, with the `component` API underneath.

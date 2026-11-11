@@ -197,6 +197,7 @@ type asyncResolveCfg struct {
 	resultType      binary.TypeDesc
 	resultStore     abi.StoreStep
 	resultUsesMem   bool
+	resultNest      *asyncNest
 	resources       *handleTable
 	reallocOverride api.Function
 }
@@ -227,6 +228,9 @@ func (st *subtask) applyResolve(vals []abi.Value) error {
 		return fmt.Errorf("async import %q %q: result requires linear memory (string/list), but the calling module has none", cfg.iface, cfg.funcName)
 	}
 	resultVal, herr := allocHandleResult(cfg.resources, cfg.resultType, vals[0])
+	if herr == nil && cfg.resultNest != nil {
+		resultVal, herr = cfg.resultNest.lower(cfg.resources, resultVal)
+	}
 	if herr != nil {
 		return fmt.Errorf("async import %q %q: result: %w", cfg.iface, cfg.funcName, herr)
 	}
@@ -365,7 +369,7 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 	// see asyncResolveCfg's doc and subtask.applyResolve (this file).
 	cfg := &asyncResolveCfg{
 		iface: iface, funcName: funcName,
-		resultCount: resultCount, resultType: resultType, resultStore: resultPlan.store, resultUsesMem: resultUsesMem,
+		resultCount: resultCount, resultType: resultType, resultStore: resultPlan.store, resultUsesMem: resultUsesMem, resultNest: resultPlan.nest,
 		resources: resources, reallocOverride: reallocOverride,
 	}
 
@@ -581,6 +585,9 @@ func liftAsyncHostArgsSpilled(in *Instance, plans []hostParamPlan, tupleDesc bin
 			}
 		}
 		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
+		if err == nil && pp.nest != nil {
+			v, err = pp.nest.lift(in, resources, v)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}
@@ -630,6 +637,9 @@ func liftAsyncHostArgsPlanned(in *Instance, plans []hostParamPlan, resolve abi.R
 			}
 		}
 		v, err = resolveHandleArg(in, resources, nil, resolve, pp.pt, v)
+		if err == nil && pp.nest != nil {
+			v, err = pp.nest.lift(in, resources, v)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("param %d: %w", i, err)
 		}

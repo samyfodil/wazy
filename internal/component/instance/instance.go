@@ -697,6 +697,7 @@ type boundExport struct {
 	resultUsesMemory bool
 	resultFlatKinds  []string
 	resultStep       abi.LiftStep // compiled result-lift plan (see abi.CompileLift)
+	resultNest       *asyncNest   // the streams, futures and error contexts nested in the result
 	resultErr        error
 }
 
@@ -737,6 +738,7 @@ type boundExportABI struct {
 	resultUsesMemory bool
 	resultFlatKinds  []string
 	resultStep       abi.LiftStep
+	resultNest       *asyncNest
 	resultErr        error
 }
 
@@ -759,14 +761,6 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			continue
 		}
 		m.paramTypes[i] = pt
-		if typeContainsAsyncValueNested(pt, resolve, 0) {
-			// Phase 2 bind-time ceiling: a stream/future/error-context
-			// nested inside a composite param is refused loudly rather than
-			// silently passed through as a bare uint32 (see
-			// typeContainsAsyncValueNested's doc).
-			m.paramErrs[i] = fmt.Errorf("param %d: stream/future/error-context nested inside a composite type is not supported by this milestone", i)
-			continue
-		}
 		m.paramUsesMemory[i] = usesMemory(pt, resolve)
 		// Compile the per-param lower plan once (the spill decision's Flatten
 		// happens here, not per call). A compile error is recorded like a
@@ -822,10 +816,7 @@ func computeBoundExportABI(fd binary.FuncDesc, resolve abi.Resolver) *boundExpor
 			return m
 		}
 		m.resultType = rt
-		if typeContainsAsyncValueNested(rt, resolve, 0) {
-			m.resultErr = fmt.Errorf("result: stream/future/error-context nested inside a composite type is not supported by this milestone")
-			return m
-		}
+		m.resultNest = newAsyncNest(rt, resolve)
 		m.resultUsesMemory = usesMemory(rt, resolve)
 		flatKinds, err := abi.Flatten(rt, resolve)
 		if err != nil {
@@ -925,12 +916,9 @@ func typeRefContainsResource(ref *binary.TypeRef, resolve abi.Resolver, depth in
 }
 
 // typeContainsAsyncValueNested reports whether t contains a stream/future/
-// error-context type STRICTLY BELOW the top level -- the Phase 2 bind-time
-// ceiling (docs/component-model-async-phase2-design.md §2.2): the abi layer
-// lifts these as bare uint32 handles with no table transfer, which is
-// silently wrong once nested inside a record/list/variant/tuple/option/
-// result, so a bound export/import's param or result type may carry a
-// stream/future/error-context only at its own top level (depth == 0).
+// error-context type STRICTLY BELOW the top level: one the abi lifts and
+// lowers as a bare uint32 handle inside a record/list/variant/tuple/option/
+// result, which an asyncNest then moves across (async_nested.go).
 func typeContainsAsyncValueNested(t binary.TypeDesc, resolve abi.Resolver, depth int) bool {
 	if depth > maxResourceWalkDepth {
 		return false
@@ -1295,7 +1283,7 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	be.paramsSpill, be.paramTuple = m.paramsSpill, m.paramTuple
 
 	be.resultType, be.resultUsesMemory, be.resultFlatKinds, be.resultErr = m.resultType, m.resultUsesMemory, m.resultFlatKinds, m.resultErr
-	be.resultStep = m.resultStep
+	be.resultStep, be.resultNest = m.resultStep, m.resultNest
 }
 
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
@@ -2144,7 +2132,7 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 		if err != nil {
 			return nil, fmt.Errorf("component/instance: export %q result: load spilled result: %w", exportName, err)
 		}
-		if val, err = in.takeAsyncResult(rt, val, exportName); err != nil {
+		if val, err = in.takeAsyncResult(rt, val, be.resultNest, exportName); err != nil {
 			return nil, err
 		}
 		return []abi.Value{val}, nil
@@ -2176,68 +2164,33 @@ func (in *Instance) liftResult(be *boundExport, rawResults []uint64, mem []byte,
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q result: lift: %w", exportName, err)
 	}
-	if val, err = in.takeAsyncResult(rt, val, exportName); err != nil {
+	if val, err = in.takeAsyncResult(rt, val, be.resultNest, exportName); err != nil {
 		return nil, err
 	}
 	return []abi.Value{val}, nil
 }
 
-// takeAsyncResult lifts a top-level stream, future or error-context result
-// out of the guest's table for its caller, at lift time, as lift_async_value
-// and lift_error_context do (definitions.py ~1519): a readable end is
-// removed (trapping unless it is idle, not in a waitable set, and of the
-// declared element type) and becomes the caller's *StreamReader or
+// takeAsyncResult lifts the streams, futures and error contexts in an
+// export's result out of the guest's table for its caller, at lift time, as
+// lift_async_value and lift_error_context do (definitions.py ~1519): a
+// readable end is removed and becomes the caller's *StreamReader or
 // *FutureReader; an error context is read, the guest keeping its handle. At
 // lift time, because the guest may drop that handle as soon as it has
 // returned. The abi's generic lift paths read all three as an opaque i32,
 // like own<T>/borrow<T>; unlike those, the caller cannot do anything with the
-// bare index.
-func (in *Instance) takeAsyncResult(rt binary.TypeDesc, val abi.Value, exportName string) (abi.Value, error) {
-	var elem *binary.TypeRef
-	switch d := rt.(type) {
-	case binary.StreamDesc:
-		elem = d.Element
-	case binary.FutureDesc:
-		elem = d.Element
-	case binary.PrimitiveDesc:
-		if d.Prim != "error-context" {
-			return val, nil
-		}
-	default:
-		return val, nil
+// bare index. nest moves the ones nested in a composite result.
+func (in *Instance) takeAsyncResult(rt binary.TypeDesc, val abi.Value, nest *asyncNest, exportName string) (abi.Value, error) {
+	var err error
+	switch {
+	case isAsyncValue(rt):
+		val, err = liftAsyncValue(in, in.resources, in.resolve, rt, val)
+	case nest != nil:
+		val, err = nest.lift(in, in.resources, val)
 	}
-	h, ok := val.(uint32)
-	if !ok {
-		return nil, fmt.Errorf("component/instance: export %q result: expected a uint32 handle, got %T", exportName, val)
+	if err != nil {
+		return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
 	}
-	var elemDesc binary.TypeDesc
-	if elem != nil {
-		ed, err := resolveTypeRef(elem, in.resolve)
-		if err != nil {
-			return nil, fmt.Errorf("component/instance: export %q result: element type: %w", exportName, err)
-		}
-		elemDesc = ed
-	}
-	switch rt.(type) {
-	case binary.StreamDesc:
-		shared, err := takeReadableStreamEnd(in, in.resources, elemDesc, in.resolve, h)
-		if err != nil {
-			return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
-		}
-		return &StreamReader{in: in, shared: shared, state: copyIdle}, nil
-	case binary.FutureDesc:
-		shared, err := takeReadableFutureEnd(in, in.resources, elemDesc, in.resolve, h)
-		if err != nil {
-			return nil, fmt.Errorf("component/instance: export %q result: %w", exportName, err)
-		}
-		return &FutureReader{in: in, shared: shared, state: copyIdle}, nil
-	}
-	raw, _ := in.resources.getEntry(h)
-	ec, ok := raw.(*ErrorContext)
-	if !ok {
-		return nil, fmt.Errorf("component/instance: export %q result: handle %d is not an error-context", exportName, h)
-	}
-	return ec, nil
+	return val, nil
 }
 
 // DropResource drops an own<resource> handle the host received from a guest

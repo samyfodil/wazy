@@ -92,21 +92,7 @@ func typecheck(t *testing.T, src []byte) {
 // rather than generating code that would misbehave.
 func TestGenerateRefuses(t *testing.T) {
 	for _, c := range []struct{ name, src, want string }{
-		{"error-context in a list", `package a:b; world w { export f: func(e: list<error-context>); }`, "f: param e: a stream, future or error-context nested in list<error-context>"},
 		{"stream of error-context", `package a:b; world w { export f: func(s: stream<error-context>); }`, "f: param s: a stream of error-context: an element holding"},
-		{"in a result", `package a:b; world w { export f: func() -> result<stream<u8>>; }`, "f: result: a stream, future or error-context nested in result<stream<u8>> is not supported"},
-		{"in an error arm", `package a:b; world w { export f: func() -> result<_, future<u8>>; }`, "f: result: a stream, future or error-context nested in result<_, future<u8>>"},
-		{"in a tuple", `package a:b; world w { export f: func() -> tuple<u8, stream<u8>>; }`, "f: result: a stream, future or error-context nested in tuple<u8, stream<u8>>"},
-		{
-			"in a record", `package a:b; interface t { record r { s: stream<u8> } } world w { use t.{r}; export f: func() -> r; }`,
-			"f: result: a stream, future or error-context nested in r",
-		},
-		{
-			"in a variant", `package a:b; interface t { variant v { s(stream<u8>) } } world w { use t.{v}; export f: func() -> v; }`,
-			"f: result: a stream, future or error-context nested in v",
-		},
-		{"in a map", `package a:b; world w { export f: func() -> map<string, stream<u8>>; }`, "f: result: a stream, future or error-context nested in map<string, stream<u8>>"},
-		{"in an option", `package a:b; world w { export f: func(s: option<stream<u8>>); }`, "f: param s: a stream, future or error-context nested in option<stream<u8>>"},
 		{"of streams", `package a:b; world w { export f: func() -> stream<stream<u8>>; }`, "f: result: a stream of stream<u8>: an element holding a resource handle, stream, future or error-context is not supported"},
 		{
 			"of handles", `package a:b; interface i { resource r; f: func() -> future<r>; } world w { export i; }`,
@@ -296,6 +282,49 @@ world w { import host; export api; }`
 	}
 	// One element type serves every stream and future of it.
 	require.Equal(t, 1, strings.Count(out, "elemTypes.t[0] = component.Prim(\"u8\")"))
+}
+
+// A stream, future or error-context nested in another type converts with the
+// rest of it, in either direction.
+func TestGenerateNestedAsync(t *testing.T) {
+	src := `package a:b;
+interface types {
+  record body { data: stream<u8>, trailer: future<u32> }
+  variant event { data(stream<string>), done, failed(error-context) }
+}
+interface host {
+  use types.{body, event};
+  open: async func(n: u32) -> result<tuple<stream<u8>, future<u32>>, string>;
+  sum: async func(b: body) -> u32;
+  errors: func(n: u32) -> list<error-context>;
+}
+interface api {
+  use types.{body, event};
+  read: async func(b: body) -> u32;
+  make: async func(n: u32) -> body;
+  watch: func(e: list<event>) -> map<string, error-context>;
+  maybe: func() -> option<future<string>>;
+}
+world w { import host; export api; }`
+	out, err := genSrc(t, src, Options{})
+	require.NoError(t, err)
+	for _, want := range []string{
+		"type Body struct {\n\tData    *witgo.StreamReader[uint8]\n\tTrailer *witgo.FutureReader[uint32]\n}",
+		"if out.Data, err = witgo.ReaderOf(vs[0], witgo.U8); err != nil {",
+		"if out.Trailer, err = witgo.FutureReaderOf(vs[1], witgo.U32); err != nil {",
+		"return []component.Value{x.Data.Raw(), x.Trailer.Raw()}",
+		"func EventFailed(v *component.ErrorContext) Event {",
+		"p, err := witgo.ErrorContextOf(vv.Payload)",
+		"Open(ctx context.Context, n uint32, ret witgo.Async[witgo.Result[witgo.Tuple2[*witgo.StreamReader[uint8], *witgo.FutureReader[uint32]], string]]) error",
+		"Errors(ctx context.Context, n uint32) ([]*component.ErrorContext, error)",
+		"func (x API) Watch(ctx context.Context, e []Event) (map[string]*component.ErrorContext, error) {",
+		"func (x API) Maybe(ctx context.Context) (**witgo.FutureReader[string], error) {",
+		"return (*x).Raw()",
+		"func (x *W) NewStreamString() (",
+		"func (x *W) NewFutureString() (",
+	} {
+		require.Contains(t, out, want)
+	}
 }
 
 // A tuple longer than witgo's is a struct of the bindings' own, named for

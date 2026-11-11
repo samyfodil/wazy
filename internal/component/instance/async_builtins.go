@@ -516,13 +516,14 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 	}
 
 	var resultType binary.TypeDesc
+	var resultNest *asyncNest
 	var flatKinds []string
 	if len(resultRefs) == 1 {
 		rt, err := resolveTypeRef(&resultRefs[0], resolve)
 		if err != nil {
 			return hostFuncDef{}, fmt.Errorf("component/instance: task.return: resolve result type: %w", err)
 		}
-		resultType = rt
+		resultType, resultNest = rt, newAsyncNest(rt, resolve)
 		if flatKinds, err = abi.Flatten(rt, resolve); err != nil {
 			return hostFuncDef{}, fmt.Errorf("component/instance: task.return: flatten result type: %w", err)
 		}
@@ -598,10 +599,10 @@ func taskReturnHostFuncGraph(in *Instance, canon binary.Canon) (hostFuncDef, err
 			}
 		}
 
-		if resultType != nil && t.onResolve == nil {
-			// The host is the caller: it gets the result as lifted. A guest
-			// caller's onResolve moves the handles between tables itself.
-			v, err := in.takeAsyncResult(resultType, result[0], "task.return")
+		if resultType != nil {
+			// The caller gets the result as lifted: the host, or a guest
+			// caller's onResolve, which lowers it into its own table.
+			v, err := in.takeAsyncResult(resultType, result[0], resultNest, "task.return")
 			if err != nil {
 				panic(err)
 			}

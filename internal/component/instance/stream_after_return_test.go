@@ -136,26 +136,26 @@ func TestTakeAsyncResult(t *testing.T) {
 		{"element", binary.StreamDesc{Element: unresolved}, ok, "element type"},
 		{"not an error-context", ecDesc, w, "is not an error-context"},
 	} {
-		if _, err := in.takeAsyncResult(c.rt, c.v, "f"); err == nil || !strings.Contains(err.Error(), c.want) {
+		if _, err := in.takeAsyncResult(c.rt, c.v, nil, "f"); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v", c.name, err)
 		}
 	}
-	if v, err := in.takeAsyncResult(binary.StreamDesc{}, ok, "f"); err != nil || v.(*StreamReader).shared != shared {
+	if v, err := in.takeAsyncResult(binary.StreamDesc{}, ok, nil, "f"); err != nil || v.(*StreamReader).shared != shared {
 		t.Fatalf("stream: %v", err)
 	}
 	if _, found := in.resources.getEntry(ok); found {
 		t.Fatal("the readable end left the guest's table")
 	}
-	if v, err := in.takeAsyncResult(binary.FutureDesc{}, fok, "f"); err != nil || v.(*FutureReader).shared != fs {
+	if v, err := in.takeAsyncResult(binary.FutureDesc{}, fok, nil, "f"); err != nil || v.(*FutureReader).shared != fs {
 		t.Fatalf("future: %v", err)
 	}
-	if v, err := in.takeAsyncResult(ecDesc, eh, "f"); err != nil || v != ec {
+	if v, err := in.takeAsyncResult(ecDesc, eh, nil, "f"); err != nil || v != ec {
 		t.Fatalf("error-context: %v", err)
 	}
 	if _, found := in.resources.getEntry(eh); !found {
 		t.Fatal("the guest keeps its error-context handle")
 	}
-	if v, err := in.takeAsyncResult(binary.PrimitiveDesc{Prim: "u32"}, uint32(3), "f"); err != nil || v != uint32(3) {
+	if v, err := in.takeAsyncResult(binary.PrimitiveDesc{Prim: "u32"}, uint32(3), nil, "f"); err != nil || v != uint32(3) {
 		t.Fatalf("u32: %v %v", v, err)
 	}
 	if ec.DebugMessage() != "m" {

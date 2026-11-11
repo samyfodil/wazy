@@ -169,6 +169,12 @@ type Everything struct {
 	Shapes  []Shape
 }
 
+// Body is the WIT record body.
+type Body struct {
+	Data    *witgo.StreamReader[uint8]
+	Trailer *witgo.FutureReader[uint32]
+}
+
 func liftPoint(h *witgo.Handles, v component.Value) (Point, error) {
 	var out Point
 	vs, err := witgo.Values(v, 3, "point")
@@ -331,6 +337,25 @@ func liftEverything(h *witgo.Handles, v component.Value) (Everything, error) {
 
 func lowerEverything(h *witgo.Handles, x Everything) component.Value {
 	return []component.Value{x.B, int32(x.Tiny), uint32(x.Utiny), int32(x.Short), uint32(x.Ushort), x.Int, x.Uint, x.Long, x.Ulong, x.Single, x.Double, x.C, x.S, x.Bytes, lowerT1(h, x.Words), lowerT2(h, x.Points), lowerT3(h, x.Maybe), lowerT4(h, x.Nothing), lowerT5(h, x.Pair), append([]uint16(nil), x.Fixed[:]...), uint32(x.Col), uint32(x.Per), lowerT7(h, x.Shapes)}
+}
+
+func liftBody(h *witgo.Handles, v component.Value) (Body, error) {
+	var out Body
+	vs, err := witgo.Values(v, 2, "body")
+	if err != nil {
+		return out, err
+	}
+	if out.Data, err = witgo.ReaderOf(vs[0], witgo.U8); err != nil {
+		return out, err
+	}
+	if out.Trailer, err = witgo.FutureReaderOf(vs[1], witgo.U32); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func lowerBody(h *witgo.Handles, x Body) component.Value {
+	return []component.Value{x.Data.Raw(), x.Trailer.Raw()}
 }
 
 func liftT1(h *witgo.Handles, v component.Value) ([]string, error) {
@@ -621,7 +646,52 @@ func lowerT14(h *witgo.Handles, x **uint32) component.Value {
 	return component.Some{Value: lowerT4(h, *x)}
 }
 
-func liftT15(h *witgo.Handles, v component.Value) ([]Blob, error) {
+func liftT15(h *witgo.Handles, v component.Value) (witgo.Result[Body, string], error) {
+	var out witgo.Result[Body, string]
+	r, err := witgo.ResultValue(v, "result<body, string>")
+	if err != nil {
+		return out, err
+	}
+	out.IsErr = r.IsErr
+	if !r.IsErr {
+		out.Ok, err = liftBody(h, r.Payload)
+	}
+	if r.IsErr {
+		out.Err, err = witgo.String(r.Payload)
+	}
+	return out, err
+}
+
+func lowerT15(h *witgo.Handles, x witgo.Result[Body, string]) component.Value {
+	if x.IsErr {
+		return component.ResultValue{IsErr: true, Payload: x.Err}
+	}
+	return component.ResultValue{Payload: lowerBody(h, x.Ok)}
+}
+
+func liftT16(h *witgo.Handles, v component.Value) ([]*component.ErrorContext, error) {
+	vs, err := witgo.Values(v, -1, "list<error-context>")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*component.ErrorContext, len(vs))
+	for i, e := range vs {
+		if out[i], err = witgo.ErrorContextOf(e); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func lowerT16(h *witgo.Handles, x []*component.ErrorContext) component.Value {
+	out := make([]component.Value, len(x))
+	for i, e := range x {
+		out[i] = witgo.LowerErrorContext(e)
+	}
+	return out
+}
+
+func liftT17(h *witgo.Handles, v component.Value) ([]Blob, error) {
 	vs, err := witgo.Values(v, -1, "list<blob>")
 	if err != nil {
 		return nil, err
@@ -635,7 +705,7 @@ func liftT15(h *witgo.Handles, v component.Value) ([]Blob, error) {
 	return out, nil
 }
 
-func lowerT15(h *witgo.Handles, x []Blob) component.Value {
+func lowerT17(h *witgo.Handles, x []Blob) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
 		out[i] = lowerBlob(h, e, false)
@@ -643,7 +713,7 @@ func lowerT15(h *witgo.Handles, x []Blob) component.Value {
 	return out
 }
 
-func liftT16(h *witgo.Handles, v component.Value) ([]Token, error) {
+func liftT18(h *witgo.Handles, v component.Value) ([]Token, error) {
 	vs, err := witgo.Values(v, -1, "list<token>")
 	if err != nil {
 		return nil, err
@@ -657,7 +727,7 @@ func liftT16(h *witgo.Handles, v component.Value) ([]Token, error) {
 	return out, nil
 }
 
-func lowerT16(h *witgo.Handles, x []Token) component.Value {
+func lowerT18(h *witgo.Handles, x []Token) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
 		out[i] = lowerToken(h, e, false)
@@ -665,7 +735,25 @@ func lowerT16(h *witgo.Handles, x []Token) component.Value {
 	return out
 }
 
-func liftT17(h *witgo.Handles, v component.Value) (witgo.Result[uint32, string], error) {
+func liftT19(h *witgo.Handles, v component.Value) (**component.ErrorContext, error) {
+	if v == nil {
+		return nil, nil
+	}
+	x, err := witgo.ErrorContextOf(v)
+	if err != nil {
+		return nil, err
+	}
+	return &x, nil
+}
+
+func lowerT19(h *witgo.Handles, x **component.ErrorContext) component.Value {
+	if x == nil {
+		return nil
+	}
+	return witgo.LowerErrorContext(*x)
+}
+
+func liftT20(h *witgo.Handles, v component.Value) (witgo.Result[uint32, string], error) {
 	var out witgo.Result[uint32, string]
 	r, err := witgo.ResultValue(v, "result<u32, string>")
 	if err != nil {
@@ -681,14 +769,14 @@ func liftT17(h *witgo.Handles, v component.Value) (witgo.Result[uint32, string],
 	return out, err
 }
 
-func lowerT17(h *witgo.Handles, x witgo.Result[uint32, string]) component.Value {
+func lowerT20(h *witgo.Handles, x witgo.Result[uint32, string]) component.Value {
 	if x.IsErr {
 		return component.ResultValue{IsErr: true, Payload: x.Err}
 	}
 	return component.ResultValue{Payload: x.Ok}
 }
 
-func liftT18(h *witgo.Handles, v component.Value) (witgo.Tuple2[string, uint32], error) {
+func liftT21(h *witgo.Handles, v component.Value) (witgo.Tuple2[string, uint32], error) {
 	var out witgo.Tuple2[string, uint32]
 	vs, err := witgo.Values(v, 2, "tuple<string, u32>")
 	if err != nil {
@@ -703,11 +791,11 @@ func liftT18(h *witgo.Handles, v component.Value) (witgo.Tuple2[string, uint32],
 	return out, nil
 }
 
-func lowerT18(h *witgo.Handles, x witgo.Tuple2[string, uint32]) component.Value {
+func lowerT21(h *witgo.Handles, x witgo.Tuple2[string, uint32]) component.Value {
 	return []component.Value{x.F0, x.F1}
 }
 
-func liftT19(h *witgo.Handles, v component.Value) ([]witgo.Result[Color, string], error) {
+func liftT22(h *witgo.Handles, v component.Value) ([]witgo.Result[Color, string], error) {
 	vs, err := witgo.Values(v, -1, "list<result<color, string>>")
 	if err != nil {
 		return nil, err
@@ -721,7 +809,7 @@ func liftT19(h *witgo.Handles, v component.Value) ([]witgo.Result[Color, string]
 	return out, nil
 }
 
-func lowerT19(h *witgo.Handles, x []witgo.Result[Color, string]) component.Value {
+func lowerT22(h *witgo.Handles, x []witgo.Result[Color, string]) component.Value {
 	out := make([]component.Value, len(x))
 	for i, e := range x {
 		out[i] = lowerT8(h, e)
@@ -780,6 +868,15 @@ type Host interface {
 	WaitFor(ctx context.Context, f *witgo.FutureReader[uint32], ret witgo.Async[uint32]) error
 	Explain(ctx context.Context, code uint32) (*component.ErrorContext, error)
 	Describe(ctx context.Context, e *component.ErrorContext) (string, error)
+	// OpenBody is async: it may return its result through ret after it returns.
+	OpenBody(ctx context.Context, n uint32, ret witgo.Async[witgo.Result[Body, string]]) error
+	// SumBody is async: it may return its result through ret after it returns.
+	SumBody(ctx context.Context, b Body, ret witgo.Async[uint32]) error
+	Errors(ctx context.Context, n uint32) ([]*component.ErrorContext, error)
+	Messages(ctx context.Context, es []*component.ErrorContext) (string, error)
+	// SpillBody is async: it may return its result through ret after it returns.
+	SpillBody(ctx context.Context, a uint32, b uint32, c uint32, d uint32, x_ Body, ret witgo.Async[uint32]) error
+	SpillErrors(ctx context.Context, a uint32, b uint32, c uint32, d uint32, e uint32, f uint32, g uint32, h uint32, i uint32, j uint32, k uint32, l uint32, m uint32, n uint32, o uint32, p uint32, es []*component.ErrorContext) (string, error)
 	// DropCounter releases a Counter the guest dropped.
 	DropCounter(ctx context.Context, self Counter) error
 }
@@ -791,6 +888,7 @@ func optionsHost(impl Host) []component.Option {
 	t3 := tbl.Flags("read", "write", "exec")
 	t4 := tbl.Variant(component.VariantCaseSpec{Name: "circle", Type: component.Prim("f64")}, component.VariantCaseSpec{Name: "rect", Type: t1}, component.VariantCaseSpec{Name: "empty"})
 	t5 := tbl.Record("b", component.Prim("bool"), "tiny", component.Prim("s8"), "utiny", component.Prim("u8"), "short", component.Prim("s16"), "ushort", component.Prim("u16"), "int", component.Prim("s32"), "uint", component.Prim("u32"), "long", component.Prim("s64"), "ulong", component.Prim("u64"), "single", component.Prim("f32"), "double", component.Prim("f64"), "c", component.Prim("char"), "s", component.Prim("string"), "bytes", tbl.List(component.Prim("u8")), "words", tbl.List(component.Prim("string")), "points", tbl.List(t1), "maybe", tbl.Option(t1), "nothing", tbl.Option(component.Prim("u32")), "pair", tbl.Tuple(component.Prim("u32"), component.Prim("string")), "fixed", tbl.FixedList(component.Prim("u16"), 3), "col", t2, "per", t3, "shapes", tbl.List(t4))
+	t6 := tbl.Record("data", tbl.Stream(component.Prim("u8")), "trailer", tbl.Future(component.Prim("u32")))
 	resolve := tbl.Resolver()
 	// The table the handles nested in arguments and results live in.
 	var table *component.HandleTable
@@ -1113,6 +1211,161 @@ func optionsHost(impl Host) []component.Option {
 			}
 			return []component.Value{r}, nil
 		}, tbl.Func([]component.TypeRef{component.Prim("error-context")}, component.Prim("string")), resolve),
+		component.WithAsyncImportCustom("wazy:bindgen-test/host@0.1.0", "open-body", func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%s: %d args", "open-body", len(args))
+			}
+			n, err := witgo.U32(args[0])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "open-body", "n", err)
+			}
+			ret := witgo.NewAsync(call, func(r witgo.Result[Body, string]) []component.Value { return []component.Value{lowerT15(nil, r)} })
+			return impl.OpenBody(ctx, n, ret)
+		}, tbl.Func([]component.TypeRef{component.Prim("u32")}, tbl.Result(t6, component.Prim("string"))), resolve),
+		component.WithAsyncImportCustom("wazy:bindgen-test/host@0.1.0", "sum-body", func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%s: %d args", "sum-body", len(args))
+			}
+			b, err := liftBody(nil, args[0])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "sum-body", "b", err)
+			}
+			ret := witgo.NewAsync(call, func(r uint32) []component.Value { return []component.Value{r} })
+			return impl.SumBody(ctx, b, ret)
+		}, tbl.Func([]component.TypeRef{t6}, component.Prim("u32")), resolve),
+		component.WithImportCustom("wazy:bindgen-test/host@0.1.0", "errors", func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("%s: %d args", "errors", len(args))
+			}
+			n, err := witgo.U32(args[0])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "errors", "n", err)
+			}
+			r, err := impl.Errors(ctx, n)
+			if err != nil {
+				return nil, err
+			}
+			return []component.Value{lowerT16(nil, r)}, nil
+		}, tbl.Func([]component.TypeRef{component.Prim("u32")}, tbl.List(component.Prim("error-context"))), resolve),
+		component.WithImportCustom("wazy:bindgen-test/host@0.1.0", "messages", func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+			if len(args) != 1 {
+				return nil, fmt.Errorf("%s: %d args", "messages", len(args))
+			}
+			es, err := liftT16(nil, args[0])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "messages", "es", err)
+			}
+			r, err := impl.Messages(ctx, es)
+			if err != nil {
+				return nil, err
+			}
+			return []component.Value{r}, nil
+		}, tbl.Func([]component.TypeRef{tbl.List(component.Prim("error-context"))}, component.Prim("string")), resolve),
+		component.WithAsyncImportCustom("wazy:bindgen-test/host@0.1.0", "spill-body", func(ctx context.Context, args []component.Value, call *component.AsyncCall) error {
+			if len(args) != 5 {
+				return fmt.Errorf("%s: %d args", "spill-body", len(args))
+			}
+			a, err := witgo.U32(args[0])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "spill-body", "a", err)
+			}
+			b, err := witgo.U32(args[1])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "spill-body", "b", err)
+			}
+			c, err := witgo.U32(args[2])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "spill-body", "c", err)
+			}
+			d, err := witgo.U32(args[3])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "spill-body", "d", err)
+			}
+			x_, err := liftBody(nil, args[4])
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", "spill-body", "x", err)
+			}
+			ret := witgo.NewAsync(call, func(r uint32) []component.Value { return []component.Value{r} })
+			return impl.SpillBody(ctx, a, b, c, d, x_, ret)
+		}, tbl.Func([]component.TypeRef{component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), t6}, component.Prim("u32")), resolve),
+		component.WithImportCustom("wazy:bindgen-test/host@0.1.0", "spill-errors", func(ctx context.Context, args []component.Value) ([]component.Value, error) {
+			if len(args) != 17 {
+				return nil, fmt.Errorf("%s: %d args", "spill-errors", len(args))
+			}
+			a, err := witgo.U32(args[0])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "a", err)
+			}
+			b, err := witgo.U32(args[1])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "b", err)
+			}
+			c, err := witgo.U32(args[2])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "c", err)
+			}
+			d, err := witgo.U32(args[3])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "d", err)
+			}
+			e, err := witgo.U32(args[4])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "e", err)
+			}
+			f, err := witgo.U32(args[5])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "f", err)
+			}
+			g, err := witgo.U32(args[6])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "g", err)
+			}
+			h, err := witgo.U32(args[7])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "h", err)
+			}
+			i, err := witgo.U32(args[8])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "i", err)
+			}
+			j, err := witgo.U32(args[9])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "j", err)
+			}
+			k, err := witgo.U32(args[10])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "k", err)
+			}
+			l, err := witgo.U32(args[11])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "l", err)
+			}
+			m, err := witgo.U32(args[12])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "m", err)
+			}
+			n, err := witgo.U32(args[13])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "n", err)
+			}
+			o, err := witgo.U32(args[14])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "o", err)
+			}
+			p, err := witgo.U32(args[15])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "p", err)
+			}
+			es, err := liftT16(nil, args[16])
+			if err != nil {
+				return nil, fmt.Errorf("%s: %s: %w", "spill-errors", "es", err)
+			}
+			r, err := impl.SpillErrors(ctx, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, es)
+			if err != nil {
+				return nil, err
+			}
+			return []component.Value{r}, nil
+		}, tbl.Func([]component.TypeRef{component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), component.Prim("u32"), tbl.List(component.Prim("error-context"))}, component.Prim("string")), resolve),
 		component.WithResourceTag("wazy:bindgen-test/host@0.1.0", "counter", tagCounter),
 		component.WithHostResourceDtor(tagCounter, func(ctx context.Context, rep uint32) error { return impl.DropCounter(ctx, Counter(rep)) }),
 	}
@@ -1317,7 +1570,7 @@ func (x API) MakeBlobs(ctx context.Context, n uint32) ([]Blob, error) {
 		var zero []Blob
 		return zero, fmt.Errorf("%s: %d results", "make-blobs", len(res))
 	}
-	return liftT15(h, res[0])
+	return liftT17(h, res[0])
 }
 
 // BlobSize calls the export blob-size.
@@ -1341,7 +1594,7 @@ func (x API) BlobSize(ctx context.Context, b Blob) (uint32, error) {
 // Tally calls the export tally.
 func (x API) Tally(ctx context.Context, ts []Token) (uint32, error) {
 	h := &witgo.Handles{Table: x.inst.ResourcesFor("wazy:bindgen-test/api@0.1.0"), Inst: x.inst}
-	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "tally", lowerT16(h, ts))
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "tally", lowerT18(h, ts))
 	if rerr := h.Release(); err == nil {
 		err = rerr
 	}
@@ -1843,6 +2096,193 @@ func (x API) RelayError(ctx context.Context, code uint32) (string, error) {
 	return witgo.String(res[0])
 }
 
+// ReadBody calls the export read-body.
+func (x API) ReadBody(ctx context.Context, b Body) (uint32, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "read-body", lowerBody(nil, b))
+	if err != nil {
+		var zero uint32
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero uint32
+		return zero, fmt.Errorf("%s: %d results", "read-body", len(res))
+	}
+	return witgo.U32(res[0])
+}
+
+// ReadBodyAsync starts the export read-body and returns once it first waits; Await the result.
+func (x API) ReadBodyAsync(ctx context.Context, b Body) (*witgo.Pending[uint32], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#read-body", lowerBody(nil, b))
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (uint32, error) {
+		var zero uint32
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "read-body", len(res))
+		}
+		return witgo.U32(res[0])
+	}), nil
+}
+
+// MakeBody calls the export make-body.
+func (x API) MakeBody(ctx context.Context, n uint32) (Body, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "make-body", n)
+	if err != nil {
+		var zero Body
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero Body
+		return zero, fmt.Errorf("%s: %d results", "make-body", len(res))
+	}
+	return liftBody(nil, res[0])
+}
+
+// MakeBodyAsync starts the export make-body and returns once it first waits; Await the result.
+func (x API) MakeBodyAsync(ctx context.Context, n uint32) (*witgo.Pending[Body], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#make-body", n)
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (Body, error) {
+		var zero Body
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "make-body", len(res))
+		}
+		return liftBody(nil, res[0])
+	}), nil
+}
+
+// PipeBody calls the export pipe-body.
+func (x API) PipeBody(ctx context.Context, n uint32) (uint32, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "pipe-body", n)
+	if err != nil {
+		var zero uint32
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero uint32
+		return zero, fmt.Errorf("%s: %d results", "pipe-body", len(res))
+	}
+	return witgo.U32(res[0])
+}
+
+// PipeBodyAsync starts the export pipe-body and returns once it first waits; Await the result.
+func (x API) PipeBodyAsync(ctx context.Context, n uint32) (*witgo.Pending[uint32], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#pipe-body", n)
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (uint32, error) {
+		var zero uint32
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "pipe-body", len(res))
+		}
+		return witgo.U32(res[0])
+	}), nil
+}
+
+// JoinErrors calls the export join-errors.
+func (x API) JoinErrors(ctx context.Context, es []*component.ErrorContext) (string, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "join-errors", lowerT16(nil, es))
+	if err != nil {
+		var zero string
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero string
+		return zero, fmt.Errorf("%s: %d results", "join-errors", len(res))
+	}
+	return witgo.String(res[0])
+}
+
+// RelayErrors calls the export relay-errors.
+func (x API) RelayErrors(ctx context.Context, n uint32) (string, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "relay-errors", n)
+	if err != nil {
+		var zero string
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero string
+		return zero, fmt.Errorf("%s: %d results", "relay-errors", len(res))
+	}
+	return witgo.String(res[0])
+}
+
+// SomeError calls the export some-error.
+func (x API) SomeError(ctx context.Context, fail bool) (**component.ErrorContext, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "some-error", fail)
+	if err != nil {
+		var zero **component.ErrorContext
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero **component.ErrorContext
+		return zero, fmt.Errorf("%s: %d results", "some-error", len(res))
+	}
+	return liftT19(nil, res[0])
+}
+
+// SomeErrorAsync starts the export some-error and returns once it first waits; Await the result.
+func (x API) SomeErrorAsync(ctx context.Context, fail bool) (*witgo.Pending[**component.ErrorContext], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#some-error", fail)
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (**component.ErrorContext, error) {
+		var zero **component.ErrorContext
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "some-error", len(res))
+		}
+		return liftT19(nil, res[0])
+	}), nil
+}
+
+// PipeSpilled calls the export pipe-spilled.
+func (x API) PipeSpilled(ctx context.Context, n uint32) (uint32, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "pipe-spilled", n)
+	if err != nil {
+		var zero uint32
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero uint32
+		return zero, fmt.Errorf("%s: %d results", "pipe-spilled", len(res))
+	}
+	return witgo.U32(res[0])
+}
+
+// PipeSpilledAsync starts the export pipe-spilled and returns once it first waits; Await the result.
+func (x API) PipeSpilledAsync(ctx context.Context, n uint32) (*witgo.Pending[uint32], error) {
+	p, err := x.inst.CallAsync(ctx, "wazy:bindgen-test/api@0.1.0#pipe-spilled", n)
+	if err != nil {
+		return nil, err
+	}
+	return witgo.NewPending(p, func(res []component.Value) (uint32, error) {
+		var zero uint32
+		if len(res) != 1 {
+			return zero, fmt.Errorf("%s: %d results", "pipe-spilled", len(res))
+		}
+		return witgo.U32(res[0])
+	}), nil
+}
+
+// RelaySpilled calls the export relay-spilled.
+func (x API) RelaySpilled(ctx context.Context, n uint32) (string, error) {
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "relay-spilled", n)
+	if err != nil {
+		var zero string
+		return zero, err
+	}
+	if len(res) != 1 {
+		var zero string
+		return zero, fmt.Errorf("%s: %d results", "relay-spilled", len(res))
+	}
+	return witgo.String(res[0])
+}
+
 // Roundtrip calls the export roundtrip.
 func (x API) Roundtrip(ctx context.Context, e Everything) (Everything, error) {
 	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "roundtrip", lowerEverything(nil, e))
@@ -1882,7 +2322,7 @@ func (x API) Check(ctx context.Context, n uint32) (witgo.Result[uint32, string],
 		var zero witgo.Result[uint32, string]
 		return zero, fmt.Errorf("%s: %d results", "check", len(res))
 	}
-	return liftT17(nil, res[0])
+	return liftT20(nil, res[0])
 }
 
 // First calls the export first.
@@ -1901,7 +2341,7 @@ func (x API) First(ctx context.Context, xs []Point) (*Point, error) {
 
 // Swap calls the export swap.
 func (x API) Swap(ctx context.Context, t witgo.Tuple2[string, uint32]) (witgo.Tuple2[uint32, string], error) {
-	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "swap", lowerT18(nil, t))
+	res, err := x.inst.CallExport(ctx, "wazy:bindgen-test/api@0.1.0", "swap", lowerT21(nil, t))
 	if err != nil {
 		var zero witgo.Tuple2[uint32, string]
 		return zero, err
@@ -1938,7 +2378,7 @@ func (x API) ClassifyAll(ctx context.Context, xs []Shape) ([]witgo.Result[Color,
 		var zero []witgo.Result[Color, string]
 		return zero, fmt.Errorf("%s: %d results", "classify-all", len(res))
 	}
-	return liftT19(nil, res[0])
+	return liftT22(nil, res[0])
 }
 
 // PickName calls the export pick-name.

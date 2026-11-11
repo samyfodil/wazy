@@ -11,7 +11,7 @@ use wit_bindgen::{FutureReader, StreamReader};
 
 use exports::wazy::bindgen_test::api::{Blob, BlobBorrow, Guest as Api, GuestBlob};
 use wazy::bindgen_test::host;
-use wazy::bindgen_test::types::{Color, Everything, Perms, Point, Shape, Token};
+use wazy::bindgen_test::types::{Body, Color, Everything, Perms, Point, Shape, Token};
 
 struct Component;
 
@@ -233,6 +233,55 @@ impl Api for Component {
     // The host's error context, back to the host.
     fn relay_error(code: u32) -> String {
         host::describe(host::explain(code))
+    }
+
+    async fn read_body(b: Body) -> u32 {
+        let data: u32 = b.data.collect().await.iter().map(|&x| x as u32).sum();
+        data + b.trailer.await
+    }
+
+    // The body outlives the call: a spawned task writes its bytes, then its
+    // trailer, after it is returned.
+    async fn make_body(n: u32) -> Body {
+        let (mut w, data) = wit_stream::new();
+        let (fw, trailer) = wit_future::new(|| 0);
+        wit_bindgen::spawn_local(async move {
+            w.write_all((0..n).map(|i| i as u8).collect()).await;
+            drop(w);
+            fw.write(n * 100).await.unwrap();
+        });
+        Body { data, trailer }
+    }
+
+    // The host's body, back to the host.
+    async fn pipe_body(n: u32) -> u32 {
+        match host::open_body(n).await {
+            Ok(b) => host::sum_body(b).await,
+            Err(_) => 0,
+        }
+    }
+
+    fn join_errors(es: Vec<ErrorContext>) -> String {
+        es.iter().map(|e| e.debug_message()).collect::<Vec<_>>().join(",")
+    }
+
+    fn relay_errors(n: u32) -> String {
+        host::messages(&host::errors(n))
+    }
+
+    async fn some_error(fail: bool) -> Option<ErrorContext> {
+        fail.then(|| ErrorContext::new("failed"))
+    }
+
+    async fn pipe_spilled(n: u32) -> u32 {
+        match host::open_body(n).await {
+            Ok(b) => host::spill_body(1, 2, 3, 4, b).await,
+            Err(_) => 0,
+        }
+    }
+
+    fn relay_spilled(n: u32) -> String {
+        host::spill_errors(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, &host::errors(n))
     }
 
     fn nothing() {}

@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -247,6 +248,69 @@ func (h *host) Explain(_ context.Context, code uint32) (*component.ErrorContext,
 
 func (h *host) Describe(_ context.Context, e *component.ErrorContext) (string, error) {
 	return "described: " + e.DebugMessage(), nil
+}
+
+func (h *host) OpenBody(_ context.Context, n uint32, ret witgo.Async[witgo.Result[Body, string]]) error {
+	w, data, err := h.k.NewStreamU8()
+	if err != nil {
+		return err
+	}
+	fw, trailer, err := h.k.NewFutureU32()
+	if err != nil {
+		return err
+	}
+	bytes := make([]byte, n)
+	for i := range bytes {
+		bytes[i] = byte(i)
+	}
+	w.WriteAll(bytes, func(int, component.CopyResult) { w.Close() })
+	fw.Set(n*7, func(component.CopyResult) { fw.Close() })
+	ret.Return(witgo.Ok[Body, string](Body{Data: data, Trailer: trailer}))
+	return nil
+}
+
+func (h *host) SumBody(_ context.Context, b Body, ret witgo.Async[uint32]) error {
+	sumBody(b, ret.Return)
+	return nil
+}
+
+// sumBody gives done the sum of b's bytes and its trailer, once it has them.
+func sumBody(b Body, done func(uint32)) {
+	b.Data.ReadAll(2, func(vals []uint8, err error) {
+		sum := uint32(0)
+		for _, v := range vals {
+			sum += uint32(v)
+		}
+		b.Trailer.Get(func(_ component.CopyResult, t uint32, _ error) { done(sum + t) })
+	})
+}
+
+func (h *host) Errors(_ context.Context, n uint32) ([]*component.ErrorContext, error) {
+	es := make([]*component.ErrorContext, n)
+	for i := range es {
+		es[i] = component.NewErrorContext(fmt.Sprintf("e%d", i))
+	}
+	return es, nil
+}
+
+func (h *host) Messages(_ context.Context, es []*component.ErrorContext) (string, error) {
+	ms := make([]string, len(es))
+	for i, e := range es {
+		ms[i] = e.DebugMessage()
+	}
+	return strings.Join(ms, ","), nil
+}
+
+func (h *host) SpillBody(_ context.Context, a, b, c, d uint32, x Body, ret witgo.Async[uint32]) error {
+	sumBody(x, func(sum uint32) { ret.Return(sum + a + b + c + d) })
+	return nil
+}
+
+func (h *host) SpillErrors(ctx context.Context, a, b, c, d, e, f, g, i, j, k, l, m, n, o, p, q uint32, es []*component.ErrorContext) (string, error) {
+	if a+b+c+d+e+f+g+i+j+k+l+m+n+o+p+q != 136 {
+		return "", fmt.Errorf("the spilled arguments")
+	}
+	return h.Messages(ctx, es)
 }
 
 func (h *host) WaitFor(_ context.Context, f *witgo.FutureReader[uint32], ret witgo.Async[uint32]) error {
@@ -612,6 +676,57 @@ func TestErrorContext(t *testing.T) {
 
 	_, err = api.Reason(ctx, nil)
 	require.Error(t, err)
+}
+
+// Streams, futures and error contexts nested in a record, a result, a list
+// and an option cross like whole ones, in each direction.
+func TestNested(t *testing.T) {
+	k, _ := instantiate(t)
+	ctx := context.Background()
+	api := k.API()
+
+	w, data, err := k.NewStreamU8()
+	require.NoError(t, err)
+	fw, trailer, err := k.NewFutureU32()
+	require.NoError(t, err)
+	w.WriteAll([]byte{1, 2, 3}, func(int, component.CopyResult) { w.Close() })
+	fw.Set(10, func(component.CopyResult) { fw.Close() })
+	sum, err := api.ReadBody(ctx, Body{Data: data, Trailer: trailer})
+	require.NoError(t, err)
+	require.Equal(t, uint32(16), sum)
+
+	b, err := api.MakeBody(ctx, 4)
+	require.NoError(t, err)
+	var got []uint8
+	b.Data.ReadAll(8, func(vals []uint8, err error) { require.NoError(t, err); got = vals })
+	require.Equal(t, []uint8{0, 1, 2, 3}, got)
+	tr := uint32(0)
+	b.Trailer.Get(func(_ component.CopyResult, v uint32, err error) { require.NoError(t, err); tr = v })
+	require.Equal(t, uint32(400), tr)
+
+	sum, err = api.PipeBody(ctx, 5)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0+1+2+3+4+35), sum)
+	sum, err = api.PipeSpilled(ctx, 5)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0+1+2+3+4+35+1+2+3+4), sum)
+
+	msg, err := api.JoinErrors(ctx, []*component.ErrorContext{component.NewErrorContext("a"), component.NewErrorContext("b")})
+	require.NoError(t, err)
+	require.Equal(t, "a,b", msg)
+	msg, err = api.RelayErrors(ctx, 3)
+	require.NoError(t, err)
+	require.Equal(t, "e0,e1,e2", msg)
+	msg, err = api.RelaySpilled(ctx, 2)
+	require.NoError(t, err)
+	require.Equal(t, "e0,e1", msg)
+
+	e, err := api.SomeError(ctx, true)
+	require.NoError(t, err)
+	require.Equal(t, "failed", (*e).DebugMessage())
+	e, err = api.SomeError(ctx, false)
+	require.NoError(t, err)
+	require.Nil(t, e)
 }
 
 // Async imports completed from other goroutines, through the CallAsync forms:
