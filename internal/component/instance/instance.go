@@ -994,11 +994,41 @@ func typeRefContainsAsyncValueNested(ref *binary.TypeRef, resolve abi.Resolver, 
 // The value is rebuilt (not mutated in place) only along paths that carry a
 // resource; leaf and resource-free subtrees are returned unchanged. Own handles
 // use TakeOwn (ownership transfers to the guest), borrow handles use Rep.
-func (in *Instance) resolveArgHandles(v abi.Value, t binary.TypeDesc) (abi.Value, error) {
-	return in.resolveArgHandlesDepth(v, t, 0)
+//
+// A borrow of a host resource is lent for the call: see lendHostBorrow, which
+// creates *scope the first time it needs one.
+func (in *Instance) resolveArgHandles(v abi.Value, t binary.TypeDesc, scope **task) (abi.Value, error) {
+	return in.resolveArgHandlesDepth(v, t, 0, scope)
 }
 
-func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth int) (abi.Value, error) {
+// lendHostBorrow lends the callee the host resource behind the handle v the
+// host holds: a borrow handle scoped to this call, which the callee drops
+// before it returns (lower_borrow, definitions.py ~1813-1815). Passing v
+// itself would let that drop take the host's own handle, and run the
+// resource's destructor.
+//
+// The handle's own entry names the resource -- the tag the host minted it
+// under -- since an export's parameter types use the component's indices.
+func (in *Instance) lendHostBorrow(v abi.Value, rt uint32, scope **task) (abi.Value, error) {
+	h, ok := v.(uint32)
+	if !ok {
+		return nil, fmt.Errorf("borrow<%d> arg: expected a uint32 handle, got %T", rt, v)
+	}
+	raw, ok := in.resources.getEntry(h)
+	e, isRes := raw.(*resourceEntry)
+	if !ok || !isRes {
+		return nil, fmt.Errorf("borrow<%d> arg: handle %d does not name a resource the host holds", rt, h)
+	}
+	if e.borrowScope != nil {
+		return v, nil // already a loan for this call: a delegated borrow (composition.go)
+	}
+	if *scope == nil {
+		*scope = &task{inst: in}
+	}
+	return in.resources.NewBorrowScoped(e.typeIdx, e.rep, *scope), nil
+}
+
+func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth int, scope **task) (abi.Value, error) {
 	if depth > maxResourceWalkDepth {
 		return v, nil
 	}
@@ -1022,7 +1052,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		}
 		rt, _ := resourceTypeIdxOf(t)
 		if in.isGuestResource == nil || !in.isGuestResource(rt) {
-			return v, nil
+			return in.lendHostBorrow(v, rt, scope)
 		}
 		return resolveHandleArg(in, in.resources, in.resCanon, t, v)
 
@@ -1072,7 +1102,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		}
 		out := make([]abi.Value, len(list))
 		for i, e := range list {
-			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1); err != nil {
+			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -1080,7 +1110,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 
 	case binary.FixedListDesc:
 		// Its value has a dynamic list's shape, so it is walked as one.
-		return in.resolveArgHandlesDepth(v, binary.ListDesc{Element: d.Element}, depth)
+		return in.resolveArgHandlesDepth(v, binary.ListDesc{Element: d.Element}, depth, scope)
 
 	case binary.MapDesc:
 		// map<K,V> despecializes to list<tuple<K,V>> (see MapDesc's doc): each
@@ -1096,7 +1126,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		out := make([]abi.Value, len(entries))
 		var err error
 		for i, e := range entries {
-			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1); err != nil {
+			if out[i], err = in.resolveArgHandlesDepth(e, et, depth+1, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -1117,7 +1147,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 			if err != nil {
 				return nil, err
 			}
-			if out[i], err = in.resolveArgHandlesDepth(out[i], ft, depth+1); err != nil {
+			if out[i], err = in.resolveArgHandlesDepth(out[i], ft, depth+1, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -1138,7 +1168,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 			if err != nil {
 				return nil, err
 			}
-			if out[i], err = in.resolveArgHandlesDepth(out[i], et, depth+1); err != nil {
+			if out[i], err = in.resolveArgHandlesDepth(out[i], et, depth+1, scope); err != nil {
 				return nil, err
 			}
 		}
@@ -1152,7 +1182,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if err != nil {
 			return nil, err
 		}
-		return in.resolveArgHandlesDepth(v, et, depth+1)
+		return in.resolveArgHandlesDepth(v, et, depth+1, scope)
 
 	case binary.VariantDesc:
 		vv, ok := v.(abi.VariantValue)
@@ -1163,7 +1193,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if err != nil {
 			return nil, err
 		}
-		p, err := in.resolveArgHandlesDepth(vv.Payload, ct, depth+1)
+		p, err := in.resolveArgHandlesDepth(vv.Payload, ct, depth+1, scope)
 		if err != nil {
 			return nil, err
 		}
@@ -1185,7 +1215,7 @@ func (in *Instance) resolveArgHandlesDepth(v abi.Value, t binary.TypeDesc, depth
 		if err != nil {
 			return nil, err
 		}
-		p, err := in.resolveArgHandlesDepth(rv.Payload, at, depth+1)
+		p, err := in.resolveArgHandlesDepth(rv.Payload, at, depth+1, scope)
 		if err != nil {
 			return nil, err
 		}
@@ -1882,7 +1912,11 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 	// instead of lowerParams allocating its own backing array.
 	coreArgsPtr := coreValueSlicePool.Get().(*[]abi.CoreValue)
 	*coreArgsPtr = (*coreArgsPtr)[:0]
-	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName, *coreArgsPtr)
+	var scope *task
+	if in.syncBase != nil && in.activeTask == in.syncBase {
+		scope = in.syncBase
+	}
+	coreArgs, err := in.lowerParams(be, args, mem, memAvailable, realloc, exportName, *coreArgsPtr, &scope)
 	if err != nil {
 		coreValueSlicePool.Put(coreArgsPtr)
 		return nil, err
@@ -1923,6 +1957,13 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 		in.poisoned = true // guest code actually ran and trapped -- see this func's doc
 		err = wrapUnreachableTrap(err)
 		return nil, fmt.Errorf("component/instance: export %q: call core func %q: %w", exportName, be.funcName, err)
+	}
+	// The sync lift's own trap_if(num_borrows > 0) at task exit: a host
+	// resource lent to the call must have been dropped by now.
+	if scope != nil && scope.numBorrows > 0 {
+		putUint64Slice(stackPtr)
+		in.poisoned = true
+		return nil, fmt.Errorf("component/instance: export %q: borrow handles still remain at the end of the call (%d still held)", exportName, scope.numBorrows)
 	}
 	// rawResults ALIASES the pooled stack, so stack must not be returned to the
 	// pool until liftResult (and post-return) have finished reading it.
@@ -1969,7 +2010,10 @@ func (in *Instance) invokeEntered(ctx context.Context, be *boundExport, exportNa
 // the backing array; callers that don't care (e.g. tests exercising an
 // error branch directly) can just pass nil, which behaves exactly like the
 // old var coreArgs []abi.CoreValue starting point.
-func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue) ([]abi.CoreValue, error) {
+//
+// scope is the call's borrow scope: the task's, or created when a host
+// resource is first lent (see lendHostBorrow).
+func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, memAvailable bool, realloc abi.Realloc, exportName string, dst []abi.CoreValue, scope **task) ([]abi.CoreValue, error) {
 	coreArgs := dst
 	var err error
 
@@ -1990,7 +2034,7 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 			}
 			tupleVal[i] = args[i]
 			if i < len(be.paramHasResource) && be.paramHasResource[i] {
-				if tupleVal[i], err = in.resolveArgHandles(args[i], be.paramTypes[i]); err != nil {
+				if tupleVal[i], err = in.resolveArgHandles(args[i], be.paramTypes[i], scope); err != nil {
 					return nil, fmt.Errorf("component/instance: export %q param %d: %w", exportName, i, err)
 				}
 			}
@@ -2014,7 +2058,7 @@ func (in *Instance) lowerParams(be *boundExport, args []abi.Value, mem []byte, m
 		// depth) to the guest's rep -- the guest's core func takes reps for
 		// resources it owns. See resolveArgHandles.
 		if i < len(be.paramHasResource) && be.paramHasResource[i] {
-			argVal, err = in.resolveArgHandles(argVal, be.paramTypes[i])
+			argVal, err = in.resolveArgHandles(argVal, be.paramTypes[i], scope)
 			if err != nil {
 				return nil, fmt.Errorf("component/instance: export %q param %d (%s): %w", exportName, i, p.Name, err)
 			}

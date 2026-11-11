@@ -7,6 +7,56 @@ import (
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
+// A borrow of a host resource is lent to the call: the callee gets a borrow
+// scoped to it, which it must drop, and never the host's own handle, whose
+// drop would destroy the resource. A borrow already scoped to the call -- a
+// composition's delegated one -- passes through as it is.
+func TestResolveArgHandlesLendsHostBorrows(t *testing.T) {
+	const hostRes = uint32(7)
+	tbl := newHandleTable()
+	in := &Instance{sched: &sched{}, resources: tbl, isGuestResource: func(uint32) bool { return false }}
+	borrow := binary.BorrowDesc{ResourceType: 30}
+
+	for name, h := range map[string]uint32{
+		"own":             tbl.NewOwn(hostRes, 5),
+		"unscoped borrow": tbl.NewBorrow(hostRes, 5),
+	} {
+		var scope *task
+		got, err := in.resolveArgHandles(h, borrow, &scope)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		lent := got.(uint32)
+		if lent == h || scope == nil || scope.numBorrows != 1 {
+			t.Fatalf("%s: got handle %d (host's %d), scope %+v; want a fresh scoped borrow", name, lent, h, scope)
+		}
+		if rep, err := tbl.Rep(hostRes, lent); err != nil || rep != 5 {
+			t.Fatalf("%s: lent handle rep = %d, %v; want 5 under the host's tag", name, rep, err)
+		}
+		if err := tbl.Drop(hostRes, lent); err != nil || scope.numBorrows != 0 {
+			t.Fatalf("%s: the callee's drop: %v, %d borrows left", name, err, scope.numBorrows)
+		}
+		if rep, err := tbl.Rep(hostRes, h); err != nil || rep != 5 {
+			t.Fatalf("%s: the host's handle after the call: %d, %v", name, rep, err)
+		}
+	}
+
+	outer := &task{inst: in}
+	scoped := tbl.NewBorrowScoped(hostRes, 5, outer)
+	var scope *task
+	got, err := in.resolveArgHandles(scoped, borrow, &scope)
+	if err != nil || got != scoped || scope != nil {
+		t.Fatalf("a scoped borrow: got %v, %v, scope %v; want it passed through", got, err, scope)
+	}
+
+	if _, err := in.resolveArgHandles("x", borrow, &scope); err == nil {
+		t.Fatal("a non-handle borrow arg was accepted")
+	}
+	if _, err := in.resolveArgHandles(uint32(999), borrow, &scope); err == nil {
+		t.Fatal("an unknown handle was lent")
+	}
+}
+
 // TestResolveArgHandles covers resolveArgHandles/typeContainsResource across
 // every composite nesting -- a guest-owned borrow<counter> handle buried in a
 // record/tuple/list/variant/option/result must be converted to the guest's rep
@@ -17,7 +67,6 @@ func TestResolveArgHandles(t *testing.T) {
 	tbl := newHandleTable()
 	rep := uint32(4242)
 	borrowH := tbl.NewBorrow(guestRes, rep) // guest-owned borrow handle -> rep
-	hostH := tbl.NewBorrow(hostRes, 5)      // host-owned -> stays a handle
 
 	// A tiny type-index space the resolver serves. 0: borrow<guest>, 1: u32,
 	// 2: borrow<host>.
@@ -45,7 +94,6 @@ func TestResolveArgHandles(t *testing.T) {
 		want abi.Value
 	}{
 		{"top-level borrow", descs[0], borrowH, rep},
-		{"host-owned borrow untouched", descs[2], hostH, hostH},
 		{"list", binary.ListDesc{Element: borrowRef}, []abi.Value{borrowH, borrowH}, []abi.Value{rep, rep}},
 		{"fixed-length list", binary.FixedListDesc{Element: borrowRef, Length: 2}, []abi.Value{borrowH, borrowH}, []abi.Value{rep, rep}},
 		{"map", binary.MapDesc{Key: u32Ref, Value: borrowRef}, []abi.Value{[]abi.Value{uint32(1), borrowH}}, []abi.Value{[]abi.Value{uint32(1), rep}}},
@@ -61,7 +109,8 @@ func TestResolveArgHandles(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// typeContainsResource must agree with whether a resolve would matter.
-			got, err := in.resolveArgHandles(tc.in, tc.t)
+			var scope *task
+			got, err := in.resolveArgHandles(tc.in, tc.t, &scope)
 			if err != nil {
 				t.Fatalf("resolveArgHandles: %v", err)
 			}

@@ -576,7 +576,7 @@ func TestErrorContext_NewDebugMessageDrop(t *testing.T) {
 	h2 := uint32(stack2[0])
 	raw2, _ := in.resources.getEntry(h2)
 	ec2 := raw2.(*errorContext)
-	v, err := in.resolveArgHandlesDepth(ec2, binary.PrimitiveDesc{Prim: "error-context"}, 0)
+	v, err := in.resolveArgHandlesDepth(ec2, binary.PrimitiveDesc{Prim: "error-context"}, 0, new(*task))
 	if err != nil {
 		t.Fatal(err)
 	}
