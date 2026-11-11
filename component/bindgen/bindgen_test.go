@@ -364,6 +364,37 @@ world w { import host; export api; }`
 	}
 }
 
+// An interface whose name a type already took gets a suffixed Go type, but
+// its Imports field and its accessor on the world keep the plain name: they
+// only clash with their own kind.
+func TestGenerateInterfaceNameClash(t *testing.T) {
+	src := `package a:b;
+interface types { record store { n: u32 } record cache { n: u32 } }
+interface store { use types.{store}; get: func() -> store; }
+interface cache { use types.{cache}; put: func(c: cache); }
+world w { import store; export cache; }`
+	out, err := genSrc(t, src, Options{})
+	require.NoError(t, err)
+	for _, want := range []string{
+		"type Store struct {",
+		"type Store2 interface {",
+		"\tStore Store2\n",
+		"o = append(o, optionsStore2(imports.Store)...)",
+		"type Cache struct {",
+		"type Cache2 struct{ inst *component.Instance }",
+		"func (x *W) Cache() Cache2 { return Cache2{x.inst} }",
+	} {
+		require.Contains(t, out, want)
+	}
+}
+
+func TestUnique(t *testing.T) {
+	set := map[string]bool{}
+	for _, want := range []string{"A", "A_", "A__"} {
+		require.Equal(t, want, unique(set, "A"))
+	}
+}
+
 // A tuple longer than witgo's is a struct of the bindings' own, named for
 // its length, or for the WIT alias that names it.
 func TestGenerateLongTuple(t *testing.T) {
