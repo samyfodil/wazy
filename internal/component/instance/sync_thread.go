@@ -326,9 +326,36 @@ func (in *Instance) runSyncCore(t *task, exportName string, call func() error) e
 		if errors.Is(err, errAsyncDeadlock) {
 			return fmt.Errorf("cannot block a synchronous task before returning")
 		}
+		if errors.Is(err, errExitUnresolved) {
+			// The thread this call was waiting on to be woken by exited
+			// unresolved, which the reference traps on bare; what that leaves
+			// is a blocked sync call nothing can resume.
+			return fmt.Errorf("cannot block a synchronous task before returning: %w", err)
+		}
 		return err
 	}
 	return sit.err
+}
+
+// errExitUnresolved is the reference's unregister_thread trap: a task's last
+// thread exited, but nothing resolved the task.
+var errExitUnresolved = errors.New("task exited without resolving")
+
+// callAsSyncTask runs call as a fresh synchronous task of in's -- the
+// reference's store.lift of a sync callee plus store.lower of it, which
+// canon_resource_drop uses for a destructor: its own task and thread, so
+// context.get reads zero, and the caller's are back once it returns.
+func (in *Instance) callAsSyncTask(name string, call func() error) error {
+	if !in.syncTaskNeeded {
+		return call()
+	}
+	t := &task{inst: in, state: taskStarted, syncImplicit: true}
+	prevActive, prevBase, prevThread := in.activeTask, in.syncBase, in.activeThread
+	in.activeTask, in.syncBase, in.activeThread = t, t, nil
+	defer func() {
+		in.activeTask, in.syncBase, in.activeThread = prevActive, prevBase, prevThread
+	}()
+	return in.runSyncCore(t, name, call)
 }
 
 // abortSyncThread unwinds a sync thread's goroutine that can never be resumed,

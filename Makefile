@@ -470,12 +470,14 @@ build.testdata:
 #   - The Canonical ABI's reference implementation, definitions.py, which the abi package's oracle
 #     generators import, and one module of resources.wast that wasip2 runs on its own.
 #
-# component-model is pinned twice. The value and wasmtime suites below are cf242a7's, generated with
-# wasm-tools 1.253.0: that reproduces them byte for byte, while 1.262.0 encodes several differently. The
-# async suites, definitions.py, and the max-value-size and fixed-length-list cases are d095e2f's, and
-# written against 1.262.0.
-component_model_version := d095e2f60ddae1f9a1e9b1e2fb547ec1114da677
-component_model_conformance_version := cf242a7a50d58aed650bc467212c5fb93433287b
+# component-model is pinned twice. Everything is 6250899's -- the async, value and resource suites,
+# definitions.py, the validation cases -- written against wasm-tools 1.262.0, except four suites
+# upstream retired when #684 folded test/wasmtime into the rest of test/: fused, resources, simple and
+# types still run as cf242a7 left them, generated with wasm-tools 1.253.0, which reproduces them byte
+# for byte where 1.262.0 encodes several differently. They exercise composition shapes nothing at
+# 6250899 runs end to end, and wasip2 runs one module of resources.wast on its own.
+component_model_version := 6250899af9a71591dcfdb2500b41343c330623f9
+component_model_legacy_version := cf242a7a50d58aed650bc467212c5fb93433287b
 wasm_tools_tests_version := 2e6b2d6db499501a91a0b88a848435345bef1f66
 component_model_raw := https://raw.githubusercontent.com/WebAssembly/component-model/$(component_model_version)/test
 wasm_tools_raw := https://raw.githubusercontent.com/bytecodealliance/wasm-tools/$(wasm_tools_tests_version)/tests/cli/component-model
@@ -494,16 +496,20 @@ component_wast_suites := \
 	internal/component/instance/testdata/wast/wasmtime-restrictions=$(wasmtime_raw)/restrictions.wast
 wit_parser_ui_dir := component/wit/testdata/wit-parser/ui
 component_model_dir := build/component-model
-component_model_async_dir := build/component-model-async
+component_model_legacy_dir := build/component-model-legacy
 component_wast_dir := internal/component/instance/testdata/wast
 component_async_dir := internal/component/instance/testdata/wast-async
 # <directory under $(component_wast_dir)>=<.wast under component-model's test/>
-component_conformance_suites := concat=values/concat strings=values/strings \
-	multiple-resources=resources/multiple-resources fused=wasmtime/fused \
-	resources=wasmtime/resources simple=wasmtime/simple types=wasmtime/types
+component_conformance_suites := alignment=values/alignment concat=values/concat numerics=values/numerics \
+	post-return=values/post-return realloc=values/realloc strings=values/strings \
+	transcode=values/transcode variants=values/variants borrows=resources/borrows \
+	handle-table=resources/handle-table multiple-resources=resources/multiple-resources
+component_legacy_suites := fused=wasmtime/fused resources=wasmtime/resources simple=wasmtime/simple \
+	types=wasmtime/types
 
 .PHONY: build.component_testdata
 build.component_testdata: $(wasm_tools) $(wasm_tools_next)
+	@$(call clean_fetched,$(component_wast_dir))
 	@for s in $(component_wast_suites); do \
 		dir=$${s%%=*} url=$${s#*=} f=$${s##*/}; \
 		rm -rf $$dir && mkdir -p $$dir \
@@ -518,30 +524,34 @@ build.component_testdata: $(wasm_tools) $(wasm_tools_next)
 	@PATH="$(dir $(wasm_tools_next)):$$PATH" sh component/wit/testdata/gen-oracle.sh
 	@rm -rf $(component_model_dir) && mkdir -p $(component_model_dir)
 	@curl -fsSL --retry 5 --retry-all-errors \
-		https://codeload.github.com/WebAssembly/component-model/tar.gz/$(component_model_conformance_version) \
-		| tar -xzf - -C $(component_model_dir) --strip-components 1 \
-			component-model-$(component_model_conformance_version)/test
-	@rm -rf $(component_model_async_dir) && mkdir -p $(component_model_async_dir)
-	@curl -fsSL --retry 5 --retry-all-errors \
 		https://codeload.github.com/WebAssembly/component-model/tar.gz/$(component_model_version) \
-		| tar -xzf - -C $(component_model_async_dir) --strip-components 1 \
-			component-model-$(component_model_version)/test/async \
+		| tar -xzf - -C $(component_model_dir) --strip-components 1 \
+			component-model-$(component_model_version)/test \
 			component-model-$(component_model_version)/design/mvp/canonical-abi/definitions.py
+	@rm -rf $(component_model_legacy_dir) && mkdir -p $(component_model_legacy_dir)
+	@curl -fsSL --retry 5 --retry-all-errors \
+		https://codeload.github.com/WebAssembly/component-model/tar.gz/$(component_model_legacy_version) \
+		| tar -xzf - -C $(component_model_legacy_dir) --strip-components 1 \
+			component-model-$(component_model_legacy_version)/test/wasmtime
 	@for s in $(component_conformance_suites); do \
-		rm -rf $(component_wast_dir)/$${s%%=*} && mkdir -p $(component_wast_dir)/$${s%%=*} \
-		&& cp $(component_model_dir)/test/$${s#*=}.wast $(component_wast_dir)/$${s%%=*}/ || exit 1; \
+		d=$(component_wast_dir)/$${s%%=*}; rm -rf $$d && mkdir -p $$d \
+		&& cp $(component_model_dir)/test/$${s#*=}.wast $$d/ \
+		&& (cd $$d && WAST_STRICT_COMPONENT_INDICES=0 $(wasm_tools_next) json-from-wast --wasm-dir . \
+			-o $${s%%=*}.json $$(basename $${s#*=}).wast) || exit 1; \
 	done
-	@for d in $(foreach s,$(component_conformance_suites),$(component_wast_dir)/$(firstword $(subst =, ,$(s)))); do \
-		(cd $$d && $(wasm_tools) json-from-wast --wasm-dir . -o $$(basename $$d).json $$(basename $$d).wast) || exit 1; \
+	@for s in $(component_legacy_suites); do \
+		d=$(component_wast_dir)/$${s%%=*}; rm -rf $$d && mkdir -p $$d \
+		&& cp $(component_model_legacy_dir)/test/$${s#*=}.wast $$d/ \
+		&& (cd $$d && $(wasm_tools) json-from-wast --wasm-dir . -o $${s%%=*}.json $$(basename $${s#*=}).wast) || exit 1; \
 	done
 	@$(call clean_fetched,$(component_async_dir))
-	@for f in $(component_model_async_dir)/test/async/*.wast; do \
+	@for f in $(component_model_dir)/test/async/*.wast; do \
 		s=$$(basename $$f .wast); mkdir -p $(component_async_dir)/$$s && cp $$f $(component_async_dir)/$$s/ \
 		&& (cd $(component_async_dir)/$$s && $(wasm_tools_next) json-from-wast --wasm-dir . -o $$s.json $$s.wast) || exit 1; \
 	done
 	@$(call clean_fetched,imports/wasip2/testdata/component-model)
 	@cp $(component_wast_dir)/resources/resources.20.wasm imports/wasip2/testdata/component-model/
-	@cp $(component_model_async_dir)/design/mvp/canonical-abi/definitions.py internal/component/abi/testdata/
+	@cp $(component_model_dir)/design/mvp/canonical-abi/definitions.py internal/component/abi/testdata/
 
 # WASI's own interface definitions, from WebAssembly/WASI at the commits its release tags name. wasip2
 # checks every host import it registers against 0.2.12's; the wit parser's tests read two 0.2.8 files.

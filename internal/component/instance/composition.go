@@ -375,7 +375,7 @@ func traceResource(comp *binary.Component, cfg *config, byIdx map[int]*Instance,
 func (n *nesting) lineUp(tag uint32, prov *Instance, def uint32) {
 	o := prov.originOf(def)
 	if dtor := o.def.resourceDtors[o.tag]; dtor != nil {
-		n.importedResDtors[tag] = dtor
+		n.importedResDtors[tag] = guestDtor{owner: o.def, resolve: dtor}
 	}
 	n.resourceOrigin[tag] = o
 }

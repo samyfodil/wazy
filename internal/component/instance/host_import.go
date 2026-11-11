@@ -103,7 +103,7 @@ type nesting struct {
 	// destructor, so this component's resource.drop of an own<R> it received
 	// runs that dtor.
 	resCanon         func(uint32) uint32
-	importedResDtors map[uint32]func() api.Function
+	importedResDtors map[uint32]guestDtor
 
 	// resourceOrigin is copied onto the resulting Instance's own field of the
 	// same name (see its doc on Instance) -- populated by

@@ -555,7 +555,7 @@ func (gt *guestTask) finishExit() error {
 	// unregister_thread's trap_if(state != RESOLVED) applies only once the
 	// task has no thread left: a spawned thread may still resolve it.
 	if gt.t.state != taskResolved && gt.t.liveThreads == 0 {
-		return gt.fail(fmt.Errorf("component/instance: export %q: callback returned EXIT before task.return resolved the task", gt.exportName))
+		return gt.fail(fmt.Errorf("component/instance: export %q: callback returned EXIT before task.return resolved the task: %w", gt.exportName, errExitUnresolved))
 	}
 	gt.done = true
 	if gt.finish != nil {

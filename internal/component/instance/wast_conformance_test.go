@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"math"
 	"path"
 	"reflect"
@@ -36,42 +37,68 @@ import (
 // flags to their label count on lift.
 var wastKnownSkips = map[string]map[string]string{}
 
-// TestWastConformance runs the official WebAssembly/component-model canonical-ABI
-// conformance suites (test/values/*.wast) through wazy. Each .wast was split by
-// `wasm-tools json-from-wast` into a spec-test manifest (module / assert_return /
-// assert_trap commands) plus binary component .wasm files, vendored under
-// testdata/wast/<suite>/. The manifest carries every value kind as typed JSON;
-// this harness converts those to abi.Value using the export's declared param
-// types, invokes the export, and compares the lifted result -- exercising both
-// lowering (host->guest args) and lifting (guest->host results) against the
-// reference suite, not our own oracle.
-//
-// concat: takes bool/all int widths/char/string/list/tuple/record/variant/enum/
-//
-//	flags/option as args, returns their concatenation -- pure ABI in+out.
-//
-// strings: string edge cases + assert_trap for out-of-bounds / invalid utf-8.
+// wastConformanceSuites are the component-model specification's own value
+// and resource suites (test/values, test/resources), at the commit the
+// Makefile pins: every command is checked strictly, by runStrictWastSuite, a
+// trap's text included.
+var wastConformanceSuites = []string{
+	"alignment", "concat", "numerics", "post-return", "realloc", "strings", "transcode", "variants",
+	"borrows", "handle-table", "multiple-resources",
+}
+
+// wastLegacySuites are the four of test/wasmtime that component-model#684
+// retired, pinned where they last were: types (integer lift-narrowing and
+// nested type declarations), simple (a component importing another), fused
+// (nested-component composition) and resources (guest and host resources:
+// constructors, methods, own/borrow transfer, destructor counts, lend traps).
+// They run on the lax harness, runWastSuite, which supplies resources.wast's
+// `host` instance and does not compare trap text. fixed_length_lists comes
+// from Wasmtime's suite rather than the component-model repo's, which has no
+// runtime test of them: two components passing nested list<T, N> values
+// through a fused adapter.
+var wastLegacySuites = []string{"types", "simple", "fused", "resources", "fixed_length_lists"}
+
+// TestWastConformance runs the official WebAssembly/component-model
+// canonical-ABI conformance suites through wazy. Each .wast was split by
+// `wasm-tools json-from-wast` into a spec-test manifest plus the component
+// .wasm files, fetched under testdata/wast/<suite>/. The manifest carries
+// every value kind as typed JSON; the harness converts those to abi.Value
+// using the export's declared param types, invokes the export, and compares
+// the lifted result -- exercising both lowering (host->guest args) and
+// lifting (guest->host results) against the reference suite, not our own
+// oracle.
 func TestWastConformance(t *testing.T) {
-	// Every official component-model suite this runtime runs end to end: concat
-	// (every value kind in and out), strings (utf-8 + bounds traps), types
-	// (integer lift-narrowing + nested type-decl grammar), simple (a component
-	// importing another), fused (nested-component composition),
-	// multiple-resources (a resource defined in one nested component,
-	// imported/used/dropped-with-dtor by a sibling), and resources (guest +
-	// HOST-provided resources: constructors, methods, own/borrow transfer,
-	// destructor drop-counting, borrow-lend traps, exported canon constructors,
-	// and type/func instantiate-args). The only modules that may fail to
-	// instantiate are the ones wastKnownSkips names. Not vendored: post-return
-	// (module_definition/module_instance linking + reentrance-trap builtins) and
-	// linking/* (multi top-level component linking).
-	//
-	// fixed_length_lists comes from Wasmtime's suite rather than the
-	// component-model repo's, which has no runtime test of them: two
-	// components passing nested list<T, N> values through a fused adapter.
-	for _, suite := range []string{"concat", "strings", "types", "simple", "fused", "multiple-resources", "resources", "fixed_length_lists"} {
+	for _, suite := range wastConformanceSuites {
+		t.Run(suite, func(t *testing.T) {
+			runStrictWastSuite(t, wastFS, path.Join("testdata", "wast", suite))
+		})
+	}
+	for _, suite := range wastLegacySuites {
 		t.Run(suite, func(t *testing.T) {
 			runWastSuite(t, suite)
 		})
+	}
+}
+
+// Every suite `make build.component_testdata` fetches into testdata/wast is
+// run by one of the tests that read it: a suite the Makefile adds but no list
+// names would otherwise be skipped in silence.
+func TestWastSuitesAllRun(t *testing.T) {
+	requireFetched(t, wastFS, "testdata/wast/*/*.json")
+	listed := map[string]bool{}
+	for _, l := range [][]string{wastConformanceSuites, wastLegacySuites, wastValidationSuites, {"wasm-tools-fixed-length-lists"}} {
+		for _, s := range l {
+			listed[s] = true
+		}
+	}
+	ents, err := fs.ReadDir(wastFS, "testdata/wast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if e.IsDir() && !listed[e.Name()] {
+			t.Errorf("testdata/wast/%s is fetched but no test runs it", e.Name())
+		}
 	}
 }
 

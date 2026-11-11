@@ -352,8 +352,8 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		// A composed sub-instance inherits the destructors for the resources
 		// it imports from a sibling, keyed by the table tag its own
 		// resource.drop uses.
-		for tag, resolve := range n.importedResDtors {
-			resources.registerDtor(tag, resourceDtor(resolve))
+		for tag, d := range n.importedResDtors {
+			resources.registerDtor(tag, resourceDtor(d))
 		}
 	}
 	in := &Instance{resolve: resolve, resources: resources, hostResources: hostResources, mayEnter: true, mayLeave: true, sched: sh}
@@ -540,7 +540,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		if canon := cfg.resCanon(); canon != nil {
 			tag = canon(defIdx)
 		}
-		resources.registerDtor(tag, resourceDtor(resolve))
+		resources.registerDtor(tag, resourceDtor(guestDtor{owner: in, resolve: resolve}))
 	}
 
 	// sched.instantiating brackets exactly the window in which THIS
@@ -989,7 +989,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			},
 			nesting: nesting{
 				resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
-				importedResDtors: map[uint32]func() api.Function{},
+				importedResDtors: map[uint32]guestDtor{},
 				resourceOrigin:   map[uint32]resourceIdentity{},
 				sched:            in.sched,
 				hostResources:    in.hostResources,
@@ -1145,7 +1145,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 						if dIdx, ok := importerResIdx[rname]; ok {
 							tag := nested.ResourceDefIndex(dIdx)
 							if dtor := prov.resourceDtors[provDef]; dtor != nil {
-								nest.importedResDtors[tag] = dtor
+								nest.importedResDtors[tag] = guestDtor{owner: prov, resolve: dtor}
 							}
 							nest.resourceOrigin[tag] = prov.originOf(provDef)
 						}
@@ -1183,7 +1183,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 						ownDtors = resolveDefinedResourceDtors(comp, coreFuncTarget)
 					}
 					if dtor := ownDtors[arg.SortIdx]; dtor != nil {
-						nest.importedResDtors[effectiveResourceTypeIdx(comp, cfg, arg.SortIdx)] = dtor
+						nest.importedResDtors[effectiveResourceTypeIdx(comp, cfg, arg.SortIdx)] = guestDtor{owner: in, resolve: dtor}
 					}
 				}
 

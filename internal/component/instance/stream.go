@@ -84,14 +84,17 @@ type guestBuffer struct {
 // newGuestBuffer transliterates BufferGuestImpl.__init__'s traps:
 //
 //	trap_if(length > maxBufferLen)
-//	if elem != nil && length > 0:
+//	if elem != nil:
 //	  trap_if(ptr != align_to(ptr, alignment(elem)))
 //	  trap_if(ptr + length*elemSz > len(mem))   // checked against CURRENT mem
+//
+// A zero-length buffer is checked too (component-model#755): its pointer
+// still has to be aligned and inside memory.
 func newGuestBuffer(inst *Instance, memMod api.Module, realloc abi.Realloc, resolve abi.Resolver, elem binary.TypeDesc, elemSz, align uint32, numeric bool, ptr, length uint32) (*guestBuffer, error) {
 	if length > maxBufferLen {
 		return nil, fmt.Errorf("stream/future buffer: length %d exceeds the maximum (%d)", length, maxBufferLen)
 	}
-	if elem != nil && length > 0 {
+	if elem != nil {
 		mem, ok := memoryBytesOf(memMod)
 		if !ok {
 			return nil, fmt.Errorf("stream/future buffer: calling module has no memory")
@@ -100,11 +103,11 @@ func newGuestBuffer(inst *Instance, memMod api.Module, realloc abi.Realloc, reso
 			align = 1
 		}
 		if ptr != abi.Align(ptr, align) {
-			return nil, fmt.Errorf("stream/future buffer: pointer %d not aligned to %d", ptr, align)
+			return nil, fmt.Errorf("stream/future buffer pointer not aligned: %d is not a multiple of %d", ptr, align)
 		}
 		need := uint64(ptr) + uint64(length)*uint64(elemSz)
 		if need > uint64(len(mem)) {
-			return nil, fmt.Errorf("stream/future buffer: bounds: ptr=%d length=%d elemSz=%d mem_len=%d", ptr, length, elemSz, len(mem))
+			return nil, fmt.Errorf("stream/future buffer pointer out of bounds of memory: ptr=%d length=%d elemSz=%d mem_len=%d", ptr, length, elemSz, len(mem))
 		}
 	}
 	var ownElem *binary.OwnDesc

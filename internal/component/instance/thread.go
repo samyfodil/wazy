@@ -492,7 +492,7 @@ func (th *guestThread) run() error {
 		return fmt.Errorf("component/instance: thread %d: %w", th.index, err)
 	}
 	if th.t.liveThreads == 0 && !th.t.implicitThreadAlive() && th.t.state != taskResolved {
-		return fmt.Errorf("component/instance: thread %d: last thread of the task exited before the task was resolved", th.index)
+		return fmt.Errorf("component/instance: thread %d: last thread of the task exited before the task was resolved: %w", th.index, errExitUnresolved)
 	}
 	return nil
 }

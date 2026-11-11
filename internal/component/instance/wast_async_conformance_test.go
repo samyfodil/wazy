@@ -84,16 +84,22 @@ func asyncWastSuites(t *testing.T) []string {
 	return suites
 }
 
-// runAsyncWastSuite drives one suite's manifest and reports whether every
-// command in it was satisfied (true) or something genuinely mismatched
-// (false, with the mismatches logged via t.Error by the caller's subtest).
-// It never t.Fatals mid-suite on a semantic mismatch -- only a malformed
-// fixture (unreadable file, unparsable JSON) is fatal, since that's a
-// harness bug rather than a conformance result.
+// runAsyncWastSuite runs one suite under testdata/wast-async.
 func runAsyncWastSuite(t *testing.T, suite string) bool {
-	dir := path.Join("testdata", "wast-async", suite)
-	requireFetched(t, wastAsyncFS, dir)
-	raw, err := wastAsyncFS.ReadFile(path.Join(dir, suite+".json"))
+	return runStrictWastSuite(t, wastAsyncFS, path.Join("testdata", "wast-async", suite))
+}
+
+// runStrictWastSuite drives one suite's manifest, the directory's last
+// element naming it, and reports whether every command in it was satisfied
+// (true) or something genuinely mismatched (false, with the mismatches
+// logged via t.Error by the caller's subtest). It never t.Fatals mid-suite on
+// a semantic mismatch -- only a malformed fixture (unreadable file,
+// unparsable JSON) is fatal, since that's a harness bug rather than a
+// conformance result.
+func runStrictWastSuite(t *testing.T, fsys fs.FS, dir string) bool {
+	suite := path.Base(dir)
+	requireFetched(t, fsys, dir)
+	raw, err := fs.ReadFile(fsys, path.Join(dir, suite+".json"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -121,7 +127,7 @@ func runAsyncWastSuite(t *testing.T, suite string) bool {
 	assertsRun := 0
 
 	readWasm := func(filename string, line int) ([]byte, bool) {
-		wasm, err := wastAsyncFS.ReadFile(path.Join(dir, filename))
+		wasm, err := fs.ReadFile(fsys, path.Join(dir, filename))
 		if err != nil {
 			t.Errorf("line %d: read %s: %v", line, filename, err)
 			ok = false

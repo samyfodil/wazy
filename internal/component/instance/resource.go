@@ -248,17 +248,30 @@ func (t *handleTable) dtorFor(typeIdx uint32) func(ctx context.Context, rep uint
 	return t.dtors[typeIdx]
 }
 
+// guestDtor is a resource's destructor: the core func its definer names,
+// resolved lazily, and that definer, whose task the destructor runs as.
+type guestDtor struct {
+	owner   *Instance
+	resolve func() api.Function
+}
+
 // resourceDtor wraps a lazily-resolved guest destructor core func as a dtor
 // callback. resolve is called at drop time (its module is up by then); a nil
 // resolution means the dtor can't run, so the drop just removes the entry.
-func resourceDtor(resolve func() api.Function) func(context.Context, uint32) error {
+//
+// canon_resource_drop calls the destructor through a sync lift in its
+// definer, so it runs as a fresh task of the definer's: its context.get reads
+// zero even when the definer is mid-call, or the destructor reenters itself.
+func resourceDtor(d guestDtor) func(context.Context, uint32) error {
 	return func(ctx context.Context, rep uint32) error {
-		fn := resolve()
+		fn := d.resolve()
 		if fn == nil {
 			return nil
 		}
-		_, err := fn.Call(ctx, uint64(rep))
-		return err
+		return d.owner.callAsSyncTask("resource destructor", func() error {
+			_, err := fn.Call(ctx, uint64(rep))
+			return err
+		})
 	}
 }
 

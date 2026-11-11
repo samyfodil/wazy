@@ -191,7 +191,7 @@ func (st *stackfulTask) run() error {
 		putUint64Slice(stackPtr)
 		in.leaveRunOf(t)
 		if t.state != taskResolved && t.liveThreads == 0 {
-			return st.fail(fmt.Errorf("component/instance: export %q: stackful async export returned before task.return resolved the task", st.exportName))
+			return st.fail(fmt.Errorf("component/instance: export %q: stackful async export returned before task.return resolved the task: %w", st.exportName, errExitUnresolved))
 		}
 		st.finishOK()
 		return nil

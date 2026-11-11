@@ -127,6 +127,11 @@ type task struct {
 	noExclusive bool
 }
 
+// needsExclusive is Task.needs_exclusive, which the reference only asks of an
+// async-typed task: a sync-typed one never takes its instance's exclusive
+// lock, even while its suspended thread is being resumed.
+func (t *task) needsExclusive() bool { return !t.noExclusive && !t.syncImplicit }
+
 // implicitThreadAlive reports whether this task's implicit thread is still in
 // the reference's Task.threads: register_thread runs in enter_implicit_thread
 // and the entry is removed by exit_implicit_thread, so the implicit thread is a
@@ -296,7 +301,7 @@ func (t *task) requestCancellation() error {
 // has_backpressure() (~428-430) for t: the exclusive lock only holds back a
 // task that needs it.
 func (in *Instance) hasBackpressure(t *task) bool {
-	return in.backpressure > 0 || (in.exclusiveHeld && !t.noExclusive)
+	return in.backpressure > 0 || (in.exclusiveHeld && t.needsExclusive())
 }
 
 // tryEnter is the reference Task.enter_implicit_thread's non-blocking
@@ -309,7 +314,7 @@ func (in *Instance) tryEnter(t *task) (entered bool) {
 		return false
 	}
 	in.activeTask = t
-	if !t.noExclusive {
+	if t.needsExclusive() {
 		in.exclusiveHeld, in.exclusiveOwner = true, t
 	}
 	return true
@@ -334,7 +339,7 @@ func (in *Instance) enterRun(t *task) {
 	// trap. The two guestThread sites that resume a real spawned thread set
 	// activeThread back immediately after calling this.
 	in.activeThread = nil
-	if !t.noExclusive {
+	if t.needsExclusive() {
 		in.exclusiveHeld, in.exclusiveOwner = true, t
 	}
 }
@@ -346,9 +351,9 @@ func (in *Instance) leaveRun() {
 }
 
 // leaveRunOf is leaveRun for t's own code, which leaves alone an exclusive
-// lock a noExclusive task never took: another task may hold it.
+// lock a task that needs none never took: another task may hold it.
 func (in *Instance) leaveRunOf(t *task) {
-	if !t.noExclusive {
+	if t.needsExclusive() {
 		in.leaveRun()
 		return
 	}
