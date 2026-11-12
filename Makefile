@@ -503,7 +503,10 @@ component_async_dir := internal/component/instance/testdata/wast-async
 component_conformance_suites := alignment=values/alignment concat=values/concat numerics=values/numerics \
 	post-return=values/post-return realloc=values/realloc strings=values/strings \
 	transcode=values/transcode variants=values/variants borrows=resources/borrows \
-	handle-table=resources/handle-table multiple-resources=resources/multiple-resources
+	handle-table=resources/handle-table multiple-resources=resources/multiple-resources \
+	linking-unit=linking/unit linking-tags=linking/tags \
+	link-time-virtualization=linking/link-time-virtualization \
+	shared-everything-dynamic-linking=linking/shared-everything-dynamic-linking
 component_legacy_suites := fused=wasmtime/fused resources=wasmtime/resources simple=wasmtime/simple \
 	types=wasmtime/types
 

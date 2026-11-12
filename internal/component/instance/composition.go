@@ -382,6 +382,12 @@ func (n *nesting) lineUp(tag uint32, prov *Instance, def uint32) {
 
 // importerTag maps a resource type of prov's, as prov's func types name it, to
 // this component's tag for the same resource.
+//
+// A component may use an imported resource only inside the types of the
+// funcs it imports, with no type of its own naming it: a resource two exports
+// of one definer share, say, eq-bound in the instance type it imports. It
+// then gets a tag of its own, one per resource, so a handle one of those
+// funcs returns is the type another takes.
 func (n *nesting) importerTag(prov *Instance) func(uint32) (uint32, bool) {
 	return func(idx uint32) (uint32, bool) {
 		o := prov.originOf(prov.canonTag(idx))
@@ -390,7 +396,14 @@ func (n *nesting) importerTag(prov *Instance) func(uint32) (uint32, bool) {
 				return tag, true
 			}
 		}
-		return 0, false
+		// Every tag of the component's own types is below typeCount, and
+		// resourceOrigin only grows, so this one is new.
+		tag := n.typeCount + uint32(len(n.resourceOrigin))
+		if dtor := o.def.resourceDtors[o.tag]; dtor != nil {
+			n.importedResDtors[tag] = guestDtor{owner: o.def, resolve: dtor}
+		}
+		n.resourceOrigin[tag] = o
+		return tag, true
 	}
 }
 
@@ -542,10 +555,12 @@ func forwardImportedInstance(cfg, subCfg *config, nested *binary.Component, oute
 	// normalization every importKey construction goes through (mkImportKey).
 	outerIface := mkImportKey(outerName, "").iface
 	for k, hi := range cfg.imports {
-		if k.iface != outerIface {
-			continue
+		switch {
+		case k.iface == outerIface:
+			subCfg.imports[mkImportKey(argName, k.name)] = hi
+		case strings.HasPrefix(k.iface, outerIface+"#"):
+			subCfg.imports[mkImportKey(argName+k.iface[len(outerIface):], k.name)] = hi
 		}
-		subCfg.imports[mkImportKey(argName, k.name)] = hi
 	}
 	importerResIdx := importedResourceIndices(nested, argName)
 	for k, tag := range cfg.resourceTags {
@@ -667,6 +682,15 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest 
 		return nil, fmt.Errorf("func arg index %d out of range of the component func index space", funcIdx)
 	}
 	e := comp.ComponentFuncSpace[funcIdx]
+	for e.Kind == binary.ComponentFuncFromExport {
+		e = comp.ComponentFuncSpace[comp.Exports[e.Export].ExternIndex]
+	}
+	if e.Kind == binary.ComponentFuncFromImport {
+		// A func this component imports, passed on down: the child gets
+		// whatever this component was given for it, which instantiateGraph
+		// has already checked was supplied.
+		return cfg.imports[mkImportKey(comp.Imports[e.Import].Name, "")], nil
+	}
 	if e.Kind != binary.ComponentFuncFromAlias {
 		isLift, _, _, ferr := componentFunc(funcIdx)
 		if ferr != nil {
@@ -738,7 +762,7 @@ func outerFuncArgImport(comp *binary.Component, cfg *config, in *Instance, nest 
 		hi := delegatingHostImport(newGuestAsyncTarget(owner, be, ownerKey, nest.importerTag(owner)))
 		return hi, nil
 	}
-	iface, err := importInterfaceName(comp, al.InstanceIdx)
+	iface, err := importedInstancePath(comp, al.InstanceIdx)
 	if err != nil {
 		return nil, err
 	}

@@ -3,7 +3,9 @@ package instance
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/samyfodil/wazy"
@@ -97,9 +99,39 @@ func TestGraph_UnknownCoreInstanceKind(t *testing.T) {
 
 func TestGraph_InlineExportUnsupportedSort(t *testing.T) {
 	comp := decodeRealHello(t)
-	comp.CoreInstances[3].Exports[0].Sort = 0x04 // tag: unsupported
+	comp.CoreInstances[3].Exports[0].Sort = 0x05
 	_, err := runGraph(t, comp)
 	requireErrContains(t, err, "unsupported core:sort")
+}
+
+func TestGraph_InlineExportTagAlias(t *testing.T) {
+	for _, tc := range []struct {
+		inst uint32
+		want string
+	}{
+		{99, "core tag 0 targets core instance 99, which was not instantiated"},
+		{0, `core instance 0 has no exported tag "t"`},
+	} {
+		comp := decodeRealHello(t)
+		comp.Aliases = append(comp.Aliases, binary.AliasDef{Sort: 0x00, TargetKind: 0x01, CoreSort: 0x04, InstanceIdx: tc.inst, Name: "t"})
+		comp.CoreInstances[3].Exports[0].Sort = 0x04
+		comp.CoreInstances[3].Exports[0].CoreSortIdx = 0
+		_, err := runGraph(t, comp)
+		requireErrContains(t, err, tc.want)
+	}
+}
+
+func TestMkImportKeyStripsEachVersion(t *testing.T) {
+	if got, want := mkImportKey("a:b/c@0.2.0#d:e/f@1.0.0#g", "h"), (importKey{iface: "a:b/c#d:e/f#g", name: "h"}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestGraph_InlineExportTagIdxOutOfRange(t *testing.T) {
+	comp := decodeRealHello(t)
+	comp.CoreInstances[3].Exports[0].Sort = 0x04
+	_, err := runGraph(t, comp)
+	requireErrContains(t, err, "unknown tag 0: tag index out of bounds")
 }
 
 func TestGraph_InlineExportGlobalIdxOutOfRange(t *testing.T) {
@@ -297,13 +329,23 @@ func TestGraph_BindInstanceExport_NestedComponentOutOfRange(t *testing.T) {
 // A nested component exported whole that is NOT a pure shim -- here
 // real_hello's shim given a canon of its own -- is no longer seen through:
 // it is instantiated like any component with code (reexposeWholeInstance).
-// This one then fails as such a component does when it re-exports a func it
-// imports, which only a shim may.
+// The func it re-exports is the lift its parent passes in, so the parent's
+// export is that lift.
 func TestGraph_BindInstanceExport_NotPureShim(t *testing.T) {
 	comp := decodeRealHello(t)
 	comp.NestedComponents[0].Canons = append(comp.NestedComponents[0].Canons, binary.Canon{})
-	_, err := runGraph(t, comp)
-	requireErrContains(t, err, "nested component instance 10: component/instance: component export `run` is a reexport of an imported function which is not implemented")
+	in, err := runGraph(t, comp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close(context.Background())
+	var found bool
+	for name := range in.exports {
+		found = found || strings.HasSuffix(name, "#run")
+	}
+	if !found {
+		t.Fatalf("no #run export among %d exports", len(in.exports))
+	}
 }
 
 // TestGraph_BindInstanceExport_MemberNotFuncSkipped proves a non-func member
@@ -721,4 +763,18 @@ func TestDiscoverNeededFuncTypes_BadImportTypeIndex(t *testing.T) {
 
 	_, _, err := discoverNeededFuncTypes(r, comp, coreBytes, "")
 	requireErrContains(t, err, "out of range of the")
+}
+
+//go:embed testdata/reexport_host_instance.wasm
+var reexportHostInstanceWasm []byte
+
+// A component can re-export an instance it imports when that instance's funcs
+// are lifts of components in the composition; a host func is not one.
+func TestReexportImportedInstanceOfHostFuncs(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	f := func(context.Context, []abi.Value) ([]abi.Value, error) { return []abi.Value{uint32(1)}, nil }
+	_, err := Instantiate(ctx, r, reexportHostInstanceWasm, WithImport("host", "f", f, nil, []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}}))
+	requireErrContains(t, err, `export "svc" re-exports the imported instance "svc", whose func "f" the host supplies`)
 }
