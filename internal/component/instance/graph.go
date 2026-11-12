@@ -106,17 +106,21 @@ const graphEmptyImportKey = "wazy:component/empty-import"
 // instance.go) is handled separately; every other component -- host-import or
 // multi-core -- is instantiated here (see Instantiate's routing).
 
-// refuseImportedFuncReexport refuses a component exporting a func it
-// imports, which wazy cannot bind: an export runs a lift, or a func of an
-// instance this component instantiated, and an imported func is neither. It is
-// refused up front, whatever the embedder supplies -- as Wasmtime refuses it,
-// in Wasmtime's words -- rather than for an unsupplied import first.
-func refuseImportedFuncReexport(comp *binary.Component) error {
+// refuseImportedFuncReexport refuses a component exporting a func the
+// embedder supplies, which wazy cannot bind: an export runs a lift, and a host
+// func is not one. It is refused up front -- as Wasmtime refuses it, in
+// Wasmtime's words -- rather than for an unsupplied import first. A func a
+// parent passes in from a component it instantiated is that component's lift,
+// and re-exporting it is fine (delegatedExport).
+func refuseImportedFuncReexport(comp *binary.Component, cfg *config) error {
 	for _, ex := range comp.Exports {
 		idx := ex.ExternIndex
 		for ex.ExternType == 0x01 && !u32.OutOfRange(idx, len(comp.ComponentFuncSpace)) {
 			e := comp.ComponentFuncSpace[idx]
 			if e.Kind == binary.ComponentFuncFromImport {
+				if _, ok := delegatedExport(cfg, mkImportKey(comp.Imports[e.Import].Name, "")); ok {
+					break
+				}
 				return fmt.Errorf("component/instance: component export `%s` is a reexport of an imported function which is not implemented", ex.Name)
 			}
 			if e.Kind != binary.ComponentFuncFromExport {
@@ -142,7 +146,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 	if cfg.scope.comp != comp { // the root: the embedder's components are all it is given
 		cfg.scope = scope{comp: comp, supplied: cfg.scope.supplied}
 	}
-	if err := refuseImportedFuncReexport(comp); err != nil {
+	if err := refuseImportedFuncReexport(comp, cfg); err != nil {
 		return nil, err
 	}
 	for _, im := range comp.Imports {
@@ -236,10 +240,10 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		}
 	}
 
-	// Core memory, table and global index spaces: no canon ever produces any
-	// of the three, so filtering Aliases in the slice's own order is already
-	// correct.
-	var coreMemSpace, coreTableSpace, coreGlobalSpace []aliasTarget
+	// Core memory, table, global and tag index spaces: no canon ever
+	// produces any of the four, so filtering Aliases in the slice's own order
+	// is already correct.
+	var coreMemSpace, coreTableSpace, coreGlobalSpace, coreTagSpace []aliasTarget
 	for _, al := range comp.Aliases {
 		if al.Sort != 0x00 || al.TargetKind != 0x01 {
 			continue
@@ -251,6 +255,8 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 			coreTableSpace = append(coreTableSpace, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
 		case 0x03: // global
 			coreGlobalSpace = append(coreGlobalSpace, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
+		case 0x04: // tag
+			coreTagSpace = append(coreTagSpace, aliasTarget{instIdx: al.InstanceIdx, name: al.Name})
 		}
 	}
 
@@ -689,7 +695,7 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 				}
 				// groupNames are the consumer-declared names for neededTypes
 				// lookups; the shim names its alias sources by coreInstanceKey.
-				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, coreGlobalSpace, instMods, neededTypes, groupNames, nextPrivateName, coreFuncTarget, coreMemTarget, coreTableTarget)
+				item, wasiCall, privMod, err := resolveInlineExportItem(ctx, r, comp, cfg, resources, in, e, coreMemSpace, coreTableSpace, coreGlobalSpace, coreTagSpace, instMods, neededTypes, groupNames, nextPrivateName, coreFuncTarget, coreMemTarget, coreTableTarget)
 				if err != nil {
 					return fmt.Errorf("component/instance: core instance %d: %w", k, err)
 				}
@@ -990,6 +996,7 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			},
 			nesting: nesting{
 				resCanon:         nested.ResourceDefIndex, // reduce a resource's deftype/export-alias indices to one tag
+				typeCount:        uint32(len(nested.TypeSpace)),
 				importedResDtors: map[uint32]guestDtor{},
 				resourceOrigin:   map[uint32]resourceIdentity{},
 				sched:            in.sched,
@@ -1235,8 +1242,8 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 			if !ok {
 				continue
 			}
-			wire := func(name string) error {
-				funcIdx, _, err := funcAliasSource(comp, cfg, aliasTarget{instIdx: tgt.spaceIdx, name: name})
+			wire := func(instIdx uint32, path, name string) error {
+				funcIdx, _, err := funcAliasSource(comp, cfg, aliasTarget{instIdx: instIdx, name: name})
 				var hi *hostImport
 				if err == nil {
 					hi, err = outerFuncArgImport(comp, cfg, in, nest, byIdx, funcIdx, componentFunc, coreFuncTarget, resolve)
@@ -1244,21 +1251,44 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 				if err != nil {
 					return fmt.Errorf("component/instance: component instance %d arg %q: export %q: %w", compInstIdx, arg.Name, name, err)
 				}
-				subCfg.imports[mkImportKey(arg.Name, name)] = hi
+				subCfg.imports[mkImportKey(path, name)] = hi
 				return nil
 			}
-			if shim == nil {
+			// An instance a bundle exports is wired under the path of names
+			// to it, as an instance nested in an import is looked up
+			// (importPath).
+			var wireBundle func(def *binary.Instance, instIdx uint32, path string) error
+			wireBundle = func(def *binary.Instance, instIdx uint32, path string) error {
 				for _, x := range def.Exports {
-					if x.Sort == ctSortFunc {
-						if err = wire(x.Name); err != nil {
-							break
+					switch x.Sort {
+					case ctSortFunc:
+						if err := wire(instIdx, path, x.Name); err != nil {
+							return err
+						}
+					case 0x05:
+						t, err := resolveInstanceArgTarget(comp, x.SortIdx)
+						if err != nil || t.imported {
+							continue
+						}
+						if sib, ok := byIdx[int(t.spaceIdx)]; ok {
+							wireSiblingFuncs(subCfg, nest, sib, t.projection, path+"#"+x.Name)
+							continue
+						}
+						if inner, innerShim, ok := uninstantiatedInstance(comp, cfg, byIdx, t); ok && innerShim == nil {
+							if err := wireBundle(inner, t.spaceIdx, path+"#"+x.Name); err != nil {
+								return err
+							}
 						}
 					}
 				}
+				return nil
+			}
+			if shim == nil {
+				err = wireBundle(def, tgt.spaceIdx, arg.Name)
 			} else {
 				for _, x := range shim.Exports {
 					if x.ExternType == ctSortFunc {
-						if err = wire(x.Name); err != nil {
+						if err = wire(tgt.spaceIdx, arg.Name, x.Name); err != nil {
 							break
 						}
 					}
@@ -1302,6 +1332,21 @@ func instantiateNestedInstances(ctx context.Context, r wazy.Runtime, comp *binar
 // delegate to the export's owner, its handles retagged to the nested
 // component's resources lined up with the owner's.
 func wireSiblingFuncs(subCfg *config, nest *nesting, sib *Instance, projection []string, argName string) {
+	// The interfaces nested in the one passed, under the path of names to
+	// them (importPath).
+	var prefix string
+	if len(projection) > 0 {
+		prefix = strings.Join(projection, "#") + "#"
+	}
+	for iface, members := range sib.instanceExports {
+		if !strings.HasPrefix(iface, prefix) {
+			continue
+		}
+		for member, entry := range members {
+			owner, ownerKey := ownerOf(entry.be, sib, entry.name)
+			subCfg.imports[mkImportKey(argName+"#"+iface[len(prefix):], member)] = delegatingHostImport(newGuestAsyncTarget(owner, entry.be, ownerKey, nest.importerTag(owner)))
+		}
+	}
 	if len(projection) > 0 {
 		// Bind the members of the PROJECTED interface. sib's exports hold
 		// them flat under "X#member" keys, indexed by instanceExports; the
@@ -1755,7 +1800,7 @@ func planScopedModules(r wazy.Runtime, comp *binary.Component, cfg *config, empt
 // coreInstanceKey's doc).
 func resolveInlineExportItem(
 	ctx context.Context, r wazy.Runtime, comp *binary.Component, cfg *config, resources *handleTable, in *Instance,
-	e binary.CoreInlineExport, coreMemSpace, coreTableSpace, coreGlobalSpace []aliasTarget, instMods map[int]api.Module,
+	e binary.CoreInlineExport, coreMemSpace, coreTableSpace, coreGlobalSpace, coreTagSpace []aliasTarget, instMods map[int]api.Module,
 	neededTypes map[string]map[string]coreFuncSig, groupNames []string, nextPrivateName func() string,
 	coreFuncTarget func(int) (api.Module, string, error), coreMemTarget func(int) (api.Module, error),
 	coreTableTarget func(int) (api.Module, string, error),
@@ -1847,8 +1892,25 @@ func resolveInlineExportItem(
 		_, mutable := g.(api.MutableGlobal)
 		return shimItem{Sort: shimSortGlobal, FromModule: coreInstanceKey(int(at.instIdx)), FromName: at.name, ExportName: e.Name, GlobalType: g.Type(), GlobalMutable: mutable}, "", nil, nil
 
+	case 0x04: // tag
+		// A tag import must declare the source tag's exact type, as a global
+		// import its value type and mutability.
+		if u32.OutOfRange(e.CoreSortIdx, len(coreTagSpace)) {
+			return shimItem{}, "", nil, fmt.Errorf("unknown tag %d: tag index out of bounds", e.CoreSortIdx)
+		}
+		at := coreTagSpace[e.CoreSortIdx]
+		mod, ok := instMods[int(at.instIdx)].(*wasm.ModuleInstance)
+		if !ok {
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core tag %d targets core instance %d, which was not instantiated", e.Name, e.CoreSortIdx, at.instIdx)
+		}
+		ft := mod.ExportedTagType(at.name)
+		if ft == nil {
+			return shimItem{}, "", nil, fmt.Errorf("inline export %q: core instance %d has no exported tag %q", e.Name, at.instIdx, at.name)
+		}
+		return shimItem{Sort: shimSortTag, FromModule: coreInstanceKey(int(at.instIdx)), FromName: at.name, ExportName: e.Name, TagParams: ft.Params}, "", nil, nil
+
 	default:
-		return shimItem{}, "", nil, fmt.Errorf("inline export %q has unsupported core:sort %#x; only func (0x00), table (0x01), memory (0x02), and global (0x03) are supported by the graph engine", e.Name, e.Sort)
+		return shimItem{}, "", nil, fmt.Errorf("inline export %q has unsupported core:sort %#x; only func (0x00), table (0x01), memory (0x02), global (0x03) and tag (0x04) are supported by the graph engine", e.Name, e.Sort)
 	}
 }
 
@@ -1954,7 +2016,7 @@ func computeCanonHostFunc(
 				break
 			}
 			var ierr error
-			if iface, ierr = importInterfaceName(comp, al.InstanceIdx); ierr != nil {
+			if iface, ierr = importedInstancePath(comp, al.InstanceIdx); ierr != nil {
 				return hostFuncDef{}, "", ierr
 			}
 			fname = al.Name
@@ -2575,6 +2637,11 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 	if cfg != nil {
 		abiCache = cfg.compileCache
 	}
+	if name, ok := importedFunc(comp, funcIdx); ok {
+		if be, ok := delegatedExport(cfg, mkImportKey(name, "")); ok {
+			return be, nil
+		}
+	}
 	isLift, liftCanonIdx, at, err := componentFunc(funcIdx)
 	if err != nil {
 		return nil, fmt.Errorf("component/instance: export %q: %w", diagName, err)
@@ -2602,6 +2669,11 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 		}
 		if ok {
 			return bindFuncExportGraph(comp, src, componentFunc, coreFuncTarget, resolve, diagName, cfg, compInstances)
+		}
+		if tgt, err := resolveInstanceArgTarget(comp, at.instIdx); err == nil && tgt.imported {
+			if be, ok := delegatedExport(cfg, mkImportKey(importPath(tgt), at.name)); ok {
+				return be, nil
+			}
 		}
 		return nil, fmt.Errorf("component/instance: export %q resolves to an imported func rather than a lift; only lifted funcs may be exported", diagName)
 	}
@@ -2681,6 +2753,69 @@ func bindFuncExportGraph(comp *binary.Component, funcIdx uint32, componentFunc f
 	}
 	finalizeBoundExport(be, resolve, abiCache, comp, funcIdx)
 	return be, nil
+}
+
+// importedFunc reports the import name when funcIdx is, or exports, a func
+// this component imports.
+func importedFunc(comp *binary.Component, funcIdx uint32) (string, bool) {
+	for !u32.OutOfRange(funcIdx, len(comp.ComponentFuncSpace)) {
+		switch e := comp.ComponentFuncSpace[funcIdx]; e.Kind {
+		case binary.ComponentFuncFromImport:
+			return comp.Imports[e.Import].Name, true
+		case binary.ComponentFuncFromExport:
+			funcIdx = comp.Exports[e.Export].ExternIndex
+		default:
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// importPath is the interface name the funcs of an imported instance, or of
+// an instance nested in one, are registered under in cfg.imports.
+func importPath(tgt instanceArgTarget) string {
+	if len(tgt.projection) == 0 {
+		return tgt.importName
+	}
+	return tgt.importName + "#" + strings.Join(tgt.projection, "#")
+}
+
+// delegatedExport is the export a func this component imports re-exposes,
+// when the import is a delegate to a lift of another instance in the
+// composition: re-exporting it exports that lift, run by its owner.
+func delegatedExport(cfg *config, key importKey) (*boundExport, bool) {
+	if cfg == nil {
+		return nil, false
+	}
+	hi, ok := cfg.imports[key]
+	if !ok || hi.asyncTarget == nil {
+		return nil, false
+	}
+	t := hi.asyncTarget
+	return reexposedSubExport(t.sub, t.be, t.exportName), true
+}
+
+// reexportDelegatedInstance exports, as the interface name, the funcs of an
+// instance this component imports under path, when every one is a delegate
+// to a lift of another instance in the composition (delegatedExport). ok is
+// false when the instance has no funcs registered at all.
+func reexportDelegatedInstance(cfg *config, name, path string, exports map[string]*boundExport) (ok bool, err error) {
+	if cfg == nil {
+		return false, nil
+	}
+	iface := mkImportKey(path, "").iface
+	for key := range cfg.imports {
+		if key.iface != iface || key.name == "" {
+			continue
+		}
+		be, delegated := delegatedExport(cfg, key)
+		if !delegated {
+			return false, fmt.Errorf("component/instance: export %q re-exports the imported instance %q, whose func %q the host supplies; only a func of another component in the composition can be re-exported", name, path, key.name)
+		}
+		exports[instanceExportKey(name, key.name)] = be
+		ok = true
+	}
+	return ok, nil
 }
 
 // funcAliasSource sees through an alias of a func export of an instance
@@ -2927,6 +3062,11 @@ func bindInstanceExportGraph(comp *binary.Component, cfg *config, exp binary.Exp
 	// and falls through to the resolution below; a resolution failure does
 	// too, so the diagnostics there stay the ones callers already know.
 	tgt, terr := resolveInstanceArgTarget(comp, exp.ExternIndex)
+	if terr == nil && tgt.imported {
+		if ok, err := reexportDelegatedInstance(cfg, exp.Name, importPath(tgt), exports); ok || err != nil {
+			return nil, err
+		}
+	}
 	if terr == nil && !tgt.imported && len(tgt.projection) == 0 {
 		if sub, ok := compInstances[int(tgt.spaceIdx)]; ok {
 			return reexposeWholeInstance(exp, sub, exports, addReexposed), nil

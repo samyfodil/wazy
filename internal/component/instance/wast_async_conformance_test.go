@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/samyfodil/wazy"
+	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
@@ -23,11 +24,15 @@ import (
 // win-corruption-repro workflow's interpreter shard, which has reproduced that
 // crash with the JIT out of the picture. Unset (every normal run, CI included)
 // this is exactly wazy.NewRuntime.
+// newWastRuntime is the runtime the specification's suites run on, with the
+// WebAssembly 3.0 features Wasmtime runs them with: the linking suites' core
+// modules use multiple memories and exception-handling tags.
 func newWastRuntime(ctx context.Context) wazy.Runtime {
+	cfg := wazy.NewRuntimeConfig()
 	if os.Getenv("WAZY_REPRO_INTERPRETER") == "1" {
-		return wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfigInterpreter())
+		cfg = wazy.NewRuntimeConfigInterpreter()
 	}
-	return wazy.NewRuntime(ctx)
+	return wazy.NewRuntimeWithConfig(ctx, cfg.WithCoreFeatures(api.CoreFeaturesV3))
 }
 
 // TestAsyncWastConformance runs the official WebAssembly/component-model

@@ -44,6 +44,7 @@ var wastKnownSkips = map[string]map[string]string{}
 var wastConformanceSuites = []string{
 	"alignment", "concat", "numerics", "post-return", "realloc", "strings", "transcode", "variants",
 	"borrows", "handle-table", "multiple-resources",
+	"linking-unit", "linking-tags", "link-time-virtualization", "shared-everything-dynamic-linking",
 }
 
 // wastLegacySuites are the four of test/wasmtime that component-model#684

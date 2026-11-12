@@ -6,6 +6,7 @@ import (
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // srcModuleWat is a tiny real core module (hand-encoded, not embedded from a
@@ -230,10 +231,76 @@ func TestBuildPassthroughShim_TableSharesIdentity(t *testing.T) {
 	}
 }
 
+// An inline core instance may export nothing (binary.wast has one); its
+// shim is a module with nothing in it.
 func TestBuildPassthroughShim_NoItems(t *testing.T) {
-	if _, err := buildPassthroughShim(nil); err == nil {
-		t.Fatal("expected an error for zero items")
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+	shimBytes, err := buildPassthroughShim(nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+	shim, err := r.InstantiateWithConfig(ctx, shimBytes, wazy.NewModuleConfig().WithName("empty").WithStartFunctions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(shim.ExportedFunctionDefinitions()) + len(shim.ExportedMemoryDefinitions()); n != 0 {
+		t.Fatalf("empty shim exports %d items", n)
+	}
+}
+
+// srcTagWasm exports a tag whose params include a non-nullable reference,
+// which the shim declares in its two-byte form.
+//
+//	(module (tag (export "t") (param i32 (ref func))))
+var srcTagWasm = []byte{
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+	0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x64, 0x70, 0x00, // type 0: (i32 (ref func)) -> ()
+	0x0d, 0x03, 0x01, 0x00, 0x00, // tag section: tag 0, type 0
+	0x07, 0x05, 0x01, 0x01, 't', 0x04, 0x00, // export "t" tag 0
+}
+
+// A tag passed through a shim is the source's tag itself, not a copy: a catch
+// of one matches a throw of the other only if they are the same tag.
+func TestBuildPassthroughShim_TagSharesIdentity(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntimeWithConfig(ctx, wazy.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV3))
+	defer r.Close(ctx)
+
+	src, err := r.InstantiateWithConfig(ctx, srcTagWasm, wazy.NewModuleConfig().WithName("tagsrc").WithStartFunctions())
+	if err != nil {
+		t.Fatalf("instantiate src: %v", err)
+	}
+	ft := src.(*wasm.ModuleInstance).ExportedTagType("t")
+	if ft == nil {
+		t.Fatal("src has no tag \"t\"")
+	}
+	shimBytes, err := buildPassthroughShim([]shimItem{
+		{Sort: shimSortTag, FromModule: "tagsrc", FromName: "t", ExportName: "exn", TagParams: ft.Params},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim, err := r.InstantiateWithConfig(ctx, shimBytes, wazy.NewModuleConfig().WithName("tagshim").WithStartFunctions())
+	if err != nil {
+		t.Fatalf("instantiate shim: %v", err)
+	}
+	if got, want := shim.(*wasm.ModuleInstance).Tags[0], src.(*wasm.ModuleInstance).Tags[0]; got != want {
+		t.Fatal("the shim's tag is not the source's")
+	}
+	if shim.(*wasm.ModuleInstance).ExportedTagType("missing") != nil {
+		t.Fatal("ExportedTagType found a tag that is not exported")
+	}
+}
+
+func TestBuildPassthroughShim_TagOfConcreteRefRefused(t *testing.T) {
+	_, err := buildPassthroughShim([]shimItem{{
+		Sort: shimSortTag, FromModule: "m", FromName: "t", ExportName: "t",
+		TagParams: []wasm.ValueType{wasm.ValueTypeI32, wasm.ValueTypeConcreteRef(0, true)},
+	}})
+	requireErrContains(t, err, `item[0] (tag "t"): a parameter of type`)
+	requireErrContains(t, err, "cannot be passed through")
 }
 
 func TestBuildPassthroughShim_EmptySourceModule(t *testing.T) {

@@ -110,6 +110,10 @@ type nesting struct {
 	resCanon         func(uint32) uint32
 	importedResDtors map[uint32]guestDtor
 
+	// typeCount is the size of this component's type index space: the tags
+	// importerTag makes start there, above every type of its own.
+	typeCount uint32
+
 	// resourceOrigin is copied onto the resulting Instance's own field of the
 	// same name (see its doc on Instance) -- populated by
 	// instantiateNestedInstances as it wires each instantiate-arg, tracing a
@@ -165,8 +169,14 @@ type importKey struct {
 // 0.2.x ABI for a given interface is frozen, so they resolve to the same impl.
 // All importKey construction (both registration and lookup) goes through here
 // so the two sides always agree.
+//
+// An instance nested in an imported one is keyed by the path of names to it,
+// joined by '#' (importPath); each name in it loses its own suffix.
 func mkImportKey(iface, name string) importKey {
 	if i := strings.IndexByte(iface, '@'); i >= 0 {
+		if j := strings.IndexByte(iface[i:], '#'); j >= 0 {
+			return mkImportKey(iface[:i]+iface[i+j:], name)
+		}
 		iface = iface[:i]
 	}
 	return importKey{iface: iface, name: name}
@@ -476,7 +486,7 @@ func resolveImportedResourceName(comp *binary.Component, typeIdx uint32) (iface,
 	if al.Sort != 0x03 || al.TargetKind != 0x00 { // type-sort export alias
 		return "", "", false
 	}
-	ifaceName, err := importInterfaceName(comp, al.InstanceIdx)
+	ifaceName, err := importedInstancePath(comp, al.InstanceIdx)
 	if err != nil {
 		return "", "", false
 	}
@@ -551,6 +561,16 @@ func resourceCanonHostFunc(comp *binary.Component, cfg *config, resources *handl
 // importInterfaceName maps a component instance index to the imported
 // interface's name. The component instance index space is the imported
 // instances in import order (nested component instances are already rejected).
+// importedInstancePath is the cfg.imports interface name of instance instIdx
+// when it is an imported instance, or one nested in an imported instance and
+// reached through aliases of its exports.
+func importedInstancePath(comp *binary.Component, instIdx uint32) (string, error) {
+	if tgt, err := resolveInstanceArgTarget(comp, instIdx); err == nil && tgt.imported {
+		return importPath(tgt), nil
+	}
+	return importInterfaceName(comp, instIdx)
+}
+
 func importInterfaceName(comp *binary.Component, instIdx uint32) (string, error) {
 	count := uint32(0)
 	for _, im := range comp.Imports {
@@ -611,6 +631,14 @@ func validateShimComponent(nested *binary.Component) error {
 	for _, al := range nested.Aliases {
 		if al.Sort == 0x01 { // func-sort alias: would occupy the func index space
 			return fmt.Errorf("not a pure re-export shim (has a func-sort alias)")
+		}
+	}
+	// A shim is seen through by re-exporting the funcs passed to it; an
+	// instance it imports and re-exports needs the instance's funcs wired in,
+	// which only instantiating it does.
+	for _, im := range nested.Imports {
+		if im.ExternType == 0x05 {
+			return fmt.Errorf("not a pure re-export shim (imports an instance)")
 		}
 	}
 	return nil

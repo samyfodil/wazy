@@ -217,6 +217,16 @@ func (m *ModuleInstance) ExportedMemory(name string) api.Memory {
 	return m.Memories[exp.Index]
 }
 
+// ExportedTagType returns the type of the tag exported as name, or nil when
+// there is none.
+func (m *ModuleInstance) ExportedTagType(name string) *FunctionType {
+	exp := m.export(name, ExternTypeTag)
+	if exp == nil {
+		return nil
+	}
+	return m.Tags[exp.Index].Type
+}
+
 // ExportedMemoryDefinitions implements the same method as documented on
 // api.Module.
 func (m *ModuleInstance) ExportedMemoryDefinitions() map[string]api.MemoryDefinition {

@@ -6,11 +6,12 @@ import (
 
 	"github.com/samyfodil/wazy/api"
 	"github.com/samyfodil/wazy/internal/leb128"
+	"github.com/samyfodil/wazy/internal/wasm"
 )
 
 // This file hand-encodes minimal core WebAssembly binaries for "passthrough
 // shim" modules: a module whose only job is to import a func/table/memory/
-// global from an already-instantiated real module (by its wazy-registered
+// global/tag from an already-instantiated real module (by its wazy-registered
 // name) and immediately re-export it, verbatim, under a (possibly different)
 // name.
 //
@@ -63,6 +64,7 @@ const (
 	shimSortTable  shimSort = 0x01
 	shimSortMemory shimSort = 0x02
 	shimSortGlobal shimSort = 0x03
+	shimSortTag    shimSort = 0x04
 )
 
 // shimItem is one passthrough entry: import (fromModule, fromName) and
@@ -83,10 +85,11 @@ type shimItem struct {
 	FromModule    string
 	FromName      string
 	ExportName    string
-	Params        []api.ValueType // Sort == shimSortFunc only
-	Results       []api.ValueType // Sort == shimSortFunc only
-	GlobalType    api.ValueType   // Sort == shimSortGlobal only
-	GlobalMutable bool            // Sort == shimSortGlobal only
+	Params        []api.ValueType  // Sort == shimSortFunc only
+	Results       []api.ValueType  // Sort == shimSortFunc only
+	TagParams     []wasm.ValueType // Sort == shimSortTag only
+	GlobalType    api.ValueType    // Sort == shimSortGlobal only
+	GlobalMutable bool             // Sort == shimSortGlobal only
 }
 
 // buildPassthroughShim encodes a minimal core wasm binary that imports every
@@ -135,13 +138,9 @@ type shimItem struct {
 // graphEmptyImportKey before decode for exactly that reason), so catching it
 // here yields a diagnostic that names the shim item instead of a decode error.
 func buildPassthroughShim(items []shimItem) ([]byte, error) {
-	if len(items) == 0 {
-		return nil, fmt.Errorf("component/instance: buildPassthroughShim: no items")
-	}
-
 	var typeSec, importSec, exportSec bytes.Buffer
 	var typeCount, importCount, exportCount uint32
-	var funcIdx, tableIdx, memIdx, globalIdx uint32
+	var funcIdx, tableIdx, memIdx, globalIdx, tagIdx uint32
 
 	for i, it := range items {
 		if it.FromModule == "" {
@@ -214,6 +213,26 @@ func buildPassthroughShim(items []shimItem) ([]byte, error) {
 			exportCount++
 			globalIdx++
 
+		case shimSortTag:
+			typeIdx := typeCount
+			if err := writeTagType(&typeSec, it.TagParams); err != nil {
+				return nil, fmt.Errorf("component/instance: buildPassthroughShim: item[%d] (tag %q): %w", i, it.FromName, err)
+			}
+			typeCount++
+
+			writeName(&importSec, it.FromModule)
+			writeName(&importSec, it.FromName)
+			importSec.WriteByte(0x04) // importdesc: tag
+			importSec.WriteByte(0x00) // attribute: exception
+			importSec.Write(leb128.EncodeUint32(typeIdx))
+			importCount++
+
+			writeName(&exportSec, it.ExportName)
+			exportSec.WriteByte(0x04) // exportdesc: tag
+			exportSec.Write(leb128.EncodeUint32(tagIdx))
+			exportCount++
+			tagIdx++
+
 		default:
 			return nil, fmt.Errorf("component/instance: buildPassthroughShim: item[%d] has unsupported sort %#x", i, it.Sort)
 		}
@@ -239,6 +258,27 @@ func writeFuncType(buf *bytes.Buffer, params, results []api.ValueType) {
 	buf.Write(params)
 	buf.Write(leb128.EncodeUint32(uint32(len(results))))
 	buf.Write(results)
+}
+
+// writeTagType appends the functype of a tag, its params and no results.
+// A reference to a type of the source module's own cannot be declared here
+// without that type, so it is refused.
+func writeTagType(buf *bytes.Buffer, params []wasm.ValueType) error {
+	buf.WriteByte(0x60)
+	buf.Write(leb128.EncodeUint32(uint32(len(params))))
+	for _, p := range params {
+		switch {
+		case p.IsConcreteRef():
+			return fmt.Errorf("a parameter of type %s, a reference to a type the tag's module defines, cannot be passed through", wasm.ValueTypeName(p))
+		case p.IsRef() && !p.IsNullable():
+			buf.WriteByte(0x64) // (ref ht)
+			buf.WriteByte(p.Kind())
+		default:
+			buf.WriteByte(p.Kind())
+		}
+	}
+	buf.WriteByte(0x00) // no results
+	return nil
 }
 
 // writeLimits appends a no-max limits (0x00 min) to buf -- the only shape
