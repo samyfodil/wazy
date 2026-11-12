@@ -300,19 +300,73 @@ func ptrU32(v uint32) *uint32 { return &v }
 
 // ------- AsyncCall.Resolve: the two structural guards -------
 
+// endCall is what the wrapper does once the AsyncHostFunc returns: it applies
+// the completion made while the invocation ran, if any.
+func endCall(ac *AsyncCall) error {
+	if c, ok := ac.finish(); ok {
+		return ac.in.applyQueued(c)
+	}
+	return nil
+}
+
 func TestAsyncCall_Resolve_TwiceTraps(t *testing.T) {
 	st := newSubtask()
-	st.resolveFn = func([]abi.Value) error { return nil }
+	st.resolveFn = func([]abi.Value) error { st.resolve(subtaskReturned, nil); return nil }
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
-	ac.inCall.Store(true)
+	ac.call.Store(acRunning)
 	ac.Resolve(nil)
-	requirePanicContains(t, "Resolve called twice", func() { ac.Resolve(nil) })
+	requirePanicContains(t, "called twice", func() { ac.Resolve(nil) })
+	if err := endCall(ac); err != nil || !st.resolved() {
+		t.Fatalf("endCall: %v, resolved %v", err, st.resolved())
+	}
+	requirePanicContains(t, "called twice", func() { ac.in.sched.pumping = true; ac.Resolve(nil) })
+}
+
+// A completion from another goroutine while the AsyncHostFunc still runs is
+// applied by the wrapper, on the driving goroutine, once it returns.
+func TestAsyncCall_Resolve_FromAnotherGoroutineWhileRunning(t *testing.T) {
+	st := newSubtask()
+	var got []abi.Value
+	st.resolveFn = func(v []abi.Value) error { got = v; st.resolve(subtaskReturned, nil); return nil }
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
+	ac.call.Store(acRunning)
+	done := make(chan struct{})
+	go func() {
+		ac.Resolve([]abi.Value{uint32(7)})
+		close(done)
+	}()
+	<-done
+	if st.resolved() {
+		t.Fatal("resolved before the wrapper applied it")
+	}
+	if err := endCall(ac); err != nil {
+		t.Fatal(err)
+	}
+	if !st.resolved() || len(got) != 1 || got[0] != uint32(7) || st.hasPendingEvent() {
+		t.Fatalf("resolved %v, results %v, pending event %v", st.resolved(), got, st.hasPendingEvent())
+	}
+}
+
+// finish waits out a completion that is being handed over.
+func TestAsyncCall_FinishWaitsForClaimedCompletion(t *testing.T) {
+	ac := &AsyncCall{}
+	ac.call.Store(acClaimed)
+	go func() {
+		ac.call.Store(acStashedCancelled)
+	}()
+	c, ok := ac.finish()
+	if !ok || !c.cancelled || ac.call.Load() != acIdle {
+		t.Fatalf("finish = %+v %v, state %d", c, ok, ac.call.Load())
+	}
+	if _, ok := ac.finish(); ok {
+		t.Fatal("a second finish returned a completion")
+	}
 }
 
 func TestAsyncCall_Resolve_OutsideSchedulerTraps(t *testing.T) {
 	st := newSubtask()
 	st.resolveFn = func([]abi.Value) error { return nil }
-	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st} // inCall=false, sched.pumping=false
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st} // not running, sched.pumping=false
 	requirePanicContains(t, "external completion requires CallAsync", func() { ac.Resolve(nil) })
 }
 
@@ -320,7 +374,13 @@ func TestAsyncCall_Resolve_ApplyResolveErrorTraps(t *testing.T) {
 	st := newSubtask()
 	st.resolveFn = func([]abi.Value) error { return errors.New("bad result") }
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
-	ac.inCall.Store(true)
+	ac.call.Store(acRunning)
+	ac.Resolve(nil)
+	if err := endCall(ac); err == nil || !strings.Contains(err.Error(), "bad result") {
+		t.Fatalf("endCall: %v, want bad result", err)
+	}
+	ac.in.sched.pumping = true
+	ac.resolved = false
 	requirePanicContains(t, "bad result", func() { ac.Resolve(nil) })
 }
 
@@ -384,7 +444,13 @@ func TestAsyncCall_OnCancel_SetsSubtaskOnCancel(t *testing.T) {
 func TestAsyncCall_ResolveCancelled_RequiresCancellationRequested(t *testing.T) {
 	st := newSubtask()
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
-	ac.inCall.Store(true)
+	ac.call.Store(acRunning)
+	ac.ResolveCancelled()
+	if err := endCall(ac); err == nil || !strings.Contains(err.Error(), "without a prior subtask.cancel request") {
+		t.Fatalf("endCall: %v", err)
+	}
+	ac.in.sched.pumping = true
+	ac.resolved = false
 	requirePanicContains(t, "without a prior subtask.cancel request", func() { ac.ResolveCancelled() })
 }
 
@@ -392,15 +458,18 @@ func TestAsyncCall_ResolveCancelled_Immediate(t *testing.T) {
 	st := newSubtask()
 	st.cancellationRequested = true
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
-	ac.inCall.Store(true)
+	ac.call.Store(acRunning)
 	ac.ResolveCancelled()
+	if err := endCall(ac); err != nil {
+		t.Fatal(err)
+	}
 	if st.state != subtaskCancelledBeforeReturned {
 		t.Fatalf("state = %v, want subtaskCancelledBeforeReturned", st.state)
 	}
-	// Immediate path (inCall): no pending event installed -- the wrapper's
-	// own epilogue observes st.resolved() and takes the fast path.
+	// Immediate path: no pending event installed -- the wrapper's own
+	// epilogue observes st.resolved() and takes the fast path.
 	if st.hasPendingEvent() {
-		t.Fatal("a pending event was installed on the immediate (inCall) path")
+		t.Fatal("a pending event was installed on the immediate path")
 	}
 }
 
@@ -424,7 +493,7 @@ func TestAsyncCall_ResolveCancelled_TwiceTraps(t *testing.T) {
 	st := newSubtask()
 	st.cancellationRequested = true
 	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st}
-	ac.inCall.Store(true)
+	ac.call.Store(acRunning)
 	ac.ResolveCancelled()
 	requirePanicContains(t, "called twice", func() { ac.ResolveCancelled() })
 }
@@ -432,7 +501,7 @@ func TestAsyncCall_ResolveCancelled_TwiceTraps(t *testing.T) {
 func TestAsyncCall_ResolveCancelled_OutsideSchedulerTraps(t *testing.T) {
 	st := newSubtask()
 	st.cancellationRequested = true
-	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st} // inCall=false, sched.pumping=false
+	ac := &AsyncCall{in: &Instance{sched: &sched{}}, st: st} // not running, sched.pumping=false
 	requirePanicContains(t, "external completion requires CallAsync", func() { ac.ResolveCancelled() })
 }
 
