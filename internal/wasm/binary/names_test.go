@@ -129,17 +129,17 @@ func TestDecodeNameSection_Errors(t *testing.T) {
 		{
 			name:        "function name count past the input",
 			input:       []byte{subsectionIDFunctionNames, ignoredSubsectionSize, 2},
-			expectedErr: "failed to read the function count of subsection[1]: count 2 exceeds remaining input of 0 bytes",
+			expectedErr: "failed to read the function count of subsection[1]: unexpected end-of-file: count 2 exceeds remaining input of 0 bytes",
 		},
 		{
 			name:        "local names function count past the input",
 			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 2},
-			expectedErr: "failed to read the function count of subsection[2]: count 2 exceeds remaining input of 0 bytes",
+			expectedErr: "failed to read the function count of subsection[2]: unexpected end-of-file: count 2 exceeds remaining input of 0 bytes",
 		},
 		{
 			name:        "local count past the input",
 			input:       []byte{subsectionIDLocalNames, ignoredSubsectionSize, 1, 0, 2},
-			expectedErr: "failed to read the local count for function[0]: count 2 exceeds remaining input of 0 bytes",
+			expectedErr: "failed to read the local count for function[0]: unexpected end-of-file: count 2 exceeds remaining input of 0 bytes",
 		},
 		{
 			name:        "EOF after function name count",

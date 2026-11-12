@@ -483,14 +483,10 @@ func TestCall_StringParamRequiresMemory(t *testing.T) {
 		binary.TypeRef{Primitive: "u32"},
 	)}
 
-	inst, err := instantiateComponent(ctx, r, comp, dummyCoreWasm)
-	if err != nil {
-		t.Fatalf("instantiateComponent: %v", err)
-	}
-	defer inst.Close(ctx)
-
-	_, err = inst.Call(ctx, "run", "hello")
-	requireErrContains(t, err, "requires linear memory")
+	// "f" takes no params, and a string flattens to two: refused at bind, as
+	// wasmparser refuses it.
+	_, err := instantiateComponent(ctx, r, comp, dummyCoreWasm)
+	requireErrContains(t, err, "lowered parameter types `[I32, I32]` do not match parameter types `[]` of core function 0")
 }
 
 func TestCall_StringResultRequiresMemory(t *testing.T) {
@@ -585,18 +581,12 @@ func TestCall_ZeroResults(t *testing.T) {
 func TestCall_ResultCountMismatch(t *testing.T) {
 	ctx, r := newRuntime(t)
 	// "g" returns zero core values, but the component func type declares a
-	// u32 result (1 flat value): the raw result count won't match.
+	// u32 result (1 flat value).
 	comp := baseValidComponent("g")
 	comp.CoreModules[0].Size = len(dummyCoreWasm)
 
-	inst, err := instantiateComponent(ctx, r, comp, dummyCoreWasm)
-	if err != nil {
-		t.Fatalf("instantiateComponent: %v", err)
-	}
-	defer inst.Close(ctx)
-
-	_, err = inst.Call(ctx, "run")
-	requireErrContains(t, err, "expected 1")
+	_, err := instantiateComponent(ctx, r, comp, dummyCoreWasm)
+	requireErrContains(t, err, "lowered result types `[I32]` do not match result types `[]` of core function 0")
 }
 
 // ------- white-box: params, memory, and realloc happy paths -------

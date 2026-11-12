@@ -139,10 +139,10 @@ func TestLoadVecSize(t *testing.T) {
 	require.Equal(t, uint64(1), n)
 
 	_, _, err = LoadVecSize([]byte{0x03, 0xaa, 0xbb})
-	require.EqualError(t, err, "count 3 exceeds remaining input of 2 bytes")
+	require.EqualError(t, err, "unexpected end-of-file: count 3 exceeds remaining input of 2 bytes")
 
 	_, _, err = LoadVecSize([]byte{0xff, 0xff, 0xff, 0xff, 0x0f})
-	require.EqualError(t, err, "count 4294967295 exceeds remaining input of 0 bytes")
+	require.EqualError(t, err, "unexpected end-of-file: count 4294967295 exceeds remaining input of 0 bytes")
 
 	_, _, err = LoadVecSize([]byte{0x80})
 	require.ErrorIs(t, err, io.EOF)

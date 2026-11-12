@@ -273,7 +273,6 @@ func TestDecodeVecSizeExceedsInput(t *testing.T) {
 		{name: "flags labels", input: section(7, 1, 0x6e)},
 		{name: "tuple elements", input: section(7, 1, 0x6f)},
 		{name: "func params", input: section(7, 1, 0x40)},
-		{name: "func named results", input: section(7, 1, 0x40, 0, 0x01)},
 		{name: "component type decls", input: section(7, 1, 0x41)},
 		{name: "instance type decls", input: section(7, 1, 0x42)},
 		{name: "canon opts", input: section(8, 1, CanonKindLift, 0x00, 0)},

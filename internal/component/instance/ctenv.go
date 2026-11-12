@@ -63,7 +63,7 @@ func outerType(s ctScope, count, idx uint32) (ctType, error) {
 		free := map[*ctResource]bool{}
 		ctFreeResources(ctEntity{sort: ctSortType, ty: t}, map[*ctResource]bool{}, free)
 		if len(free) > 0 {
-			return ctType{}, fmt.Errorf("type index %d refers to resources not defined in the current component", idx)
+			return ctType{}, fmt.Errorf("type index %d: cannot alias outer type which transitively refers to resources not defined in the current component", idx)
 		}
 	}
 	return t, nil
@@ -82,20 +82,22 @@ func ctValRef(s ctScope, ref binary.TypeRef) (*ctVal, error) {
 		return nil, err
 	}
 	if t.val == nil {
-		return nil, fmt.Errorf("type index %d is a %s, not a defined value type", *ref.TypeIndex, t.desc())
+		return nil, fmt.Errorf("type index %d is not a defined type", *ref.TypeIndex)
 	}
 	return t.val, nil
 }
 
-func ctResourceRef(s ctScope, idx uint32) (*ctResource, error) {
+// ctResourceRef is the resource type idx names, and the identity of that
+// name of it.
+func ctResourceRef(s ctScope, idx uint32) (*ctResource, *ctTypeID, error) {
 	t, err := s.typeAt(idx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if t.res == nil {
-		return nil, fmt.Errorf("type index %d is not a resource type", idx)
+		return nil, nil, fmt.Errorf("type index %d is not a resource type", idx)
 	}
-	return t.res, nil
+	return t.res, t.id, nil
 }
 
 // ctConvert computes the type a type definition denotes in scope s.
@@ -112,12 +114,20 @@ func ctConvert(s ctScope, d binary.TypeDesc) (ctType, error) {
 		return ctType{comp: comp}, err
 	case binary.ResourceDesc:
 		r, err := s.newResource()
-		return ctType{res: r}, err
+		return ctType{res: r, id: &ctTypeID{}}, err
 	case nil:
 		return ctType{}, fmt.Errorf("type definition was not decoded")
 	}
 	v, err := ctConvertVal(s, d)
-	return ctType{val: v}, err
+	if err != nil {
+		return ctType{}, err
+	}
+	t := ctType{val: v}
+	if ctNominal(v) {
+		v.id = &ctTypeID{}
+		t.id = v.id
+	}
+	return t, nil
 }
 
 func ctConvertFunc(s ctScope, d binary.FuncDesc) (*ctFunc, error) {
@@ -127,6 +137,14 @@ func ctConvertFunc(s ctScope, d binary.FuncDesc) (*ctFunc, error) {
 	}
 	f := ctNewFunc(d.Async, len(d.Params), nr)
 	for i, p := range d.Params {
+		if err := ctLabel(p.Name, "function parameter"); err != nil {
+			return nil, err
+		}
+		for _, prev := range d.Params[:i] {
+			if ctSameLabel(prev.Name, p.Name) {
+				return nil, fmt.Errorf("function parameter name `%s` conflicts with previous parameter name `%s`", p.Name, prev.Name)
+			}
+		}
 		t, err := ctValRef(s, p.Type)
 		if err != nil {
 			return nil, fmt.Errorf("parameter `%s`: %w", p.Name, err)
@@ -173,6 +191,58 @@ func ctHasBorrow(v *ctVal) bool {
 	return false
 }
 
+// ctContainsHandle reports whether v holds, at any depth, a resource handle,
+// stream, future or error-context.
+func ctContainsHandle(v *ctVal) bool {
+	switch v.kind {
+	case ctvOwn, ctvBorrow, ctvStream, ctvFuture:
+		return true
+	case ctvPrim:
+		return v.prim == "error-context"
+	}
+	for _, el := range v.elems {
+		if el != nil && ctContainsHandle(el) {
+			return true
+		}
+	}
+	return false
+}
+
+// ctLabel checks a label of a type -- a field, case, flag, tag or param
+// name -- is in kebab case, as wasmparser's to_kebab_string does.
+func ctLabel(name, desc string) error {
+	if name == "" {
+		return fmt.Errorf("%s name cannot be empty", desc)
+	}
+	if !ctIsKebab(name) {
+		return fmt.Errorf("%s name `%s` is not in kebab case", desc, name)
+	}
+	return nil
+}
+
+// ctLabels checks a flags' or enum's names, each in kebab case and unique.
+func ctLabels(names []string, desc, prevDesc string) error {
+	for i, n := range names {
+		if err := ctLabel(n, desc); err != nil {
+			return err
+		}
+		if prev, dup := ctPrevLabel(names[:i], n); dup {
+			return fmt.Errorf("%s name `%s` conflicts with previous %s name `%s`", desc, n, prevDesc, prev)
+		}
+	}
+	return nil
+}
+
+// ctPrevLabel finds a label in prev the same as name.
+func ctPrevLabel(prev []string, name string) (string, bool) {
+	for _, p := range prev {
+		if ctSameLabel(p, name) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
 // ctConvertVal computes the value type a defvaltype denotes in scope s.
 func ctConvertVal(s ctScope, d binary.TypeDesc) (*ctVal, error) {
 	var err error
@@ -195,16 +265,40 @@ func ctConvertVal(s ctScope, d binary.TypeDesc) (*ctVal, error) {
 	case binary.PrimitiveDesc:
 		return ctPrim(d.Prim, true), nil
 	case binary.RecordDesc:
+		if len(d.Fields) == 0 {
+			return nil, fmt.Errorf("record type must have at least one field")
+		}
 		v = ctValOf(ctvRecord, len(d.Fields))
 		v.labels = make([]string, len(d.Fields))
 		for i, f := range d.Fields {
+			if err := ctLabel(f.Name, "record field"); err != nil {
+				return nil, err
+			}
 			v.labels[i], v.elems[i] = f.Name, ref(f.Type)
+			if err != nil {
+				return nil, err
+			}
+			if prev, dup := ctPrevLabel(v.labels[:i], f.Name); dup {
+				return nil, fmt.Errorf("record field name `%s` conflicts with previous field name `%s`", f.Name, prev)
+			}
 		}
 	case binary.VariantDesc:
+		if len(d.Cases) == 0 {
+			return nil, fmt.Errorf("variant type must have at least one case")
+		}
 		v = ctValOf(ctvVariant, len(d.Cases))
 		v.labels = make([]string, len(d.Cases))
 		for i, c := range d.Cases {
+			if err := ctLabel(c.Name, "variant case"); err != nil {
+				return nil, err
+			}
 			v.labels[i], v.elems[i] = c.Name, optRef(c.Type)
+			if err != nil {
+				return nil, err
+			}
+			if prev, dup := ctPrevLabel(v.labels[:i], c.Name); dup {
+				return nil, fmt.Errorf("variant case name `%s` conflicts with previous case name `%s`", c.Name, prev)
+			}
 		}
 	case binary.ListDesc:
 		v = ctValOf(ctvList, 1)
@@ -213,13 +307,31 @@ func ctConvertVal(s ctScope, d binary.TypeDesc) (*ctVal, error) {
 		v = ctValOf(ctvFixedList, 1)
 		v.elems[0], v.length = ref(d.Element), d.Length
 	case binary.TupleDesc:
+		if len(d.Elements) == 0 {
+			return nil, fmt.Errorf("tuple type must have at least one type")
+		}
 		v = ctValOf(ctvTuple, len(d.Elements))
 		for i, e := range d.Elements {
 			v.elems[i] = ref(e)
 		}
 	case binary.FlagsDesc:
+		switch {
+		case len(d.Names) == 0:
+			return nil, fmt.Errorf("flags must have at least one entry")
+		case len(d.Names) > 32:
+			return nil, fmt.Errorf("cannot have more than 32 flags")
+		}
+		if err := ctLabels(d.Names, "flag", "flag"); err != nil {
+			return nil, err
+		}
 		v = &ctVal{kind: ctvFlags, labels: d.Names}
 	case binary.EnumDesc:
+		if len(d.Cases) == 0 {
+			return nil, fmt.Errorf("enum type must have at least one variant")
+		}
+		if err := ctLabels(d.Cases, "enum tag", "tag"); err != nil {
+			return nil, err
+		}
 		v = &ctVal{kind: ctvEnum, labels: d.Cases}
 	case binary.OptionDesc:
 		v = ctValOf(ctvOption, 1)
@@ -229,7 +341,17 @@ func ctConvertVal(s ctScope, d binary.TypeDesc) (*ctVal, error) {
 		v.elems[0], v.elems[1] = optRef(d.Ok), optRef(d.Err)
 	case binary.MapDesc:
 		v = ctValOf(ctvMap, 2)
-		v.elems[0], v.elems[1] = ref(d.Key), ref(d.Value)
+		if v.elems[0] = ref(d.Key); err != nil {
+			return nil, err
+		}
+		if k := v.elems[0]; k.kind != ctvPrim || !binary.IsValidMapKeyPrimitive(k.prim) {
+			return nil, fmt.Errorf("invalid map key type")
+		}
+		if v.elems[1] = ref(d.Value); err == nil && ctContainsHandle(v.elems[1]) {
+			// Bindings may drop the values of duplicate keys, so a value
+			// cannot hold anything that would need disposing.
+			return nil, fmt.Errorf("map value type cannot contain a handle")
+		}
 	case binary.StreamDesc:
 		v = ctValOf(ctvStream, 1)
 		v.elems[0] = optRef(d.Element)
@@ -238,10 +360,10 @@ func ctConvertVal(s ctScope, d binary.TypeDesc) (*ctVal, error) {
 		v.elems[0] = optRef(d.Element)
 	case binary.OwnDesc:
 		v = &ctVal{kind: ctvOwn}
-		v.res, err = ctResourceRef(s, d.ResourceType)
+		v.res, v.id, err = ctResourceRef(s, d.ResourceType)
 	case binary.BorrowDesc:
 		v = &ctVal{kind: ctvBorrow}
-		v.res, err = ctResourceRef(s, d.ResourceType)
+		v.res, v.id, err = ctResourceRef(s, d.ResourceType)
 	default:
 		return nil, fmt.Errorf("unsupported type definition %s", d.Kind())
 	}
@@ -258,6 +380,11 @@ type ctDeclScope struct {
 	types     []ctType
 	insts     []*ctInstance
 	coreTypes []ctCoreType
+
+	// names and vis back the body's name contexts and named types, kept
+	// with the scope between the bodies it serves.
+	names [2]ctNameCx
+	vis   ctVisibility
 }
 
 // ctDeclScopes keeps scopes between the types built in them: the type a
@@ -265,7 +392,10 @@ type ctDeclScope struct {
 var ctDeclScopes = sync.Pool{New: func() any { return new(ctDeclScope) }}
 
 func (s *ctDeclScope) release() {
-	*s = ctDeclScope{types: ctEmpty(s.types), insts: ctEmpty(s.insts), coreTypes: ctEmpty(s.coreTypes)}
+	*s = ctDeclScope{
+		types: ctEmpty(s.types), insts: ctEmpty(s.insts), coreTypes: ctEmpty(s.coreTypes),
+		names: [2]ctNameCx{s.names[0].emptied(), s.names[1].emptied()}, vis: s.vis.emptied(),
+	}
 	ctDeclScopes.Put(s)
 }
 
@@ -332,11 +462,14 @@ func ctEntityOfDesc(s ctScope, d binary.ExternDesc) (ctEntity, error) {
 func ctDeclared(s ctScope, name string, d binary.ExternDesc) (ctEntity, []ctResPath, error) {
 	if d.Sort == ctSortType && !d.Eq {
 		r := newSubResource(name)
-		return ctEntity{sort: ctSortType, ty: ctType{res: r.path[0].res}}, r.path[:], nil
+		return ctEntity{sort: ctSortType, ty: ctType{res: r.path[0].res, id: &ctTypeID{}}}, r.path[:], nil
 	}
 	e, err := ctEntityOfDesc(s, d)
 	if err != nil {
 		return e, nil, err
+	}
+	if e.sort == ctSortType {
+		e.ty = ctIdentified(e.ty)
 	}
 	e, paths := ctFreshen(e, name)
 	return e, paths, nil
@@ -377,6 +510,9 @@ func ctBuildDeclType(up ctScope, decls []binary.TypeDecl, component bool) (*ctIn
 	defer s.release()
 	s.up, s.types = up, slices.Grow(s.types, nTypes)
 	imports, exports := make([]ctNamed, 0, nImports), make([]ctNamed, 0, nExports)
+	importNames, exportNames := &s.names[0], &s.names[1]
+	importNames.kind, exportNames.kind = "import", "export"
+	vis := &s.vis // a component type's; an instance type's go unchecked
 	var importedRes, definedRes []ctResPath
 	for i, d := range decls {
 		var err error
@@ -402,17 +538,21 @@ func ctBuildDeclType(up ctScope, decls []binary.TypeDecl, component bool) (*ctIn
 		case binary.TypeDeclAlias:
 			err = s.alias(d.Alias)
 		case binary.TypeDeclImport, binary.TypeDeclExport:
-			list, kind := &exports, "export"
+			list, names := &exports, exportNames
 			if d.Kind == binary.TypeDeclImport {
-				list, kind = &imports, "import"
-			}
-			if _, dup := ctLookup(*list, d.Name); dup {
-				err = fmt.Errorf("%s name `%s` conflicts with previous name `%s`", kind, d.Name, d.Name)
-				break
+				list, names = &imports, importNames
 			}
 			var e ctEntity
 			var paths []ctResPath
 			if e, paths, err = ctDeclared(s, d.Name, d.Desc); err != nil {
+				break
+			}
+			if component {
+				if err = vis.add(e, d.Kind == binary.TypeDeclImport); err != nil {
+					break
+				}
+			}
+			if err = names.add(d.Name, e); err != nil {
 				break
 			}
 			*list = append(*list, ctNamed{name: d.Name, ent: e})
@@ -532,6 +672,12 @@ type ctEnv struct {
 	// st and ents back the memo states and the import and export entities.
 	st   []byte
 	ents []ctEntity
+
+	// names, vis and coreImports back check's name contexts, named types,
+	// and its core import names.
+	names       [2]ctNameCx
+	vis         ctVisibility
+	coreImports [][2][]byte
 }
 
 // ctEnvs keeps envs between type checks. Nothing a check computes outlives
@@ -579,6 +725,8 @@ func (e *ctEnv) release() {
 		types: ctEmpty(e.types), funcs: ctEmpty(e.funcs), insts: ctEmpty(e.insts), comps: ctEmpty(e.comps),
 		importedRes: ctEmpty(e.importedRes), children: ctEmpty(e.children),
 		created: e.created, local: e.local, st: ctEmpty(e.st), ents: ctEmpty(e.ents),
+		names: [2]ctNameCx{e.names[0].emptied(), e.names[1].emptied()}, vis: e.vis.emptied(),
+		coreImports: ctEmpty(e.coreImports),
 	}
 	ctEnvs.Put(e)
 }
@@ -850,16 +998,143 @@ func (e *ctEnv) exportAt(i uint32) (ent ctEntity, err error) {
 	}
 	defer func() { ctLeave(e.exportSt, i, err); e.exports[i] = ent }()
 	ex := e.comp.Exports[i]
+	if slot, what, ok := ctExportSlot(e.comp, int(i)); ok && ex.ExternIndex >= slot {
+		// An export names an item defined before it; the slot it makes is
+		// past the end of the space it names into.
+		return ent, fmt.Errorf("export `%s`: unknown %s %d: %s index out of bounds", ex.Name, what, ex.ExternIndex, what)
+	}
 	if ent, err = e.entityAt(ex.ExternType, ex.ExternIndex); err != nil {
 		return ent, fmt.Errorf("export `%s`: %w", ex.Name, err)
 	}
 	if ex.Ascribed == nil {
+		if ent.sort == ctSortType {
+			ent.ty = ctIdentified(ent.ty)
+		}
 		return ent, nil
 	}
 	if ent, err = e.ascribe(ent, *ex.Ascribed, ex.Name); err != nil {
 		return ent, fmt.Errorf("export `%s`: ascribed type of export is not compatible with item's type: %w", ex.Name, err)
 	}
 	return ent, nil
+}
+
+// checkOuterAliases checks every `alias outer` against what it can reach:
+// no more enclosing components than there are, and an item its target
+// defined before it -- before the alias, for count 0, or before the nested
+// component that holds it.
+func (e *ctEnv) checkOuterAliases() error {
+	c := e.comp
+	depth := uint32(0)
+	for o := c.Outer; o != nil; o = o.Outer {
+		depth++
+	}
+	for i, al := range c.Aliases {
+		if al.TargetKind != 0x02 {
+			continue
+		}
+		if al.OuterCount > depth {
+			return fmt.Errorf("invalid outer alias count of %d", al.OuterCount)
+		}
+		what, bound := ctOuterBound(c, i, al)
+		if what != "" && al.OuterIndex >= bound {
+			return fmt.Errorf("unknown %s %d: %s index out of bounds", what, al.OuterIndex, what)
+		}
+	}
+	return nil
+}
+
+// ctOuterBound is how many items of al's sort al, alias i of c, can name.
+func ctOuterBound(c *binary.Component, i int, al binary.AliasDef) (string, uint32) {
+	if al.OuterCount > 0 {
+		in := c
+		for range al.OuterCount - 1 {
+			in = in.Outer
+		}
+		b := in.OuterBounds
+		switch {
+		case al.Sort == ctSortType:
+			return "type", b.Types
+		case al.Sort == ctSortComponent:
+			return "component", b.Components
+		case al.Sort == 0x00 && al.CoreSort == 0x10:
+			return "core type", b.CoreTypes
+		case al.Sort == 0x00 && al.CoreSort == 0x11:
+			return "module", b.CoreModules
+		}
+		return "", 0
+	}
+	// Count 0 names an item of c itself, defined before the alias.
+	slot := func(n int, at func(int) (bool, uint32)) uint32 {
+		for j := range n {
+			if isAlias, a := at(j); isAlias && a == uint32(i) {
+				return uint32(j)
+			}
+		}
+		return 0
+	}
+	switch {
+	case al.Sort == ctSortType:
+		return "type", slot(len(c.TypeSpace), func(j int) (bool, uint32) {
+			return c.TypeSpace[j].Kind == binary.TypeSpaceAlias, c.TypeSpace[j].Alias
+		})
+	case al.Sort == ctSortComponent:
+		return "component", slot(len(c.ComponentSpace), func(j int) (bool, uint32) {
+			return c.ComponentSpace[j].Kind == binary.ComponentFromAlias, c.ComponentSpace[j].Alias
+		})
+	case al.Sort == 0x00 && al.CoreSort == 0x10:
+		return "core type", slot(len(c.CoreTypeSpace), func(j int) (bool, uint32) {
+			return c.CoreTypeSpace[j].Kind == binary.CoreTypeFromAlias, c.CoreTypeSpace[j].Alias
+		})
+	case al.Sort == 0x00 && al.CoreSort == 0x11:
+		return "module", slot(len(c.CoreModuleSpace), func(j int) (bool, uint32) {
+			return c.CoreModuleSpace[j].Kind == binary.CoreModuleFromAlias, c.CoreModuleSpace[j].Alias
+		})
+	}
+	return "", 0
+}
+
+// ctExportSlot is the index export i makes in the space of its sort, and
+// that space's name, or false for a sort with no space here.
+func ctExportSlot(c *binary.Component, i int) (uint32, string, bool) {
+	find := func(n int, at func(int) (bool, uint32)) (uint32, bool) {
+		for idx := range n {
+			if isExport, ex := at(idx); isExport && ex == uint32(i) {
+				return uint32(idx), true
+			}
+		}
+		return 0, false
+	}
+	var slot uint32
+	var ok bool
+	var what string
+	switch c.Exports[i].ExternType {
+	case ctSortCoreModule:
+		what = "module"
+		slot, ok = find(len(c.CoreModuleSpace), func(j int) (bool, uint32) {
+			return c.CoreModuleSpace[j].Kind == binary.CoreModuleFromExport, c.CoreModuleSpace[j].Export
+		})
+	case ctSortFunc:
+		what = "function"
+		slot, ok = find(len(c.ComponentFuncSpace), func(j int) (bool, uint32) {
+			return c.ComponentFuncSpace[j].Kind == binary.ComponentFuncFromExport, c.ComponentFuncSpace[j].Export
+		})
+	case ctSortType:
+		what = "type"
+		slot, ok = find(len(c.TypeSpace), func(j int) (bool, uint32) {
+			return c.TypeSpace[j].Kind == binary.TypeSpaceExport, c.TypeSpace[j].Export
+		})
+	case ctSortComponent:
+		what = "component"
+		slot, ok = find(len(c.ComponentSpace), func(j int) (bool, uint32) {
+			return c.ComponentSpace[j].Kind == binary.ComponentFromExport, c.ComponentSpace[j].Export
+		})
+	case ctSortInstance:
+		what = "instance"
+		slot, ok = find(len(c.ComponentInstanceSpace), func(j int) (bool, uint32) {
+			return c.ComponentInstanceSpace[j].Kind == binary.ComponentInstanceFromExport, c.ComponentInstanceSpace[j].Export
+		})
+	}
+	return slot, what, ok
 }
 
 // ascribe checks actual against the type an export ascribes to it and
@@ -894,13 +1169,14 @@ func (e *ctEnv) ascribe(actual ctEntity, d binary.ExternDesc, name string) (ctEn
 func (e *ctEnv) instantiate(def binary.Instance) (*ctInstance, error) {
 	if def.Kind == 0x01 { // inline exports: an instance of what it lists
 		in := &ctInstance{}
+		names := &ctNameCx{kind: "export", bag: true}
 		for _, x := range def.Exports {
-			if _, dup := ctLookup(in.exports, x.Name); dup {
-				return nil, fmt.Errorf("export name `%s` conflicts with previous name `%s`", x.Name, x.Name)
-			}
 			ent, err := e.entityAt(x.Sort, x.SortIdx)
 			if err != nil {
 				return nil, fmt.Errorf("export `%s`: %w", x.Name, err)
+			}
+			if err := names.add(x.Name, ent); err != nil {
+				return nil, err
 			}
 			in.exports = append(in.exports, ctNamed{name: x.Name, ent: ent})
 		}
@@ -933,7 +1209,13 @@ func (e *ctEnv) instantiate(def binary.Instance) (*ctInstance, error) {
 		s[rp.res] = n
 		e.create(n, false)
 	}
-	return &ctInstance{exports: s.named(c.exports)}, nil
+	var ids ctIDSubst
+	for _, im := range c.imports {
+		if a, ok := ctLookup(args, im.name); ok {
+			ids.pair(im.ent, a)
+		}
+	}
+	return &ctInstance{exports: ids.named(s.named(c.exports))}, nil
 }
 
 // selfType is the component type of the component itself.
@@ -1064,22 +1346,6 @@ func (e *ctEnv) checkCoreIndices() error {
 	return nil
 }
 
-func ctImportNames(c *binary.Component) []string {
-	names := make([]string, len(c.Imports))
-	for i, im := range c.Imports {
-		names[i] = im.Name
-	}
-	return names
-}
-
-func ctExportNames(c *binary.Component) []string {
-	names := make([]string, len(c.Exports))
-	for i, ex := range c.Exports {
-		names[i] = ex.Name
-	}
-	return names
-}
-
 // checkResourceCanon checks the type a resource built-in names: a resource
 // for each, and one this component defines for resource.new and
 // resource.rep, which see its representation.
@@ -1188,17 +1454,17 @@ func (e *ctEnv) coreModuleCount() int { return len(e.comp.CoreModuleSpace) }
 // names an export that is there, of the sort it says.
 func (e *ctEnv) check() error {
 	c := e.comp
-	for _, list := range [2][]string{ctImportNames(c), ctExportNames(c)} {
-		for i, name := range list {
-			for _, prev := range list[:i] {
-				if prev == name {
-					return fmt.Errorf("name `%s` conflicts with previous name `%s`", name, prev)
-				}
-			}
+	imports, vis := &e.names[0], &e.vis
+	imports.kind = "import"
+	for i, im := range c.Imports {
+		ent, err := e.importAt(uint32(i))
+		if err != nil {
+			return err
 		}
-	}
-	for i := range c.Imports {
-		if _, err := e.importAt(uint32(i)); err != nil {
+		if err := vis.add(ent, true); err != nil {
+			return err
+		}
+		if err := imports.add(im.Name, ent); err != nil {
 			return err
 		}
 	}
@@ -1230,8 +1496,17 @@ func (e *ctEnv) check() error {
 		if err := e.checkResourceCanon(cn); err != nil {
 			return err
 		}
+		if err := e.checkCanonOptions(cn); err != nil {
+			return err
+		}
+	}
+	if err := e.checkOuterAliases(); err != nil {
+		return err
 	}
 	if err := e.checkCoreIndices(); err != nil {
+		return err
+	}
+	if err := e.checkCoreDefinitions(); err != nil {
 		return err
 	}
 	if err := e.checkCoreInstances(); err != nil {
@@ -1246,8 +1521,17 @@ func (e *ctEnv) check() error {
 			}
 		}
 	}
-	for i := range e.comp.Exports {
-		if _, err := e.exportAt(uint32(i)); err != nil {
+	exports := &e.names[1]
+	exports.kind = "export"
+	for i, ex := range e.comp.Exports {
+		ent, err := e.exportAt(uint32(i))
+		if err != nil {
+			return err
+		}
+		if err := vis.add(ent, false); err != nil {
+			return err
+		}
+		if err := exports.add(ex.Name, ent); err != nil {
 			return err
 		}
 	}

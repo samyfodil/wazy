@@ -58,7 +58,7 @@ func DecodeModule(
 		var ok bool
 		lastSectionID, ok = checkSectionOrder(sectionID, lastSectionID)
 		if !ok {
-			return nil, errors.New("invalid section order")
+			return nil, errors.New("section out of order")
 		}
 
 		sectionContentStart := offset

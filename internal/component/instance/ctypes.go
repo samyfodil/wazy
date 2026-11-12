@@ -104,6 +104,12 @@ type ctVal struct {
 	// res is an own's or borrow's resource.
 	res *ctResource
 
+	// id is the identity of the type index a record, variant, enum or flags
+	// was named by, or an own's or borrow's resource was: which import,
+	// export or definition introduced it (ctTypeID). Subtyping ignores it;
+	// external visibility and resource names go by it.
+	id *ctTypeID
+
 	// inline holds elems when there are no more than two, as for every
 	// list, option, result and map: one allocation for the type, not two.
 	inline [2]*ctVal
@@ -216,6 +222,46 @@ type ctType struct {
 	fn   *ctFunc
 	inst *ctInstance
 	comp *ctComponent
+
+	// id is a resource type's or nominal value type's identity (ctTypeID);
+	// from is the one it was made from, for a type an import or export
+	// introduces by naming another.
+	id, from *ctTypeID
+}
+
+// ctTypeID is the identity wasmparser gives each type a definition, import
+// or export introduces: two indices for one resource or record differ when
+// one is the other exported under a name. A component may export only what
+// it names by an exported index, and an annotated func must use the resource
+// its name names.
+type ctTypeID struct{ _ byte }
+
+// ctNominal reports whether v's kind must be named to be imported or
+// exported: a record, variant, enum or flags.
+func ctNominal(v *ctVal) bool {
+	switch v.kind {
+	case ctvRecord, ctvVariant, ctvEnum, ctvFlags:
+		return true
+	}
+	return false
+}
+
+// ctIdentified gives t an identity: one of its own for a new name of a
+// resource or nominal value type, which an import or export introduces.
+func ctIdentified(t ctType) ctType {
+	switch {
+	case t.res != nil:
+		t.from, t.id = t.id, &ctTypeID{}
+	case t.val != nil && ctNominal(t.val):
+		// The copy and its identity, in one allocation.
+		n := &struct {
+			v  ctVal
+			id ctTypeID
+		}{v: *t.val}
+		n.v.id = &n.id
+		t.val, t.from, t.id = &n.v, t.id, &n.id
+	}
+	return t
 }
 
 func (t ctType) desc() string {
@@ -395,11 +441,11 @@ func (s ctSubst) typ(t ctType) ctType {
 	switch {
 	case t.res != nil:
 		if n, ok := s[t.res]; ok {
-			return ctType{res: n}
+			return ctType{res: n, id: t.id, from: t.from}
 		}
 		return t
 	case t.val != nil:
-		return ctType{val: s.val(t.val)}
+		return ctType{val: s.val(t.val), id: t.id, from: t.from}
 	case t.fn != nil:
 		return ctType{fn: s.fn(t.fn)}
 	case t.inst != nil:

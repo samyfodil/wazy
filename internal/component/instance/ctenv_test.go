@@ -35,9 +35,9 @@ func TestCTEnvCheck(t *testing.T) {
 		// Outer aliases.
 		"outer_count_too_big":          "invalid outer alias count of 5",
 		"outer_index_oob":              "unknown type 9: type index out of bounds",
-		"outer_resource":               "type index 0 refers to resources not defined in the current component",
-		"outer_func_with_resource":     "type index 2 refers to resources not defined in the current component",
-		"outer_instance_with_resource": "type index 1 refers to resources not defined in the current component",
+		"outer_resource":               "type index 0: cannot alias outer type which transitively refers to resources not defined in the current component",
+		"outer_func_with_resource":     "type index 2: cannot alias outer type which transitively refers to resources not defined in the current component",
+		"outer_instance_with_resource": "type index 1: cannot alias outer type which transitively refers to resources not defined in the current component",
 		// A resource a component or instance type binds is not free in it,
 		// so such a type crosses into a nested component.
 		"outer_component_bound": "",
@@ -46,7 +46,7 @@ func TestCTEnvCheck(t *testing.T) {
 		"component_outer_bad":   "invalid outer alias count of 3",
 		// Value and func types.
 		"valref_oob":          "unknown type 9: type index out of bounds",
-		"valref_not_value":    "type index 0 is a func, not a defined value type",
+		"valref_not_value":    "type index 0 is not a defined type",
 		"record_second_field": "unknown type 9: type index out of bounds",
 		"param_oob":           "parameter `x`: unknown type 9",
 		"result_oob":          "result: unknown type 9",
@@ -70,14 +70,14 @@ func TestCTEnvCheck(t *testing.T) {
 		"reexports":       "",
 		// A definition naming itself: the index is not yet defined.
 		"import_self_type":     "unknown import 0: import index out of bounds (it names the definition it is part of)",
-		"export_self_instance": "unknown export 0: export index out of bounds (it names the definition it is part of)",
+		"export_self_instance": "export `i`: unknown instance 0: instance index out of bounds",
 		// Export ascriptions: checked against the item, and -- for `(sub
 		// resource)` -- a fresh resource, for a resource item only.
 		"ascribe_mismatch":          "ascribed type of export is not compatible with item's type: type mismatch for export `g`",
 		"ascribe_oob":               "ascribed type of export is not compatible with item's type: unknown type 9",
 		"ascribe_resource":          "export `v`: ascribed type of export is not compatible with item's type: type mismatch for export `v`: expected resource, found defined type",
 		"ascribe_instance":          "",
-		"local_resource_unexported": "local resource type found in export but not exported itself",
+		"local_resource_unexported": "func not valid to be used as export",
 		"core_arg_later":            "core instance 0: unknown core instance 5: instance index out of bounds",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -100,7 +100,7 @@ func TestTypeCheckReusesEnvs(t *testing.T) {
 			requireSubErr(t, typeCheck(decodeCTEnvFixture(t, fixture), &config{}), want)
 		}
 		requireSubErr(t, typeCheck(good, &config{}), "")
-		requireSubErr(t, typeCheck(bad, &config{}), "local resource type found in export but not exported itself")
+		requireSubErr(t, typeCheck(bad, &config{}), "func not valid to be used as export")
 		requireSubErr(t, coreLinkError(decodeCTEnvFixture(t, "core_arg_later"), -1, nil), "unknown core instance 5: instance index out of bounds")
 	}
 }

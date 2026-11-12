@@ -19,6 +19,9 @@ var (
 
 	// Layer byte: 0x01 0x00 means this is a component, not a core module (which has 0x00 0x00).
 	componentLayer = []byte{0x01, 0x00}
+
+	// coreModuleVersion is a core module's version, 1, and layer, 0.
+	coreModuleVersion = []byte{0x01, 0x00, 0x00, 0x00}
 )
 
 var (
@@ -26,7 +29,7 @@ var (
 	ErrInvalidVersion     = errors.New("invalid version header")
 	ErrInvalidLayer       = errors.New("invalid layer header (expected component layer 0x01 0x00)")
 	ErrInvalidSectionID   = errors.New("invalid section id")
-	ErrTruncatedBinary    = errors.New("truncated binary")
+	ErrTruncatedBinary    = errors.New("unexpected end-of-file")
 )
 
 // Decode parses a WebAssembly Component Model container from a reader.
@@ -85,17 +88,22 @@ func decodeComponent(buf []byte) (*Component, error) {
 	}
 	offset = 4
 
-	// Validate component version (0x0d 0x00).
-	if len(buf) < offset+2 || !bytes.Equal(buf[offset:offset+2], componentVersion) {
+	// Validate component version (0x0d 0x00) and layer (0x01 0x00).
+	if len(buf) < offset+2 {
 		return nil, ErrInvalidVersion
 	}
-	offset += 2
-
-	// Validate component layer (0x01 0x00).
-	if len(buf) < offset+2 || !bytes.Equal(buf[offset:offset+2], componentLayer) {
-		return nil, ErrInvalidLayer
+	v := buf[offset:min(offset+4, len(buf))]
+	switch {
+	case bytes.Equal(v[:2], componentVersion):
+		if !bytes.Equal(v[2:], componentLayer) {
+			return nil, ErrInvalidLayer
+		}
+	case bytes.Equal(v, coreModuleVersion):
+		return nil, fmt.Errorf("%w: expected a version header for a component", ErrInvalidVersion)
+	default:
+		return nil, fmt.Errorf("%w: unknown binary version: %#x", ErrInvalidVersion, uint16(v[0])|uint16(v[1])<<8)
 	}
-	offset += 2
+	offset += 4
 
 	c := &Component{}
 
@@ -107,12 +115,22 @@ func decodeComponent(buf []byte) (*Component, error) {
 		sectionID := buf[offset]
 		offset++
 
+		if sectionID > 12 {
+			return nil, fmt.Errorf("malformed section id: %d", sectionID)
+		}
+
 		// Read section size as LEB128.
 		sectionSize, n, err := leb128.LoadUint32(buf[offset:])
+		if errors.Is(err, io.EOF) {
+			err = ErrTruncatedBinary
+		}
 		if err != nil {
 			return nil, fmt.Errorf("section %s: read size: %w", sectionIDName(sectionID), err)
 		}
 		offset += int(n)
+		if uint64(sectionSize) > uint64(len(buf)-offset) {
+			return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
+		}
 
 		sectionStart := offset
 
@@ -127,6 +145,11 @@ func decodeComponent(buf []byte) (*Component, error) {
 			// and here bytesRead is unconditionally set equal to sectionSize).
 			if sectionSize > uint32(len(buf)-offset) {
 				return nil, fmt.Errorf("section %s: %w", sectionIDName(sectionID), ErrTruncatedBinary)
+			}
+			// Its name must be there, and be UTF-8; nothing else in it is
+			// read.
+			if _, _, err := readLabel(buf[:offset+int(sectionSize)], offset); err != nil {
+				return nil, fmt.Errorf("section %s: name: %w", sectionIDName(sectionID), err)
 			}
 			offset += int(sectionSize)
 
@@ -184,6 +207,10 @@ func decodeComponent(buf []byte) (*Component, error) {
 			// The enclosing link is what makes the nested component's
 			// `alias outer` definitions resolvable -- see Component.Outer.
 			nested.Outer = c
+			nested.OuterBounds = SpaceSizes{
+				Types: uint32(len(c.TypeSpace)), CoreTypes: uint32(len(c.CoreTypeSpace)),
+				CoreModules: uint32(len(c.CoreModuleSpace)), Components: uint32(len(c.ComponentSpace)),
+			}
 			// Now that its outer aliases resolve, its types can be sized.
 			if err := nested.validateValueSizes(); err != nil {
 				return nil, fmt.Errorf("nested component[%d]: %w", len(c.NestedComponents), err)
@@ -448,7 +475,7 @@ func decodeTypeSection(buf []byte, offset int, sectionSize uint32) ([]Type, int,
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
-		return nil, offset, fmt.Errorf("type section: read %d bytes but section is only %d", bytesRead, sectionSize)
+		return nil, offset, fmt.Errorf("type section: %w: read %d bytes but section is only %d", ErrTruncatedBinary, bytesRead, sectionSize)
 	}
 	return types, offset, nil
 }
@@ -489,7 +516,7 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
-		return nil, offset, fmt.Errorf("import section: read %d bytes but section is only %d", bytesRead, sectionSize)
+		return nil, offset, fmt.Errorf("import section: %w: read %d bytes but section is only %d", ErrTruncatedBinary, bytesRead, sectionSize)
 	}
 	return imports, offset, nil
 }
@@ -533,13 +560,13 @@ func decodeExportSection(buf []byte, offset int, sectionSize uint32) ([]Export, 
 			}
 			exports[i].Ascribed = &d
 		default:
-			return nil, off2, fmt.Errorf("export[%d]: invalid type-ascription tag %#x", i, hasType)
+			return nil, off2, fmt.Errorf("export[%d]: %w", i, errLeadingByte(hasType, "optional component export type"))
 		}
 		offset = off2
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
-		return nil, offset, fmt.Errorf("export section: read %d bytes but section is only %d", bytesRead, sectionSize)
+		return nil, offset, fmt.Errorf("export section: %w: read %d bytes but section is only %d", ErrTruncatedBinary, bytesRead, sectionSize)
 	}
 	return exports, offset, nil
 }
@@ -552,6 +579,9 @@ func readSortidx(buf []byte, off int) (sort byte, idx uint32, _ int, err error) 
 	}
 	sort = buf[off]
 	off++
+	if sort > 0x05 {
+		return sort, 0, off, errLeadingByte(sort, "component external kind")
+	}
 	if sort == 0x00 { // core sort: one more discriminator byte
 		if off >= len(buf) {
 			return sort, 0, off, ErrTruncatedBinary
@@ -570,10 +600,20 @@ func readSortidx(buf []byte, off int) (sort byte, idx uint32, _ int, err error) 
 // wasm module is not parsed here (wazy's core decoder handles it).
 func decodeCoreModuleSection(buf []byte, offset int, sectionStart int, sectionSize uint32) (int, error) {
 	// Section 1 contains a single embedded core wasm module.
-	// We store it by its byte range but don't decode it here.
-	// Just advance the offset by sectionSize.
+	// We store it by its byte range but don't decode it here, past its
+	// header.
 	if sectionSize > uint32(len(buf)-offset) {
 		return offset, ErrTruncatedBinary
+	}
+	if sectionSize < 8 || !bytes.Equal(buf[offset:offset+4], magic) {
+		return offset, fmt.Errorf("magic header not detected")
+	}
+	switch v := buf[offset+4 : offset+8]; {
+	case bytes.Equal(v, coreModuleVersion):
+	case bytes.Equal(v[:2], componentVersion):
+		return offset, fmt.Errorf("expected a version header for a module")
+	default:
+		return offset, fmt.Errorf("unknown binary version: %#x", uint16(v[0])|uint16(v[1])<<8)
 	}
 	return offset + int(sectionSize), nil
 }
@@ -627,8 +667,11 @@ func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Co
 				offset = off
 
 				// Each arg has a 0x12 prefix byte (the instance sort)
-				if offset >= len(buf) || buf[offset] != 0x12 {
-					return nil, offset, fmt.Errorf("instance[%d] arg[%d]: expected 0x12 prefix", i, j)
+				if offset >= len(buf) {
+					return nil, offset, ErrTruncatedBinary
+				}
+				if buf[offset] != 0x12 {
+					return nil, offset, fmt.Errorf("instance[%d] arg[%d]: %w", i, j, errLeadingByte(buf[offset], "instantiation arg kind"))
 				}
 				offset++
 
@@ -683,14 +726,14 @@ func decodeCoreInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Co
 			instance.Exports = exports
 
 		default:
-			return nil, offset, fmt.Errorf("instance[%d]: invalid kind %#x", i, kind)
+			return nil, offset, fmt.Errorf("instance[%d]: %w", i, errLeadingByte(kind, "core instance"))
 		}
 
 		instances[i] = instance
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
-		return nil, offset, fmt.Errorf("core instance section: read %d bytes but section is only %d", bytesRead, sectionSize)
+		return nil, offset, fmt.Errorf("core instance section: %w: read %d bytes but section is only %d", ErrTruncatedBinary, bytesRead, sectionSize)
 	}
 	return instances, offset, nil
 }
@@ -783,14 +826,14 @@ func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instan
 			instance.Exports = exports
 
 		default:
-			return nil, offset, fmt.Errorf("instance[%d]: invalid kind %#x", i, kind)
+			return nil, offset, fmt.Errorf("instance[%d]: %w", i, errLeadingByte(kind, "instance"))
 		}
 
 		instances[i] = instance
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
-		return nil, offset, fmt.Errorf("instance section: read %d bytes but section is only %d", bytesRead, sectionSize)
+		return nil, offset, fmt.Errorf("instance section: %w: read %d bytes but section is only %d", ErrTruncatedBinary, bytesRead, sectionSize)
 	}
 	return instances, offset, nil
 }
@@ -817,7 +860,7 @@ func decodeAliasSection(buf []byte, offset int, sectionSize uint32) ([]AliasDef,
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
-		return nil, offset, fmt.Errorf("alias section: read %d bytes but section is only %d", bytesRead, sectionSize)
+		return nil, offset, fmt.Errorf("alias section: %w: read %d bytes but section is only %d", ErrTruncatedBinary, bytesRead, sectionSize)
 	}
 	return aliases, offset, nil
 }
@@ -866,7 +909,13 @@ func readAliasDef(buf []byte, offset int) (AliasDef, int, error) {
 		offset = off
 		alias.Name = name
 
-	case 0x02: // outer
+	case 0x02: // outer: a type, component, core type or core module
+		switch {
+		case alias.Sort == 0x00 && alias.CoreSort != 0x10 && alias.CoreSort != 0x11:
+			return alias, offset, errLeadingByte(alias.CoreSort, "component outer alias kind")
+		case alias.Sort != 0x00 && alias.Sort != 0x03 && alias.Sort != 0x04:
+			return alias, offset, errLeadingByte(alias.Sort, "component outer alias kind")
+		}
 		outerCount, n, err := leb128.LoadUint32(buf[offset:])
 		if err != nil {
 			return alias, offset, fmt.Errorf("outer count: %w", err)
@@ -882,7 +931,7 @@ func readAliasDef(buf []byte, offset int) (AliasDef, int, error) {
 		alias.OuterIndex = outerIdx
 
 	default:
-		return alias, offset, fmt.Errorf("invalid target kind %#x", alias.TargetKind)
+		return alias, offset, errLeadingByte(alias.TargetKind, "alias")
 	}
 	return alias, offset, nil
 }
@@ -911,8 +960,11 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 
 		switch kind {
 		case CanonKindLift: // lift: 0x00 coreidx opts typeidx
-			if offset >= len(buf) || buf[offset] != 0x00 {
-				return nil, offset, fmt.Errorf("canon[%d]: expected 0x00 prefix for lift", i)
+			if offset >= len(buf) {
+				return nil, offset, ErrTruncatedBinary
+			}
+			if buf[offset] != 0x00 {
+				return nil, offset, fmt.Errorf("canon[%d]: %w", i, errLeadingByte(buf[offset], "canonical function lift"))
 			}
 			offset++
 
@@ -939,8 +991,11 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			canon.TypeIdx = typeIdx
 
 		case CanonKindLower: // lower: 0x01 funcidx opts
-			if offset >= len(buf) || buf[offset] != 0x00 {
-				return nil, offset, fmt.Errorf("canon[%d]: expected 0x00 prefix for lower", i)
+			if offset >= len(buf) {
+				return nil, offset, ErrTruncatedBinary
+			}
+			if buf[offset] != 0x00 {
+				return nil, offset, fmt.Errorf("canon[%d]: %w", i, errLeadingByte(buf[offset], "canonical function lower"))
 			}
 			offset++
 
@@ -1142,14 +1197,14 @@ func decodeCanonSection(buf []byte, offset int, sectionSize uint32) ([]Canon, in
 			}
 
 		default:
-			return nil, offset, fmt.Errorf("canon[%d]: unknown canon kind %#x", i, kind)
+			return nil, offset, fmt.Errorf("canon[%d]: %w", i, errLeadingByte(kind, "canonical function"))
 		}
 
 		canons[i] = canon
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
-		return nil, offset, fmt.Errorf("canon section: read %d bytes but section is only %d", bytesRead, sectionSize)
+		return nil, offset, fmt.Errorf("canon section: %w: read %d bytes but section is only %d", ErrTruncatedBinary, bytesRead, sectionSize)
 	}
 	return canons, offset, nil
 }
@@ -1165,8 +1220,7 @@ func expectReservedZero(buf []byte, offset int) (int, error) {
 		return offset, ErrTruncatedBinary
 	}
 	if b := buf[offset]; b != 0x00 {
-		return offset, fmt.Errorf("reserved byte must be 0x00, got %#x "+
-			"(a pre-component-model#716 'cancellable' immediate?)", b)
+		return offset, fmt.Errorf("%w (a pre-component-model#716 'cancellable' immediate?)", errLeadingByte(b, "zero byte"))
 	}
 	return offset + 1, nil
 }
@@ -1221,7 +1275,7 @@ func decodeCanonOpts(buf []byte, offset int) ([]CanonOpt, int, error) {
 			opt.Idx = idx
 		case 0x06: // async: no data
 		default:
-			return nil, offset, fmt.Errorf("canonopt[%d]: unsupported (M1) kind %#x", i, optKind)
+			return nil, offset, fmt.Errorf("canonopt[%d]: %w", i, errLeadingByte(optKind, "canonical option"))
 		}
 
 		opts[i] = opt
@@ -1272,7 +1326,7 @@ func decodeStartSection(buf []byte, offset int, sectionSize uint32) (*Start, int
 	}
 
 	if bytesRead := offset - sectionStart; bytesRead > int(sectionSize) {
-		return nil, offset, fmt.Errorf("start section: read %d bytes but section is only %d", bytesRead, sectionSize)
+		return nil, offset, fmt.Errorf("start section: %w: read %d bytes but section is only %d", ErrTruncatedBinary, bytesRead, sectionSize)
 	}
 	return start, offset, nil
 }

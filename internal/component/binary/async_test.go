@@ -436,12 +436,12 @@ func TestDecodeThreadBuiltinsAndReservedByte(t *testing.T) {
 		entry []byte
 		want  string
 	}{
-		{"wait with the old cancellable flag", []byte{0x20, 0x01, 0x00}, "reserved byte must be 0x00, got 0x1"},
-		{"poll with the old cancellable flag", []byte{0x21, 0x01, 0x00}, "reserved byte must be 0x00, got 0x1"},
-		{"yield with the old cancellable flag", []byte{0x0c, 0x01}, "reserved byte must be 0x00, got 0x1"},
-		{"suspend-then-promote with a nonzero byte", []byte{0x2c, 0x02}, "reserved byte must be 0x00, got 0x2"},
+		{"wait with the old cancellable flag", []byte{0x20, 0x01, 0x00}, "invalid leading byte (0x1) for zero byte"},
+		{"poll with the old cancellable flag", []byte{0x21, 0x01, 0x00}, "invalid leading byte (0x1) for zero byte"},
+		{"yield with the old cancellable flag", []byte{0x0c, 0x01}, "invalid leading byte (0x1) for zero byte"},
+		{"suspend-then-promote with a nonzero byte", []byte{0x2c, 0x02}, "invalid leading byte (0x2) for zero byte"},
 		{"truncated reserved byte", []byte{0x29}, ErrTruncatedBinary.Error()},
-		{"resource.drop async left the grammar", []byte{0x07, 0x00}, "unknown canon kind 0x7"},
+		{"resource.drop async left the grammar", []byte{0x07, 0x00}, "invalid leading byte (0x7) for canonical function"},
 		{"bad shared? byte", []byte{0x42, 0x02}, "invalid bool byte 0x2"},
 		{"spawn-ref without its type", []byte{0x40, 0x00}, "functype index"},
 		{"spawn-indirect without its table", []byte{0x41, 0x00, 0x03}, "table index"},

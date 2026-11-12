@@ -40,6 +40,8 @@ func WithComponentImport(name string, componentBytes []byte) Option {
 type ctCheckKey struct {
 	comp, supplied *binary.Component
 	name           string
+	// lifts keys checkLifts' verdict on comp rather than the type check's.
+	lifts bool
 }
 
 // typeCheck checks comp's instantiations -- each one's arguments against the

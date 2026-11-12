@@ -2,6 +2,7 @@ package binary
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -80,56 +81,56 @@ func TestReadCoreTypeDef_Refusals(t *testing.T) {
 		buf  []byte
 		want string
 	}{
-		{"empty", nil, "truncated"},
+		{"empty", nil, "unexpected end-of-file"},
 		{"bad prefix", []byte{0x00, 0x60}, "0x00 must prefix a non-final sub"},
-		{"bad comptype", []byte{0x7f}, "core:comptype: invalid tag 0x7f"},
+		{"bad comptype", []byte{0x7f}, "invalid leading byte (0x7f) for core composite type"},
 		{"module count", []byte{0x50, 0x80}, "core:moduletype"},
 		{"module count past the input", []byte{0x50, 0x01}, "count 1 exceeds remaining input"},
-		{"module truncated", []byte{0x50, 0x02, 0x03, 0x00, 0x00, 0x00}, "truncated"},
-		{"bad decl", []byte{0x50, 0x01, 0x7f}, "coremoduledecl: invalid tag 0x7f"},
+		{"module truncated", []byte{0x50, 0x02, 0x03, 0x00, 0x00, 0x00}, "unexpected end-of-file"},
+		{"bad decl", []byte{0x50, 0x01, 0x7f}, "invalid leading byte (0x7f) for type definition"},
 		{"import module name", []byte{0x50, 0x01, 0x00, 0x05}, "core:name"},
 		{"import field name", []byte{0x50, 0x01, 0x00, 0x00, 0x05}, "core:name"},
-		{"import desc", []byte{0x50, 0x01, 0x00, 0x00, 0x00}, "truncated"},
+		{"import desc", []byte{0x50, 0x01, 0x00, 0x00, 0x00}, "unexpected end-of-file"},
 		{"export name", []byte{0x50, 0x01, 0x03, 0x05}, "core:name"},
 		{"bad sort", []byte{0x50, 0x01, 0x03, 0x00, 0x09}, "core:externtype: invalid sort 0x9"},
-		{"func index", []byte{0x50, 0x01, 0x03, 0x00, 0x00}, "truncated"},
+		{"func index", []byte{0x50, 0x01, 0x03, 0x00, 0x00}, "unexpected end-of-file"},
 		{"table reftype", []byte{0x50, 0x01, 0x03, 0x00, 0x01, 0x40}, "core:valtype: invalid type 0x40"},
-		{"table limits", []byte{0x50, 0x01, 0x03, 0x00, 0x01, 0x70}, "truncated"},
+		{"table limits", []byte{0x50, 0x01, 0x03, 0x00, 0x01, 0x70}, "unexpected end-of-file"},
 		{"limits flags", []byte{0x50, 0x01, 0x03, 0x00, 0x02, 0x10}, "core:limits: invalid flags 0x10"},
-		{"limits min", []byte{0x50, 0x01, 0x03, 0x00, 0x02, 0x00}, "truncated"},
-		{"limits max", []byte{0x50, 0x01, 0x03, 0x00, 0x02, 0x01, 0x00}, "truncated"},
-		{"limits page size", []byte{0x50, 0x01, 0x03, 0x00, 0x02, 0x08, 0x00}, "truncated"},
+		{"limits min", []byte{0x50, 0x01, 0x03, 0x00, 0x02, 0x00}, "unexpected end-of-file"},
+		{"limits max", []byte{0x50, 0x01, 0x03, 0x00, 0x02, 0x01, 0x00}, "unexpected end-of-file"},
+		{"limits page size", []byte{0x50, 0x01, 0x03, 0x00, 0x02, 0x08, 0x00}, "unexpected end-of-file"},
 		{"limits min overflow", []byte{0x50, 0x01, 0x03, 0x00, 0x02, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, "overflow"},
-		{"global valtype", []byte{0x50, 0x01, 0x03, 0x00, 0x03}, "truncated"},
-		{"global mut missing", []byte{0x50, 0x01, 0x03, 0x00, 0x03, 0x7f}, "truncated"},
+		{"global valtype", []byte{0x50, 0x01, 0x03, 0x00, 0x03}, "unexpected end-of-file"},
+		{"global mut missing", []byte{0x50, 0x01, 0x03, 0x00, 0x03, 0x7f}, "unexpected end-of-file"},
 		{"global mut", []byte{0x50, 0x01, 0x03, 0x00, 0x03, 0x7f, 0x02}, "core:globaltype: invalid mutability 0x2"},
-		{"tag attribute missing", []byte{0x50, 0x01, 0x03, 0x00, 0x04}, "truncated"},
+		{"tag attribute missing", []byte{0x50, 0x01, 0x03, 0x00, 0x04}, "unexpected end-of-file"},
 		{"tag attribute", []byte{0x50, 0x01, 0x03, 0x00, 0x04, 0x01}, "core:tagtype: invalid attribute 0x1"},
-		{"alias truncated", []byte{0x50, 0x01, 0x02, 0x10}, "truncated"},
-		{"alias not outer type", []byte{0x50, 0x01, 0x02, 0x00, 0x01}, "only an outer type alias"},
-		{"alias count", []byte{0x50, 0x01, 0x02, 0x10, 0x01}, "truncated"},
-		{"alias index", []byte{0x50, 0x01, 0x02, 0x10, 0x01, 0x00}, "truncated"},
-		{"type decl", []byte{0x50, 0x01, 0x01, 0x50, 0x00, 0x00}, "core:comptype: invalid tag 0x0"},
-		{"rec group count", []byte{0x4e}, "truncated"},
-		{"rec group member missing", []byte{0x4e, 0x01}, "truncated"},
-		{"type decl missing", []byte{0x50, 0x01, 0x01}, "truncated"},
+		{"alias truncated", []byte{0x50, 0x01, 0x02, 0x10}, "unexpected end-of-file"},
+		{"alias not outer type", []byte{0x50, 0x01, 0x02, 0x00, 0x01}, "invalid leading byte (0x0) for outer alias kind"},
+		{"alias count", []byte{0x50, 0x01, 0x02, 0x10, 0x01}, "unexpected end-of-file"},
+		{"alias index", []byte{0x50, 0x01, 0x02, 0x10, 0x01, 0x00}, "unexpected end-of-file"},
+		{"type decl", []byte{0x50, 0x01, 0x01, 0x50, 0x00, 0x00}, "invalid leading byte (0x0) for core composite type"},
+		{"rec group count", []byte{0x4e}, "unexpected end-of-file"},
+		{"rec group member missing", []byte{0x4e, 0x01}, "unexpected end-of-file"},
+		{"type decl missing", []byte{0x50, 0x01, 0x01}, "unexpected end-of-file"},
 		{"rec group count overflow", []byte{0x4e, 0xff, 0xff, 0xff, 0xff, 0xff}, "overflow"},
-		{"prefixed sub body", []byte{0x00, 0x50, 0x00, 0x7f}, "core:comptype: invalid tag 0x7f"},
+		{"prefixed sub body", []byte{0x00, 0x50, 0x00, 0x7f}, "invalid leading byte (0x7f) for core composite type"},
 		{"sub supertype count overflow", []byte{0x4f, 0xff, 0xff, 0xff, 0xff, 0xff}, "overflow"},
 		{"sub supertype overflow", []byte{0x4f, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff}, "overflow"},
 		{"rec group member", []byte{0x4e, 0x01, 0x5e}, "rec group member 0"},
-		{"sub supertypes", []byte{0x4f}, "truncated"},
-		{"sub supertype", []byte{0x4f, 0x01}, "truncated"},
-		{"sub comptype", []byte{0x4f, 0x00}, "truncated"},
-		{"func params", []byte{0x60}, "truncated"},
+		{"sub supertypes", []byte{0x4f}, "unexpected end-of-file"},
+		{"sub supertype", []byte{0x4f, 0x01}, "unexpected end-of-file"},
+		{"sub comptype", []byte{0x4f, 0x00}, "unexpected end-of-file"},
+		{"func params", []byte{0x60}, "unexpected end-of-file"},
 		{"func param", []byte{0x60, 0x01, 0x40}, "core:valtype: invalid type 0x40"},
-		{"struct count", []byte{0x5f}, "truncated"},
+		{"struct count", []byte{0x5f}, "unexpected end-of-file"},
 		{"struct field", []byte{0x5f, 0x01, 0x40}, "core:valtype"},
-		{"field truncated", []byte{0x5e}, "truncated"},
-		{"field mut missing", []byte{0x5e, 0x78}, "truncated"},
+		{"field truncated", []byte{0x5e}, "unexpected end-of-file"},
+		{"field mut missing", []byte{0x5e, 0x78}, "unexpected end-of-file"},
 		{"field mut", []byte{0x5e, 0x78, 0x02}, "core:fieldtype: invalid mutability 0x2"},
-		{"valtype truncated", []byte{0x60, 0x01}, "truncated"},
-		{"heap type truncated", []byte{0x60, 0x01, 0x63}, "truncated"},
+		{"valtype truncated", []byte{0x60, 0x01}, "unexpected end-of-file"},
+		{"heap type truncated", []byte{0x60, 0x01, 0x63}, "unexpected end-of-file"},
 		{"heap type negative", []byte{0x60, 0x01, 0x63, 0x40}, "core:heaptype: invalid type -64"},
 		{"heap type cut short", []byte{0x60, 0x01, 0x63, 0x80}, "core:heaptype: EOF"},
 	} {
@@ -234,10 +235,10 @@ func TestCoreModuleExports(t *testing.T) {
 		want string
 	}{
 		{"section size", []byte{0x07}, "section 7"},
-		{"section past the end", []byte{0x07, 0x05, 0x00}, "section 7: truncated"},
+		{"section past the end", []byte{0x07, 0x05, 0x00}, "section 7: unexpected end-of-file"},
 		{"count", []byte{0x07, 0x01, 0x80}, "section 7: "},
 		{"name length", []byte{0x07, 0x02, 0x01, 0x80}, "section 7 entry 0"},
-		{"name past the end", []byte{0x07, 0x03, 0x01, 0x05, 'f'}, "section 7 entry 0: truncated"},
+		{"name past the end", []byte{0x07, 0x03, 0x01, 0x05, 'f'}, "section 7 entry 0: unexpected end-of-file"},
 		{"index", []byte{0x07, 0x04, 0x01, 0x01, 'f', 0x00}, "section 7 entry 0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,5 +250,75 @@ func TestCoreModuleExports(t *testing.T) {
 	}
 	if err := CoreModuleExports(head[:4], nil); err != ErrTruncatedBinary {
 		t.Fatalf("a module shorter than its header: %v", err)
+	}
+}
+
+func TestCoreModuleImports(t *testing.T) {
+	// (module (import "m" "f" (func)) (import "" "g" (global i32)))
+	mod := []byte{
+		0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00,
+		0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: () -> ()
+		0x02, 0x0d, 0x02,
+		0x01, 'm', 0x01, 'f', 0x00, 0x00,
+		0x00, 0x01, 'g', 0x03, 0x7f, 0x00,
+	}
+	var got []string
+	if err := CoreModuleImports(mod, func(m, n []byte) { got = append(got, string(m)+":"+string(n)) }); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "m:f,:g" {
+		t.Fatalf("imports = %v", got)
+	}
+	if err := CoreModuleImports(mod[:8], func([]byte, []byte) { t.Fatal("an import of a module with none") }); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		mod  []byte
+	}{
+		{"count past the input", []byte{0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00, 0x02, 0x01, 0x80}},
+		{"name past the input", []byte{0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00, 0x02, 0x03, 0x01, 0x05, 'm'}},
+		{"desc past the input", []byte{0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00, 0x02, 0x05, 0x01, 0x01, 'm', 0x01, 'f'}},
+		{"module name missing", []byte{0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00, 0x02, 0x01, 0x01}},
+		{"section past the input", []byte{0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00, 0x02, 0x09}},
+	} {
+		if err := CoreModuleImports(tc.mod, func([]byte, []byte) {}); err == nil {
+			t.Errorf("%s: no error", tc.name)
+		}
+	}
+}
+
+func TestCoreModuleSectionHeader(t *testing.T) {
+	section := func(mod ...byte) []byte {
+		return append(append(preamble(), 0x01, byte(len(mod))), mod...)
+	}
+	for _, tc := range []struct {
+		name, want string
+		buf        []byte
+	}{
+		{"no magic", "magic header not detected", section(0x01, 0x02, 0x03, 0x04, 0x01, 0x00, 0x00, 0x00)},
+		{"too short", "magic header not detected", section(0x00, 'a', 's', 'm')},
+		{"a component", "expected a version header for a module", section(0x00, 'a', 's', 'm', 0x0d, 0x00, 0x01, 0x00)},
+		{"version 2", "unknown binary version: 0x2", section(0x00, 'a', 's', 'm', 0x02, 0x00, 0x00, 0x00)},
+	} {
+		_, err := Decode(bytes.NewReader(tc.buf))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		name, want string
+		header     []byte
+	}{
+		{"a core module", "expected a version header for a component", []byte{0x01, 0x00, 0x00, 0x00}},
+		{"version 0xc", "unknown binary version: 0xc", []byte{0x0c, 0x00, 0x01, 0x00}},
+	} {
+		_, err := Decode(bytes.NewReader(append([]byte{0x00, 'a', 's', 'm'}, tc.header...)))
+		if err == nil || !strings.Contains(err.Error(), tc.want) || !errors.Is(err, ErrInvalidVersion) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+	if _, err := Decode(bytes.NewReader(append(preamble(), 0x00, 0x02, 0x01, 0xff))); err == nil || !strings.Contains(err.Error(), "malformed UTF-8 encoding") {
+		t.Errorf("custom section name: err = %v", err)
 	}
 }

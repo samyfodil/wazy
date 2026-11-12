@@ -2,7 +2,7 @@
   (core module $m
     (import "canon" "task.return" (func $tr (param i32)))
     (memory (export "mem") 1)
-    (func (export "run") (param $args i32) (result i32)
+    (func (export "run") (result i32)
       (i32.const 34)) ;; code=2 (WAIT), si=2
     (func (export "cb") (param i32 i32 i32) (result i32)
       (call $tr (i32.const 9))

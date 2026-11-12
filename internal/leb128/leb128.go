@@ -23,9 +23,9 @@ const (
 )
 
 var (
-	errOverflow32 = errors.New("overflows a 32-bit integer")
-	errOverflow33 = errors.New("overflows a 33-bit integer")
-	errOverflow64 = errors.New("overflows a 64-bit integer")
+	errOverflow32 = errors.New("integer too large: overflows a 32-bit integer")
+	errOverflow33 = errors.New("integer too large: overflows a 33-bit integer")
+	errOverflow64 = errors.New("integer too large: overflows a 64-bit integer")
 )
 
 // EncodeInt32 encodes the signed value into a buffer in LEB128 format
@@ -157,7 +157,7 @@ func LoadVecSize(buf []byte) (ret uint32, bytesRead uint64, err error) {
 		return 0, bytesRead, err
 	}
 	if remaining := uint64(len(buf)) - bytesRead; uint64(ret) > remaining {
-		return 0, bytesRead, fmt.Errorf("count %d exceeds remaining input of %d bytes", ret, remaining)
+		return 0, bytesRead, fmt.Errorf("unexpected end-of-file: count %d exceeds remaining input of %d bytes", ret, remaining)
 	}
 	return ret, bytesRead, nil
 }

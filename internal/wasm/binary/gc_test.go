@@ -143,7 +143,7 @@ func TestDecodeDefinedType_GCErrors(t *testing.T) {
 		{
 			name:        "struct field count past the input",
 			input:       []byte{0x5f, 1},
-			expectedErr: "could not read field count: count 1 exceeds remaining input of 0 bytes",
+			expectedErr: "could not read field count: unexpected end-of-file: count 1 exceeds remaining input of 0 bytes",
 		},
 		{
 			name:        "truncated struct field type",

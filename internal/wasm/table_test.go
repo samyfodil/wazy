@@ -506,7 +506,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 					},
 				},
 			},
-			expectedErr: "element[0] couldn't evaluate offset expression: read i32: overflows a 32-bit integer",
+			expectedErr: "element[0] couldn't evaluate offset expression: read i32: integer too large: overflows a 32-bit integer",
 		},
 		{
 			name: "constant derived element offset - wrong ValType",
@@ -705,7 +705,7 @@ func TestModule_validateTable_Errors(t *testing.T) {
 					},
 				},
 			},
-			expectedErr: "element[0] couldn't evaluate offset expression: read index of global: overflows a 32-bit integer",
+			expectedErr: "element[0] couldn't evaluate offset expression: read index of global: integer too large: overflows a 32-bit integer",
 		},
 	}
 

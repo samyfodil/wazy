@@ -93,6 +93,23 @@ func (in *ctCoreInstance) export(name string) (ctCoreExtern, bool) {
 // experimental.CoreFeaturesThreads, which this package cannot import.
 const ctCoreFeatures = api.CoreFeaturesV3 | api.CoreFeatureSIMD<<1 | api.CoreFeatureMultiMemory | api.CoreFeatureMemory64
 
+// ctValidateModule validates an embedded core module, its code included,
+// with every feature: whether the runtime enables what it uses is the
+// compiler's to say, should anything instantiate it. An empty import module
+// name, which wazy's core decoder refuses, is renamed first, as the graph
+// renames it before instantiating (rewriteEmptyImportModuleName).
+func ctValidateModule(bin []byte) error {
+	bin, _, err := rewriteEmptyImportModuleName(bin, graphEmptyImportKey)
+	if err != nil {
+		return err
+	}
+	m, err := wasmbinary.DecodeModule(bin, ctCoreFeatures, wasm.MemoryLimitPages, false, 0, false, false)
+	if err != nil {
+		return err
+	}
+	return m.Validate(ctCoreFeatures)
+}
+
 // ctModuleOfDefinition reads the type of an embedded core module off its
 // sections.
 func ctModuleOfDefinition(bin []byte) (*ctModule, error) {
@@ -206,6 +223,18 @@ func ctModuleOfType(s ctCoreScope, mt *binary.CoreModuleType) (*ctModule, error)
 	var types []ctCoreType
 	out := &ctModule{}
 	for i, d := range mt.Decls {
+		switch d.Kind {
+		case binary.CoreModuleDeclImport:
+			if err := ctUniqueImport(out.imports, d.Module, d.Name); err != nil {
+				return nil, fmt.Errorf("module type declaration %d: %w", i, err)
+			}
+		case binary.CoreModuleDeclExport:
+			for _, ex := range out.exports {
+				if ex.name == d.Name {
+					return nil, fmt.Errorf("module type declaration %d: export name `%s` already defined", i, d.Name)
+				}
+			}
+		}
 		var err error
 		switch d.Kind {
 		case binary.CoreModuleDeclType:
@@ -247,6 +276,18 @@ func ctModuleOfType(s ctCoreScope, mt *binary.CoreModuleType) (*ctModule, error)
 	return out, nil
 }
 
+// ctUniqueImport refuses a two-level core import name another import in
+// list already has: a component names a core import by the two levels joined,
+// so the pair must be unique, which core wasm alone does not require.
+func ctUniqueImport(list []ctCoreImport, module, name string) error {
+	for _, im := range list {
+		if im.module == module && im.name == name {
+			return fmt.Errorf("duplicate import name `%s:%s`", module, name)
+		}
+	}
+	return nil
+}
+
 // ctCoreExternOf is the type a core:externtype declares, its func and tag
 // type indices naming types.
 func ctCoreExternOf(d binary.CoreExternType, types []ctCoreType) (ctCoreExtern, error) {
@@ -254,7 +295,10 @@ func ctCoreExternOf(d binary.CoreExternType, types []ctCoreType) (ctCoreExtern, 
 	r := &ctBytes{b: d.Bytes}
 	switch d.Kind {
 	case 0x00, 0x04: // func, tag
-		if u32.OutOfRange(d.TypeIndex, len(types)) || types[d.TypeIndex].fn == nil {
+		if u32.OutOfRange(d.TypeIndex, len(types)) {
+			return x, fmt.Errorf("unknown type %d: type index out of bounds", d.TypeIndex)
+		}
+		if types[d.TypeIndex].fn == nil {
 			return x, fmt.Errorf("type index %d is not a function type", d.TypeIndex)
 		}
 		x.fn = types[d.TypeIndex].fn
@@ -263,11 +307,35 @@ func ctCoreExternOf(d binary.CoreExternType, types []ctCoreType) (ctCoreExtern, 
 		r.limits(&x)
 	case 0x02: // memory: limits
 		r.limits(&x)
+		if err := ctMemoryLimits(&x); err != nil {
+			return x, err
+		}
 	default: // 0x03 global: valtype mut
 		x.val = r.valType()
 		x.mutable = r.byte() == 0x01
 	}
 	return x, nil
+}
+
+// ctMemoryLimits checks a memory type's limits against the most pages its
+// address space holds: 4GiB of them for a 32-bit memory, 2**64 bytes' worth
+// for a 64-bit one.
+func ctMemoryLimits(x *ctCoreExtern) error {
+	bits := uint32(32)
+	if x.is64 {
+		bits = 64
+	}
+	if x.pageLog2 >= bits {
+		return nil
+	}
+	limit := uint64(1) << (bits - x.pageLog2)
+	if x.min <= limit && (!x.hasMax || x.max <= limit) {
+		return nil
+	}
+	if x.is64 {
+		return fmt.Errorf("memory size must be at most 2**%d pages", bits-x.pageLog2)
+	}
+	return fmt.Errorf("memory size must be at most %d pages (4GiB)", limit)
 }
 
 // ctBytes reads an encoding the binary package has already decoded -- a

@@ -114,7 +114,7 @@ func (b *typeBody) read(buf []byte, off int, component bool) (int, error) {
 		b.types = append(b.types, d.Type)
 	case TypeDeclImport, TypeDeclExport:
 		if d.Kind == TypeDeclImport && !component {
-			return off, fmt.Errorf("instancedecl: invalid tag %#x", byte(d.Kind))
+			return off, errLeadingByte(byte(d.Kind), "component or instance type declaration")
 		}
 		if d.Name, off, err = readExternName(buf, off); err != nil {
 			return off, err
@@ -158,7 +158,7 @@ func (b *typeBody) read(buf []byte, off int, component bool) (int, error) {
 		}
 		off, d.CoreType = off2, &ct
 	default:
-		return off, fmt.Errorf("instancedecl: invalid tag %#x", byte(d.Kind))
+		return off, errLeadingByte(byte(d.Kind), "component or instance type declaration")
 	}
 	b.decls = append(b.decls, d)
 	return off, nil

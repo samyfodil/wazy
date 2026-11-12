@@ -1,7 +1,9 @@
 package instance
 
 import (
+	"bytes"
 	"fmt"
+	"slices"
 
 	"github.com/samyfodil/wazy/internal/component/binary"
 	"github.com/samyfodil/wazy/internal/u32"
@@ -219,6 +221,74 @@ func (e *ctEnv) coreInstanceExports(k uint32, fn func(raw []byte, name string, k
 		}
 		for _, x := range m.exports {
 			fn(nil, x.name, x.ext.kind)
+		}
+	}
+	return nil
+}
+
+// checkCoreDefinitions checks every core type and core module the component
+// defines, whether or not anything uses it, as wasmparser validates each as
+// it reads it. A module's two-level import names must be unique, since a
+// component names an import by the two joined. A module no core instance of
+// this component instantiates is validated here; one that is, the core
+// compiler validates before any of its code can run.
+func (e *ctEnv) checkCoreDefinitions() error {
+	c := e.comp
+	for i, en := range c.CoreTypeSpace {
+		if en.Kind == binary.CoreTypeFromDefinition {
+			if _, err := e.coreTypeAt(uint32(i)); err != nil {
+				return err
+			}
+		}
+	}
+	if len(c.CoreModules) == 0 {
+		return nil
+	}
+	instantiated := make([]bool, len(c.CoreModules))
+	for _, ci := range c.CoreInstances {
+		if ci.Kind == 0x00 && !u32.OutOfRange(ci.ModuleIdx, len(c.CoreModuleSpace)) {
+			if en := c.CoreModuleSpace[ci.ModuleIdx]; en.Kind == binary.CoreModuleFromDefinition {
+				instantiated[en.Module] = true
+			}
+		}
+	}
+	// Each import's two names, as views of the module's bytes, sorted to
+	// put a duplicate next to the import it repeats.
+	names := e.coreImports
+	defer func() { e.coreImports = names }()
+	for i, cm := range c.CoreModules {
+		bin, err := coreModuleBytes(cm, c.Bytes)
+		if err != nil {
+			return err
+		}
+		names = names[:0]
+		err = binary.CoreModuleImports(bin, func(module, name []byte) {
+			names = append(names, [2][]byte{module, name})
+		})
+		if err == nil {
+			err = ctUniqueImports(names)
+		}
+		if err == nil && !instantiated[i] {
+			err = ctValidateModule(bin)
+		}
+		if err != nil {
+			return fmt.Errorf("core module %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// ctUniqueImports refuses two imports with the same two names.
+func ctUniqueImports(names [][2][]byte) error {
+	slices.SortFunc(names, func(a, b [2][]byte) int {
+		if c := bytes.Compare(a[0], b[0]); c != 0 {
+			return c
+		}
+		return bytes.Compare(a[1], b[1])
+	})
+	for j := 1; j < len(names); j++ {
+		if bytes.Equal(names[j][0], names[j-1][0]) && bytes.Equal(names[j][1], names[j-1][1]) {
+			return fmt.Errorf("duplicate import name `%s:%s`", names[j][0], names[j][1])
 		}
 	}
 	return nil

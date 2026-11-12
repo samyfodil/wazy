@@ -55,6 +55,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1297,6 +1298,126 @@ func finalizeBoundExport(be *boundExport, resolve abi.Resolver, abiCache *Compil
 	be.resultStep, be.resultNest, be.resultHasOwn = m.resultStep, m.resultNest, m.resultHasOwn
 }
 
+// checkLifts checks what wasmparser checks of each canon lift against the
+// core funcs it names, which only instantiation has the types of: the
+// realloc, post-return and callback options' signatures, and that the lifted
+// core func takes and returns what its func type flattens to. fnAt resolves a
+// core func index; a func it cannot resolve is the binding's to report.
+//
+// The verdict is comp's alone -- its lifts' core funcs come from its own
+// modules, or from modules whose types it declares and the type check holds
+// supplied ones to -- so a CompileCache keeps it, as it keeps the type
+// check's.
+func checkLifts(comp *binary.Component, cfg *config, resolve abi.Resolver, fnAt func(uint32) api.Function) error {
+	key := ctCheckKey{comp: comp, lifts: true}
+	if cfg.typeChecked(key) {
+		return nil
+	}
+	if err := checkLiftsOnce(comp, resolve, fnAt); err != nil {
+		return err
+	}
+	cfg.rememberTypeChecked(key)
+	return nil
+}
+
+func checkLiftsOnce(comp *binary.Component, resolve abi.Resolver, fnAt func(uint32) api.Function) error {
+	i32 := api.ValueTypeI32
+	for _, cn := range comp.Canons {
+		if cn.Kind != binary.CanonKindLift {
+			continue
+		}
+		fn := fnAt(cn.CoreFuncIdx)
+		if fn == nil {
+			continue
+		}
+		var async, callback bool
+		for _, op := range cn.Opts {
+			var want []api.ValueType
+			var wantResults []api.ValueType
+			var name string
+			switch op.Kind {
+			case ctOptAsync:
+				async = true
+				continue
+			case ctOptRealloc:
+				name, want, wantResults = "realloc", []api.ValueType{i32, i32, i32, i32}, []api.ValueType{i32}
+			case ctOptPostReturn:
+				name, want = "post-return", fn.Definition().ResultTypes()
+			case ctOptCallback:
+				callback = true
+				name, want, wantResults = "callback", []api.ValueType{i32, i32, i32}, []api.ValueType{i32}
+			default:
+				continue
+			}
+			if f := fnAt(op.Idx); f != nil && !sameCoreSig(f.Definition(), want, wantResults) {
+				return fmt.Errorf("component/instance: canonical option `%s` uses a core function with an incorrect signature", name)
+			}
+		}
+		td, err := comp.ResolveType(cn.TypeIdx)
+		if err != nil {
+			continue // the type check reports it
+		}
+		fd, ok := td.(binary.FuncDesc)
+		if !ok {
+			continue
+		}
+		params, results, err := abi.FlattenFunc(fd, resolve, "lift")
+		if err != nil {
+			continue // the bound export reports it when called (flattenErr)
+		}
+		// An async lift returns through task.return, and with a callback its
+		// core func returns the callback code.
+		switch {
+		case async && callback:
+			results = []string{"i32"}
+		case async:
+			results = nil
+		}
+		def := fn.Definition()
+		if got := def.ParamTypes(); !sameCoreTypes(params, got) {
+			return fmt.Errorf("component/instance: lowered parameter types `%s` do not match parameter types `%s` of core function %d", coreTypesDebug(params), valueTypesDebug(got), cn.CoreFuncIdx)
+		}
+		if got := def.ResultTypes(); !sameCoreTypes(results, got) {
+			return fmt.Errorf("component/instance: lowered result types `%s` do not match result types `%s` of core function %d", coreTypesDebug(results), valueTypesDebug(got), cn.CoreFuncIdx)
+		}
+	}
+	return nil
+}
+
+func sameCoreSig(def api.FunctionDefinition, params, results []api.ValueType) bool {
+	return slices.Equal(def.ParamTypes(), params) && slices.Equal(def.ResultTypes(), results)
+}
+
+func sameCoreTypes(flat []string, types []api.ValueType) bool {
+	if len(flat) != len(types) {
+		return false
+	}
+	for i, t := range types {
+		if api.ValueTypeName(t) != flat[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// coreTypesDebug and valueTypesDebug format core types as wasmparser's
+// messages do: `[I32, I64]`.
+func coreTypesDebug(flat []string) string {
+	out := make([]string, len(flat))
+	for i, t := range flat {
+		out[i] = strings.ToUpper(t)
+	}
+	return "[" + strings.Join(out, ", ") + "]"
+}
+
+func valueTypesDebug(types []api.ValueType) string {
+	out := make([]string, len(types))
+	for i, t := range types {
+		out[i] = api.ValueTypeName(t)
+	}
+	return coreTypesDebug(out)
+}
+
 // Instantiate decodes componentBytes as a WebAssembly component, instantiates
 // its embedded core module(s) into r (registering caller-provided host
 // implementations for any imports), and wires up the export -> canon lift ->
@@ -1352,7 +1473,7 @@ func Instantiate(ctx context.Context, r wazy.Runtime, componentBytes []byte, opt
 		// single-module, no-import, no-canon-lower case.
 		return instantiateGraph(ctx, r, comp, componentBytes, cfg)
 	}
-	return instantiateComponent(ctx, r, comp, componentBytes)
+	return instantiateComponentWith(ctx, r, comp, componentBytes, cfg)
 }
 
 // needsGraphPath and needsImportPath together select the graph engine
@@ -1439,6 +1560,13 @@ func needsImportPath(comp *binary.Component) bool {
 		if cn.Kind != 0x00 { // anything other than canon lift needs the general wiring path
 			return true
 		}
+		// The trivial path binds a lift's core func and string encoding; a
+		// memory, realloc, post-return or async option is the graph's.
+		for _, op := range cn.Opts {
+			if op.Kind > ctOptLatin1UTF16 {
+				return true
+			}
+		}
 	}
 	if len(comp.CoreInstances) != 1 || len(comp.CoreInstances[0].Args) > 0 {
 		return true
@@ -1451,6 +1579,12 @@ func needsImportPath(comp *binary.Component) bool {
 // against a hand-built binary.Component, without needing binary.Decode to
 // produce each specific (often hard-to-construct) shape from real wasm bytes.
 func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte) (*Instance, error) {
+	return instantiateComponentWith(ctx, r, comp, componentBytes, &config{})
+}
+
+// instantiateComponentWith is instantiateComponent with cfg, whose
+// CompileCache remembers that comp's lifts were checked.
+func instantiateComponentWith(ctx context.Context, r wazy.Runtime, comp *binary.Component, componentBytes []byte, cfg *config) (*Instance, error) {
 	if len(comp.Imports) > 0 {
 		return nil, fmt.Errorf("component/instance: component declares %d import(s); use the import-aware path", len(comp.Imports))
 	}
@@ -1508,13 +1642,22 @@ func instantiateComponent(ctx context.Context, r wazy.Runtime, comp *binary.Comp
 		core.Close(ctx) //nolint:errcheck
 		return nil, err
 	}
+	resolve := typeResolver(comp)
+	if err := checkLifts(comp, cfg, resolve, func(idx uint32) api.Function {
+		if u32.OutOfRange(idx, len(coreFuncIdx)) {
+			return nil
+		}
+		return core.ExportedFunction(coreFuncIdx[idx])
+	}); err != nil {
+		core.Close(ctx) //nolint:errcheck
+		return nil, err
+	}
 	canonForExport, err := buildExportIndex(comp)
 	if err != nil {
 		core.Close(ctx) //nolint:errcheck
 		return nil, err
 	}
 
-	resolve := typeResolver(comp)
 	exports := make(map[string]*boundExport, len(canonForExport))
 	for name, canonIdx := range canonForExport {
 		canon := comp.Canons[canonIdx]
