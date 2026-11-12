@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/samyfodil/wazy/internal/component/binary"
 )
 
 // This file checks the names a component imports and exports by, as
@@ -77,6 +79,8 @@ type ctName struct {
 	// unannotated is the rest of a plain name: `r`, or `r.f` for a method or
 	// static.
 	unannotated string
+	// suffix is an interface name's `version-suffix`, if it has one.
+	suffix string
 }
 
 const (
@@ -296,8 +300,9 @@ func ctDependencyName(name string) bool {
 	return false
 }
 
-// add checks name, under which ent is imported or exported, and records it.
-func (cx *ctNameCx) add(name string, ent ctEntity) error {
+// add checks name and its attributes, under which ent is imported or
+// exported, and records it.
+func (cx *ctNameCx) add(name string, attrs *binary.NameAttrs, ent ctEntity) error {
 	if cx.kind == "import" && ctDependencyName(name) {
 		for _, prev := range cx.names {
 			if prev.raw == name {
@@ -311,6 +316,14 @@ func (cx *ctNameCx) add(name string, ent ctEntity) error {
 	if err != nil {
 		return fmt.Errorf("%s name `%s` is not a valid extern name: %w", cx.kind, name, err)
 	}
+	if attrs != nil {
+		if err := ctCheckAttrs(n, attrs, ent); err != nil {
+			return err
+		}
+		if attrs.HasVersionSuffix && !attrs.HasImplements {
+			n.suffix = attrs.VersionSuffix
+		}
+	}
 	if ent.sort == ctSortType && ent.ty.res != nil && !cx.bag {
 		cx.res = append(cx.res, ctResBinding{ent.ty.id, name})
 	}
@@ -319,22 +332,146 @@ func (cx *ctNameCx) add(name string, ent ctEntity) error {
 	}
 	for _, prev := range cx.names {
 		if prev.raw == name || n.sameAs(prev) {
-			return fmt.Errorf("%s name `%s` conflicts with previous name `%s`", cx.kind, name, prev.raw)
+			return fmt.Errorf("%s name `%s` conflicts with previous name `%s`", cx.kind, n.full(), prev.full())
 		}
 	}
 	cx.names = append(cx.names, n)
 	return nil
 }
 
-// validate is ComponentState::validate: an interface name's version parses,
-// and an annotated name names a func of its shape for a resource this
-// context names so.
+// full is n as wasmparser's with_version_suffix prints it: a versioned
+// interface name with its `version-suffix` put back.
+func (n ctName) full() string {
+	if strings.IndexByte(n.raw, '@') >= 0 {
+		return n.raw + n.suffix
+	}
+	return n.raw
+}
+
+// ctCheckAttrs is validate_extern's checks of a name's attributes: a
+// `version-suffix` and an `implements` only on an instance, the one non-empty
+// and finishing the version of an interface name, the other an interface
+// name for an instance with a plain name. An `external-id` may be anything.
+func ctCheckAttrs(n ctName, a *binary.NameAttrs, ent ctEntity) error {
+	if a.HasVersionSuffix {
+		switch {
+		case ent.sort != ctSortInstance:
+			return fmt.Errorf("only instances can have a `version-suffix`")
+		case a.VersionSuffix == "":
+			return fmt.Errorf("version suffix cannot be empty")
+		case !a.HasImplements && !n.iface:
+			return fmt.Errorf("`version-suffix` requires an interface name or `implements`")
+		}
+	}
+	if !a.HasImplements {
+		return nil
+	}
+	if n.iface || n.annotation != "" {
+		return fmt.Errorf("name `%s` is not valid with `implements`", n.raw)
+	}
+	if ent.sort != ctSortInstance {
+		return fmt.Errorf("only instances can have an `implements`")
+	}
+	in, err := ctParseName(a.Implements)
+	if err != nil {
+		return fmt.Errorf("`%s` is not a valid name: %w", a.Implements, err)
+	}
+	if !in.iface {
+		return fmt.Errorf("name `%s` must be an interface", a.Implements)
+	}
+	if err := ctIfaceVersion(a.Implements, a.VersionSuffix, a.HasVersionSuffix); err != nil {
+		return fmt.Errorf("invalid interface version: %w", err)
+	}
+	return nil
+}
+
+// ctIfaceVersion is InterfaceName::version: the version of interface name
+// raw, with suffix appended when it has one, is a valid semver, and suffix
+// is exactly what canonicalizing that splits off it.
+func ctIfaceVersion(raw, suffix string, hasSuffix bool) error {
+	at := strings.IndexByte(raw, '@')
+	switch {
+	case at < 0 && hasSuffix:
+		return fmt.Errorf("a version suffix requires the name to have a version")
+	case at < 0:
+		return nil
+	case !hasSuffix:
+		return ctSemver(raw[at+1:])
+	}
+	prefix := raw[at+1:]
+	full := prefix + suffix
+	if err := ctSemver(full); err != nil {
+		return err
+	}
+	if canon, rest, ok := ctSplitCanonicalVersion(full); !ok || canon != prefix || rest != suffix {
+		return fmt.Errorf("`%s` is not the canonical version of `%s`", prefix, full)
+	}
+	return nil
+}
+
+// ctSplitCanonicalVersion is split_canonical_version: version, a valid
+// semver, split into the canonical version an interface name carries and
+// the `version-suffix` that keeps the rest. Build metadata is always in the
+// suffix; a pre-release version is otherwise its own canonical version; and
+// otherwise the split is after a nonzero major, or else a nonzero minor.
+func ctSplitCanonicalVersion(version string) (canon, suffix string, ok bool) {
+	withoutBuild, build, hasBuild := strings.Cut(version, "+")
+	if hasBuild && !ctAllSegments(build, ctIsIdentifier) {
+		return "", "", false
+	}
+	core, pre, hasPre := strings.Cut(withoutBuild, "-")
+	if hasPre && !ctAllSegments(pre, ctIsIdentifier) {
+		return "", "", false
+	}
+	major, rest, _ := strings.Cut(core, ".")
+	minor, patch, _ := strings.Cut(rest, ".")
+	if strings.Count(core, ".") != 2 || !ctIsVersionNumber(major) || !ctIsVersionNumber(minor) || !ctIsVersionNumber(patch) {
+		return "", "", false
+	}
+	split := len(withoutBuild)
+	switch {
+	case !hasPre && major != "0":
+		split = len(major)
+	case !hasPre && minor != "0":
+		split = len(major) + 1 + len(minor)
+	}
+	return version[:split], version[split:], true
+}
+
+func ctAllSegments(s string, ok func(string) bool) bool {
+	for seg := range strings.SplitSeq(s, ".") {
+		if !ok(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+func ctIsIdentifier(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-') {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func ctIsVersionNumber(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s == "0" || s != "" && s[0] != '0'
+}
+
+// validate is ComponentState::validate: an interface name's version, with
+// its `version-suffix`, parses and splits so, and an annotated name names a
+// func of its shape for a resource this context names so.
 func (cx *ctNameCx) validate(n ctName, ent ctEntity) error {
 	if n.iface {
-		if at := strings.IndexByte(n.raw, '@'); at >= 0 {
-			if err := ctSemver(n.raw[at+1:]); err != nil {
-				return fmt.Errorf("invalid interface version: %w", err)
-			}
+		if err := ctIfaceVersion(n.raw, n.suffix, n.suffix != ""); err != nil {
+			return fmt.Errorf("invalid interface version: %w", err)
 		}
 		return nil
 	}

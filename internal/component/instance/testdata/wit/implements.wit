@@ -1,0 +1,21 @@
+package w:kv@0.2.6;
+
+interface s {
+  record r { a: u32 }
+  resource bucket {
+    get: func(k: string) -> r;
+  }
+  open: func(name: string) -> bucket;
+}
+
+world implements {
+  import inline: interface {
+    record r { a: u32 }
+    get: func() -> r;
+  }
+  import primary: s;
+  import secondary: s;
+  import s;
+  export s;
+  export store: s;
+}

@@ -906,6 +906,38 @@ func TestLogHello(t *testing.T) {
 	}
 }
 
+//go:embed testdata/implements_run.wasm
+var implementsRunWasm []byte
+
+// Instances that implement an interface are imported by their own names,
+// whatever the interface and its version suffix.
+func TestImplementsImports(t *testing.T) {
+	ctx := context.Background()
+	r := wazy.NewRuntime(ctx)
+	defer r.Close(ctx)
+
+	u32 := []binary.TypeDesc{binary.PrimitiveDesc{Prim: "u32"}}
+	get := func(scale uint32) HostFunc {
+		return func(_ context.Context, args []abi.Value) ([]abi.Value, error) {
+			return []abi.Value{args[0].(uint32) * scale}, nil
+		}
+	}
+	inst, err := Instantiate(ctx, r, implementsRunWasm,
+		WithImport("primary", "get", get(10), u32, u32),
+		WithImport("secondary", "get", get(100), u32, u32))
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	defer inst.Close(ctx)
+	results, err := inst.Call(ctx, "run")
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if len(results) != 1 || results[0] != uint32(210) {
+		t.Fatalf("run = %#v, want 210", results)
+	}
+}
+
 // TestTwoLogHelloCoexist proves two single-core host-import components (the
 // path that used to be instantiateWithImports, now routed through the graph
 // engine) coexist on one Runtime. Before internals were instantiated

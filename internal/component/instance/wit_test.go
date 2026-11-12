@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-// testdata/wit: shapes.wasm is shapes.wit made a component by
-// `wasm-tools component embed --dummy` and `wasm-tools component new`, and
-// shapes.want.wit what ComponentWIT prints for it, which binds as what
-// `wasm-tools component wit` prints does (see component/bindgen's
-// TestFromComponentMatchesWasmTools); the .wat files are built with
-// `wasm-tools parse`.
+// testdata/wit: shapes.wasm and implements.wasm are shapes.wit and
+// implements.wit made components by `wasm-tools component embed --dummy`
+// and `wasm-tools component new`, and their .want.wit what ComponentWIT
+// prints for them, which binds as what `wasm-tools component wit` prints
+// does (see component/bindgen's TestFromComponentMatchesWasmTools); the .wat
+// files are built with `wasm-tools parse`.
 //
 //go:embed testdata/wit
 var witFS embed.FS
@@ -56,6 +56,27 @@ func TestComponentWIT(t *testing.T) {
 	got, err = ComponentWIT(readWIT(t, "component_export.wasm"))
 	if err != nil || strings.Contains(got, "export c") || !strings.Contains(got, "export f: func();") {
 		t.Errorf("component export: %v\n%s", err, got)
+	}
+
+	// Instances that implement an interface are of it, which is printed
+	// once however many instances it has; an inline interface's types are
+	// its own.
+	got, err = ComponentWIT(readWIT(t, "implements.wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := string(readWIT(t, "implements.want.wit")); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	// A version suffix finishes the version it splits.
+	got, err = ComponentWIT(readWIT(t, "version_suffix.wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"  import a:b/c@1.2.3;\n", "  import x: a:b/d@0.2.1;\n", "package a:b@1.2.3 {\n", "package a:b@0.2.1 {\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
 	}
 }
 

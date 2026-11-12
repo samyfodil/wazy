@@ -219,6 +219,8 @@ type Type struct {
 type Import struct {
 	// Name is the import name (e.g., "wasi:io/streams#input-stream").
 	Name string
+	// Attrs are the name's attributes, or nil when it carries none.
+	Attrs *NameAttrs
 
 	// ExternType distinguishes the import kind (e.g., component, instance, func, value, type, module).
 	ExternType byte
@@ -243,6 +245,8 @@ type Import struct {
 type Export struct {
 	// Name is the export name.
 	Name string
+	// Attrs are the name's attributes, or nil when it carries none.
+	Attrs *NameAttrs
 
 	// ExternType distinguishes the export kind.
 	ExternType byte
@@ -297,6 +301,7 @@ type InstantiateArg struct {
 // InlineExport represents an inlined export in an instance.
 type InlineExport struct {
 	Name    string
+	Attrs   *NameAttrs
 	Sort    byte
 	SortIdx uint32
 }

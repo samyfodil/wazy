@@ -600,24 +600,60 @@ func TestSectionSizeMismatch(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestReadExternNameAttributes(t *testing.T) {
-	// Kind byte 0x02 (name + attributes) is explicitly unsupported (M1).
-	buf := []byte{0x02}
-	_, _, err := readExternName(buf, 0)
-	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
-		t.Errorf("got err=%v, want unsupported (M1) extern name attributes error", err)
+	name := []byte{0x02, 0x01, 'a'}
+	for _, tc := range []struct {
+		desc  string
+		attrs []byte
+		want  NameAttrs
+		err   string
+	}{
+		{desc: "none", attrs: []byte{0x00}},
+		{
+			desc:  "each once",
+			attrs: []byte{0x03, 0x00, 0x05, 'a', ':', 'b', '/', 'c', 0x01, 0x02, '.', '1', 0x02, 0x00},
+			want:  NameAttrs{Implements: "a:b/c", VersionSuffix: ".1", HasImplements: true, HasVersionSuffix: true},
+		},
+		{desc: "empty", attrs: []byte{0x02, 0x00, 0x00, 0x01, 0x00}, want: NameAttrs{HasImplements: true, HasVersionSuffix: true}},
+		{desc: "implements twice", attrs: []byte{0x02, 0x00, 0x00, 0x00, 0x00}, err: "duplicate 'implements' option in name"},
+		{desc: "version-suffix twice", attrs: []byte{0x02, 0x01, 0x00, 0x01, 0x00}, err: "duplicate 'version-suffix' option in name"},
+		{desc: "external-id twice", attrs: []byte{0x02, 0x02, 0x00, 0x02, 0x00}, err: "duplicate 'external-id' option in name"},
+		{desc: "unknown", attrs: []byte{0x01, 0x03, 0x00}, err: "invalid leading byte (0x3) for name option"},
+		{desc: "no option", attrs: []byte{0x01}, err: ErrTruncatedBinary.Error()},
+		{desc: "no count", attrs: nil, err: "name attribute count"},
+		{desc: "bad UTF-8", attrs: []byte{0x01, 0x02, 0x01, 0xff}, err: errMalformedUTF8.Error()},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			buf := append(append([]byte(nil), name...), tc.attrs...)
+			got, attrs, off, err := readExternName(buf, 0)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("got err=%v, want %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil || got != "a" || attrs == nil || *attrs != tc.want || off != len(buf) {
+				t.Fatalf("got %q %+v %d %v, want \"a\" %+v %d", got, attrs, off, err, tc.want, len(buf))
+			}
+		})
+	}
+	if _, _, _, err := readExternName([]byte{0x02, 0x05}, 0); !errors.Is(err, ErrTruncatedBinary) {
+		t.Errorf("truncated name: got err=%v", err)
+	}
+	if _, attrs, _, err := readExternName([]byte{0x00, 0x01, 'a'}, 0); err != nil || attrs != nil {
+		t.Errorf("plain name: got %+v %v, want no attributes", attrs, err)
 	}
 }
 
 func TestReadExternNameInvalidKind(t *testing.T) {
 	buf := []byte{0xff}
-	_, _, err := readExternName(buf, 0)
+	_, _, _, err := readExternName(buf, 0)
 	if err == nil || !strings.Contains(err.Error(), "invalid leading byte (0xff) for component name") {
 		t.Errorf("got err=%v, want invalid leading byte error", err)
 	}
 }
 
 func TestReadExternNameTruncated(t *testing.T) {
-	_, _, err := readExternName(nil, 0)
+	_, _, _, err := readExternName(nil, 0)
 	if !errors.Is(err, ErrTruncatedBinary) {
 		t.Errorf("got err=%v, want ErrTruncatedBinary", err)
 	}

@@ -493,7 +493,7 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 
 	imports := make([]Import, count)
 	for i := range count {
-		name, off, err := readExternName(buf, offset)
+		name, attrs, off, err := readExternName(buf, offset)
 		if err != nil {
 			return nil, off, fmt.Errorf("import[%d] name: %w", i, err)
 		}
@@ -502,7 +502,7 @@ func decodeImportSection(buf []byte, offset int, sectionSize uint32) ([]Import, 
 			return nil, off2, fmt.Errorf("import[%d] externdesc: %w", i, err)
 		}
 		offset = off2
-		imports[i] = Import{Name: name, ExternType: d.Sort}
+		imports[i] = Import{Name: name, Attrs: attrs, ExternType: d.Sort}
 		switch {
 		case d.Sort == 0x03 && d.Eq: // type import with an `eq N` bound
 			imports[i].TypeEqIndex = d.Index
@@ -535,7 +535,7 @@ func decodeExportSection(buf []byte, offset int, sectionSize uint32) ([]Export, 
 
 	exports := make([]Export, count)
 	for i := range count {
-		name, off, err := readExternName(buf, offset)
+		name, attrs, off, err := readExternName(buf, offset)
 		if err != nil {
 			return nil, off, fmt.Errorf("export[%d] name: %w", i, err)
 		}
@@ -549,7 +549,7 @@ func decodeExportSection(buf []byte, offset int, sectionSize uint32) ([]Export, 
 		}
 		hasType := buf[off2]
 		off2++
-		exports[i] = Export{Name: name, ExternType: sort, ExternIndex: idx}
+		exports[i] = Export{Name: name, Attrs: attrs, ExternType: sort, ExternIndex: idx}
 		switch hasType {
 		case 0x00:
 			// no ascribed type
@@ -809,7 +809,7 @@ func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instan
 
 			exports := make([]InlineExport, exportCount)
 			for j := range exportCount {
-				name, off, err := readExternName(buf, offset)
+				name, attrs, off, err := readExternName(buf, offset)
 				if err != nil {
 					return nil, off, fmt.Errorf("instance[%d] export[%d] name: %w", i, j, err)
 				}
@@ -821,7 +821,7 @@ func decodeInstanceSection(buf []byte, offset int, sectionSize uint32) ([]Instan
 				}
 				offset = off
 
-				exports[j] = InlineExport{Name: name, Sort: sort, SortIdx: idx}
+				exports[j] = InlineExport{Name: name, Attrs: attrs, Sort: sort, SortIdx: idx}
 			}
 			instance.Exports = exports
 
