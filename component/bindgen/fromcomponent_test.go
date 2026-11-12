@@ -11,7 +11,8 @@ import (
 )
 
 // testdata/fromcomponent holds components, and for each the WIT
-// `wasm-tools component wit` (1.253) prints for it: the oracle.
+// `wasm-tools component wit` (1.253, or 1.262 for implements, which 1.253
+// does not write) prints for it: the oracle.
 //
 //go:embed testdata/fromcomponent internal/kitchen/kitchen.wasm internal/storebind/store.wasm
 var fromComponent embed.FS
@@ -29,6 +30,7 @@ func TestFromComponentMatchesWasmTools(t *testing.T) {
 		{"fixedlistguest", "testdata/fromcomponent/fixedlistguest.wasm"},
 		{"async", "testdata/fromcomponent/async.wasm"},
 		{"shapes", "testdata/fromcomponent/shapes.wasm"},
+		{"implements", "testdata/fromcomponent/implements.wasm"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			wasm, err := fromComponent.ReadFile(c.wasm)

@@ -225,35 +225,89 @@ func TestCTNames(t *testing.T) {
 func TestCTNameCxDependencyNames(t *testing.T) {
 	cx := ctNameCx{kind: "import"}
 	for _, n := range []string{"unlocked-dep=<a:b>", "url=<https://x>", "integrity=<sha256-x>"} {
-		if err := cx.add(n, ctEntity{sort: ctSortFunc, fn: &ctFunc{}}); err != nil {
+		if err := cx.add(n, nil, ctEntity{sort: ctSortFunc, fn: &ctFunc{}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	err := cx.add("unlocked-dep=<a:b>", ctEntity{sort: ctSortFunc, fn: &ctFunc{}})
+	err := cx.add("unlocked-dep=<a:b>", nil, ctEntity{sort: ctSortFunc, fn: &ctFunc{}})
 	if err == nil || !strings.Contains(err.Error(), "conflicts with previous name") {
 		t.Fatalf("a dependency name twice: %v", err)
 	}
 	// Only an import may be one.
 	ex := ctNameCx{kind: "export"}
-	if err := ex.add("url=<x>", ctEntity{sort: ctSortFunc, fn: &ctFunc{}}); err == nil {
+	if err := ex.add("url=<x>", nil, ctEntity{sort: ctSortFunc, fn: &ctFunc{}}); err == nil {
 		t.Fatal("an export named as a dependency was accepted")
 	}
-	if err := ex.add("[constructor]r", ctEntity{sort: ctSortType}); err == nil || !strings.Contains(err.Error(), "item is not a func") {
+	if err := ex.add("[constructor]r", nil, ctEntity{sort: ctSortType}); err == nil || !strings.Contains(err.Error(), "item is not a func") {
 		t.Fatalf("an annotated non-func: %v", err)
 	}
 	asyncCtor := ctEntity{sort: ctSortFunc, fn: &ctFunc{async: true}}
-	if err := ex.add("[constructor]r", asyncCtor); err == nil || !strings.Contains(err.Error(), "constructor function cannot be async") {
+	if err := ex.add("[constructor]r", nil, asyncCtor); err == nil || !strings.Contains(err.Error(), "constructor function cannot be async") {
 		t.Fatalf("an async constructor: %v", err)
 	}
-	if err := ex.add("[method]r.m", ctEntity{sort: ctSortFunc, fn: &ctFunc{}}); err == nil || !strings.Contains(err.Error(), "at least one argument") {
+	if err := ex.add("[method]r.m", nil, ctEntity{sort: ctSortFunc, fn: &ctFunc{}}); err == nil || !strings.Contains(err.Error(), "at least one argument") {
 		t.Fatalf("a method of no params: %v", err)
 	}
 	notSelf := &ctFunc{params: []ctField{{name: "this", t: ctPrim("u32", false)}}}
-	if err := ex.add("[method]r.m", ctEntity{sort: ctSortFunc, fn: notSelf}); err == nil || !strings.Contains(err.Error(), "called `self`") {
+	if err := ex.add("[method]r.m", nil, ctEntity{sort: ctSortFunc, fn: notSelf}); err == nil || !strings.Contains(err.Error(), "called `self`") {
 		t.Fatalf("a method without self: %v", err)
 	}
-	if err := ex.add("ns:pkg/i@x", ctEntity{sort: ctSortInstance, inst: &ctInstance{}}); err == nil || !strings.Contains(err.Error(), "invalid interface version") {
+	if err := ex.add("ns:pkg/i@x", nil, ctEntity{sort: ctSortInstance, inst: &ctInstance{}}); err == nil || !strings.Contains(err.Error(), "invalid interface version") {
 		t.Fatalf("a bad version: %v", err)
+	}
+}
+
+// wasmparser's test_split_canonical_version, and what is not a semver.
+func TestCTSplitCanonicalVersion(t *testing.T) {
+	for _, tc := range []struct{ version, canon, suffix string }{
+		{"1.2.3", "1", ".2.3"},
+		{"1.0.0", "1", ".0.0"},
+		{"101.201.301", "101", ".201.301"},
+		{"1.2.3+abc", "1", ".2.3+abc"},
+		{"0.2.1", "0.2", ".1"},
+		{"0.10.0+b.1", "0.10", ".0+b.1"},
+		{"0.0.1", "0.0.1", ""},
+		{"0.0.0", "0.0.0", ""},
+		{"0.0.1+b", "0.0.1", "+b"},
+		{"1.0.0-rc1", "1.0.0-rc1", ""},
+		{"0.2.6-rc.1", "0.2.6-rc.1", ""},
+		{"1.0.0-rc1+b", "1.0.0-rc1", "+b"},
+		{"1.0.0-a-b+c-d", "1.0.0-a-b", "+c-d"},
+	} {
+		if canon, suffix, ok := ctSplitCanonicalVersion(tc.version); !ok || canon != tc.canon || suffix != tc.suffix {
+			t.Errorf("%s: got %q %q %v, want %q %q", tc.version, canon, suffix, ok, tc.canon, tc.suffix)
+		}
+	}
+	for _, v := range []string{"0.1.0-a+b-c+d", "1.2", "1.x.3", "1.2.3.4", "01.2.3", "1.2.3-", "1.2.3-a..b", "1.2.3+"} {
+		if canon, suffix, ok := ctSplitCanonicalVersion(v); ok {
+			t.Errorf("%s: got %q %q, want no split", v, canon, suffix)
+		}
+	}
+}
+
+// Attributes on a dependency name are left alone, as the name is; on any
+// other they are checked, whatever context the name is in.
+func TestCTNameCxAttributes(t *testing.T) {
+	inst := ctEntity{sort: ctSortInstance, inst: &ctInstance{}}
+	cx := ctNameCx{kind: "import"}
+	if err := cx.add("unlocked-dep=<a:b>", &binary.NameAttrs{HasVersionSuffix: true}, inst); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		attrs binary.NameAttrs
+		want  string
+	}{
+		{"[static]r.f", binary.NameAttrs{Implements: "a:b/c", HasImplements: true}, "name `[static]r.f` is not valid with `implements`"},
+		{"a", binary.NameAttrs{Implements: "a:b/c@x", HasImplements: true}, "invalid interface version: unexpected character 'x'"},
+		{"a:b/c@0.2", binary.NameAttrs{}, "invalid interface version"},
+		{"a:b/d@0.2", binary.NameAttrs{VersionSuffix: ".1", HasVersionSuffix: true}, ""},
+		{"a:b/d@0.2", binary.NameAttrs{VersionSuffix: ".2", HasVersionSuffix: true}, "import name `a:b/d@0.2.2` conflicts with previous name `a:b/d@0.2.1`"},
+	} {
+		err := cx.add(tc.name, &tc.attrs, inst)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("%s %+v: %v, want %q", tc.name, tc.attrs, err, tc.want)
+		}
 	}
 }
 

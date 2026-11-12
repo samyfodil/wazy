@@ -552,7 +552,7 @@ func ctBuildDeclType(up ctScope, decls []binary.TypeDecl, component bool) (*ctIn
 					break
 				}
 			}
-			if err = names.add(d.Name, e); err != nil {
+			if err = names.add(d.Name, d.Attrs, e); err != nil {
 				break
 			}
 			*list = append(*list, ctNamed{name: d.Name, ent: e})
@@ -1175,7 +1175,7 @@ func (e *ctEnv) instantiate(def binary.Instance) (*ctInstance, error) {
 			if err != nil {
 				return nil, fmt.Errorf("export `%s`: %w", x.Name, err)
 			}
-			if err := names.add(x.Name, ent); err != nil {
+			if err := names.add(x.Name, x.Attrs, ent); err != nil {
 				return nil, err
 			}
 			in.exports = append(in.exports, ctNamed{name: x.Name, ent: ent})
@@ -1464,7 +1464,7 @@ func (e *ctEnv) check() error {
 		if err := vis.add(ent, true); err != nil {
 			return err
 		}
-		if err := imports.add(im.Name, ent); err != nil {
+		if err := imports.add(im.Name, im.Attrs, ent); err != nil {
 			return err
 		}
 	}
@@ -1531,7 +1531,7 @@ func (e *ctEnv) check() error {
 		if err := vis.add(ent, false); err != nil {
 			return err
 		}
-		if err := exports.add(ex.Name, ent); err != nil {
+		if err := exports.add(ex.Name, ex.Attrs, ent); err != nil {
 			return err
 		}
 	}

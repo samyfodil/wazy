@@ -101,22 +101,70 @@ func errLeadingByte(b byte, what string) error {
 	return fmt.Errorf("invalid leading byte (%#x) for %s", b, what)
 }
 
-// readExternName consumes an import/export name: a 0x00/0x01 kind byte, a
-// length, and the UTF-8 bytes. 0x02 (name + attributes) is not yet handled.
-func readExternName(buf []byte, off int) (string, int, error) {
+// NameAttrs are the attributes an extern name carries (Binary.md,
+// nameattributes 0x02): the interface an instance `implements` and the
+// `version-suffix` split off its interface version, each with whether it is
+// present. An `external-id` is read and dropped: nothing checks or uses it.
+type NameAttrs struct {
+	Implements, VersionSuffix       string
+	HasImplements, HasVersionSuffix bool
+}
+
+// readExternName consumes an import/export name: a 0x00/0x01 kind byte and
+// the name, or 0x02, the name and its attributes, which it returns too (nil
+// for the other kinds).
+func readExternName(buf []byte, off int) (string, *NameAttrs, int, error) {
 	if off >= len(buf) {
-		return "", off, ErrTruncatedBinary
+		return "", nil, off, ErrTruncatedBinary
 	}
 	kind := buf[off]
 	off++
 	switch kind {
 	case 0x00, 0x01:
-		return readLabel(buf, off)
+		name, off, err := readLabel(buf, off)
+		return name, nil, off, err
 	case 0x02:
-		return "", off, fmt.Errorf("unsupported (M1): extern name with attributes (0x02)")
 	default:
-		return "", off, errLeadingByte(kind, "component name")
+		return "", nil, off, errLeadingByte(kind, "component name")
 	}
+	name, off, err := readLabel(buf, off)
+	if err != nil {
+		return "", nil, off, err
+	}
+	count, n, err := leb128.LoadVecSize(buf[off:])
+	if err != nil {
+		return "", nil, off, fmt.Errorf("name attribute count: %w", err)
+	}
+	off += int(n)
+	attrs := &NameAttrs{}
+	var externalID bool
+	var id string
+	for range count {
+		if off >= len(buf) {
+			return "", nil, off, ErrTruncatedBinary
+		}
+		opt := buf[off]
+		var has *bool
+		var dst *string
+		switch opt {
+		case 0x00:
+			has, dst = &attrs.HasImplements, &attrs.Implements
+		case 0x01:
+			has, dst = &attrs.HasVersionSuffix, &attrs.VersionSuffix
+		case 0x02:
+			has, dst = &externalID, &id
+		default:
+			return "", nil, off + 1, errLeadingByte(opt, "name option")
+		}
+		if *has {
+			return "", nil, off, fmt.Errorf("duplicate '%s' option in name", [...]string{"implements", "version-suffix", "external-id"}[opt])
+		}
+		*has = true
+		if *dst, off, err = readLabel(buf, off+1); err != nil {
+			return "", nil, off, err
+		}
+	}
+	return name, attrs, off, nil
 }
 
 // ExternDesc is one externdesc of the binary format: what an import, an

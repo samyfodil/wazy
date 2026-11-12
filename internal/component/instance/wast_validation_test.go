@@ -22,6 +22,7 @@ import (
 var wastValidationSuites = []string{
 	"cm-validation-abi",
 	"cm-validation-annotated-names",
+	"cm-validation-attributes",
 	"cm-validation-core-modules",
 	"cm-validation-defined-types",
 	"cm-validation-extern-names",
@@ -32,6 +33,7 @@ var wastValidationSuites = []string{
 	"cm-validation-map",
 	"cm-validation-outer-alias",
 	"cm-validation-resources",
+	"cm-validation-version-suffix",
 	"cm-binary",
 	"wasm-tools-instantiate",
 	"wasm-tools-virtualize",
@@ -63,9 +65,6 @@ const (
 	// Wasmtime print it as written, and upstream's nyi.txt lists the suite as
 	// not passing on Wasmtime.
 	gapLowercasedName = "the suite expects the name lowercased, which no implementation prints"
-	// An extern name with attributes -- `implements`, a version suffix --
-	// is refused as a whole; decoding them is a change of its own.
-	gapAttributeNames = "extern names with attributes are not decoded yet"
 )
 
 // wastValidationGaps is the EXACT set of commands wazy answers differently
@@ -82,15 +81,6 @@ const (
 // accepts a root component export, both of which wasm-tools' validator
 // accepts too.
 var wastValidationGaps = map[string]map[string]wastValidationGap{
-	"cm-binary": {
-		// lines 1298, 1317: valid components importing names with attributes
-		"binary.110.wasm": {"extern name with attributes (0x02)", gapAttributeNames},
-		"binary.111.wasm": {"extern name with attributes (0x02)", gapAttributeNames},
-		// line 1399: invalid leading byte (0x3) for name option
-		"binary.115.wasm": {"extern name with attributes (0x02)", gapAttributeNames},
-		// line 1497: duplicate 'implements' option in name
-		"binary.123.wasm": {"extern name with attributes (0x02)", gapAttributeNames},
-	},
 	"cm-validation-kebab": {
 		// line 160: import name `foob-ar` conflicts with previous name `foo-bar`
 		"kebab.33.wasm": {"import name `FOOB-ar` conflicts with previous name `foo-bar`", gapLowercasedName},

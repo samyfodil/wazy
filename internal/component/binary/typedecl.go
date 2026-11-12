@@ -48,10 +48,11 @@ type TypeDecl struct {
 	// CoreType is the definition of a TypeDeclCoreType.
 	CoreType *CoreTypeDef
 
-	// Name and Desc are the name and the declared type of a TypeDeclImport
-	// or TypeDeclExport.
-	Name string
-	Desc ExternDesc
+	// Name, Attrs and Desc are the name, its attributes and the declared
+	// type of a TypeDeclImport or TypeDeclExport.
+	Name  string
+	Attrs *NameAttrs
+	Desc  ExternDesc
 }
 
 // typeBody is what reading a component or instance type's declarations
@@ -116,7 +117,7 @@ func (b *typeBody) read(buf []byte, off int, component bool) (int, error) {
 		if d.Kind == TypeDeclImport && !component {
 			return off, errLeadingByte(byte(d.Kind), "component or instance type declaration")
 		}
-		if d.Name, off, err = readExternName(buf, off); err != nil {
+		if d.Name, d.Attrs, off, err = readExternName(buf, off); err != nil {
 			return off, err
 		}
 		if d.Desc, off, err = readExternDesc(buf, off); err != nil {

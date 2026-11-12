@@ -1,0 +1,30 @@
+package root:component;
+
+world root {
+  import inline: interface {
+    record r {
+      a: u32,
+    }
+
+    get: func() -> r;
+  }
+  import primary: w:kv/s@0.2.6;
+  import secondary: w:kv/s@0.2.6;
+  import w:kv/s@0.2.6;
+
+  export w:kv/s@0.2.6;
+  export store: w:kv/s@0.2.6;
+}
+package w:kv@0.2.6 {
+  interface s {
+    resource bucket {
+      get: func(k: string) -> r;
+    }
+
+    record r {
+      a: u32,
+    }
+
+    open: func(name: string) -> bucket;
+  }
+}

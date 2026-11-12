@@ -41,13 +41,22 @@ func ComponentWIT(componentBytes []byte) (string, error) {
 	}
 	world := p.newScope("", "")
 	var imports, exports []string
+	importAttrs := make(map[string]*binary.NameAttrs, len(comp.Imports))
+	for _, im := range comp.Imports {
+		importAttrs[im.Name] = im.Attrs
+	}
+	exportAttrs := make(map[string]*binary.NameAttrs, len(comp.Exports))
+	for _, ex := range comp.Exports {
+		exportAttrs[ex.Name] = ex.Attrs
+	}
 	for _, side := range []struct {
-		list []ctNamed
-		out  *[]string
-		kw   string
-	}{{self.imports, &imports, "import"}, {self.exports, &exports, "export"}} {
+		list  []ctNamed
+		attrs map[string]*binary.NameAttrs
+		out   *[]string
+		kw    string
+	}{{self.imports, importAttrs, &imports, "import"}, {self.exports, exportAttrs, &exports, "export"}} {
 		for _, n := range side.list {
-			line, err := p.item(world, side.kw, n)
+			line, err := p.item(world, side.kw, n, side.attrs[n.name])
 			if err != nil {
 				return "", fmt.Errorf("wit: %s %q: %w", side.kw, n.name, err)
 			}
@@ -145,11 +154,20 @@ func (p *witPrinter) newScope(name, pkg string) *witScope {
 
 // item reads one import or export of the component, adding what it names
 // to the world, and returns the world's line for it.
-func (p *witPrinter) item(world *witScope, kw string, n ctNamed) (string, error) {
+func (p *witPrinter) item(world *witScope, kw string, n ctNamed, attrs *binary.NameAttrs) (string, error) {
 	switch n.ent.sort {
 	case ctSortInstance:
-		pkg, qualified := witPackageOf(n.name)
-		s := p.newScope(n.name, pkg)
+		iface := witInterfaceOf(n.name, attrs)
+		pkg, qualified := witPackageOf(iface)
+		line := fmt.Sprintf("%s %s;", kw, iface)
+		if attrs != nil && attrs.HasImplements && qualified {
+			line = fmt.Sprintf("%s %s: %s;", kw, witID(n.name), iface)
+		}
+		if i := slices.IndexFunc(p.ifaces, func(s *witScope) bool { return s.name == iface }); i >= 0 {
+			p.same(p.ifaces[i], n.ent.inst)
+			return line, nil
+		}
+		s := p.newScope(iface, pkg)
 		if err := p.instance(s, n.ent.inst); err != nil {
 			return "", err
 		}
@@ -162,7 +180,7 @@ func (p *witPrinter) item(world *witScope, kw string, n ctNamed) (string, error)
 		if !slices.Contains(p.pkgs, pkg) {
 			p.pkgs = append(p.pkgs, pkg)
 		}
-		return fmt.Sprintf("%s %s;", kw, n.name), nil
+		return line, nil
 	case ctSortFunc:
 		sig, err := p.funcSig(world, n.ent.fn, 0)
 		if err != nil {
@@ -177,6 +195,42 @@ func (p *witPrinter) item(world *witScope, kw string, n ctNamed) (string, error)
 		return "", nil
 	}
 	return "", fmt.Errorf("a %s is not something WIT can describe", ctSortDesc(n.ent.sort))
+}
+
+// witInterfaceOf is the interface an instance imported or exported under
+// name is, as WIT spells it: the one it `implements`, or else its name, with
+// its `version-suffix` put back.
+func witInterfaceOf(name string, attrs *binary.NameAttrs) string {
+	if attrs == nil {
+		return name
+	}
+	if attrs.HasImplements {
+		name = attrs.Implements
+	}
+	if strings.IndexByte(name, '@') >= 0 {
+		name += attrs.VersionSuffix
+	}
+	return name
+}
+
+// same reads another instance of the interface s describes: its types are
+// s's, under the names they are exported by.
+func (p *witPrinter) same(s *witScope, in *ctInstance) {
+	for _, e := range in.exports {
+		if e.ent.sort != ctSortType {
+			continue
+		}
+		switch t := e.ent.ty; {
+		case t.res != nil:
+			if _, ok := p.resOwner[t.res]; !ok {
+				p.resOwner[t.res] = witName{scope: s, name: e.name, res: t.res}
+			}
+		case t.val != nil && t.val.kind != ctvPrim:
+			if _, ok := p.valOwner[t.val]; !ok {
+				p.valOwner[t.val] = witName{scope: s, name: e.name, val: t.val}
+			}
+		}
+	}
 }
 
 // instance reads an instance type into s: its types first, then its funcs.
@@ -243,7 +297,7 @@ func (p *witPrinter) typeExport(s *witScope, name string, t ctType) error {
 		}
 		s.vals[v] = name
 		for _, owner := range p.byName[name] {
-			if owner.val != nil && owner.scope != s && ctValSub(v, owner.val) == nil {
+			if owner.val != nil && owner.scope != s && owner.scope.short != "" && ctValSub(v, owner.val) == nil {
 				s.uses = append(s.uses, witUse{owner.scope, owner.name, name})
 				return nil
 			}
