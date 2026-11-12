@@ -73,10 +73,8 @@ func TestIsValidMapKeyPrimitive(t *testing.T) {
 	}
 }
 
-// A map key outside the keytype grammar is a decode error -- both when it is
-// an inline primitive the spec excludes (f32) and when it is a type index
-// (which, per IsValidMapKeyPrimitive's doc, can never itself be a valid
-// keytype: every keytype is always spelled inline).
+// An inline map key outside the keytype grammar is a decode error; one by
+// type index is the type check's, which can resolve it.
 func TestReadDefvaltypeDesc_MapInvalidKey(t *testing.T) {
 	t.Run("excluded primitive (f32)", func(t *testing.T) {
 		buf := []byte{0x76, 0x79} // key: f32, value: u32
@@ -94,8 +92,8 @@ func TestReadDefvaltypeDesc_MapInvalidKey(t *testing.T) {
 
 	t.Run("key by type index", func(t *testing.T) {
 		buf := []byte{0x02, 0x79} // key: type index 2, value: u32
-		if _, _, err := readDefvaltypeDesc(buf, 0, 0x63); err == nil {
-			t.Fatal("expected an error for a map key given by type index")
+		if _, _, err := readDefvaltypeDesc(buf, 0, 0x63); err != nil {
+			t.Fatalf("a key by type index is the type check's to refuse: %v", err)
 		}
 	})
 }

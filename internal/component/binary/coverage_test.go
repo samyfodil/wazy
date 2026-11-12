@@ -307,17 +307,18 @@ func TestDumpWriteError(t *testing.T) {
 	}
 }
 
-// TestRawSectionRecordedForSkippedSection verifies that a genuinely unknown
-// section id is recorded in RawSections and skipped without decoding, via a
-// hand-crafted component with a single unknown section (id=200).
+// TestRawSectionRecordedForSkippedSection verifies that a section this
+// decoder does not model -- the value section, id 12 -- is recorded in
+// RawSections and skipped without decoding. A section id past the format's
+// is malformed (TestMalformedSectionID).
 func TestRawSectionRecordedForSkippedSection(t *testing.T) {
 	buf := preamble()
-	buf = append(buf, 200, 0x02, 0xaa, 0xbb) // section id=200, size=2, body=[0xaa,0xbb]
+	buf = append(buf, 12, 0x02, 0xaa, 0xbb) // section id=12, size=2, body=[0xaa,0xbb]
 	c, err := Decode(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if len(c.RawSections) != 1 || c.RawSections[0].ID != 200 || c.RawSections[0].Size != 2 {
+	if len(c.RawSections) != 1 || c.RawSections[0].ID != 12 || c.RawSections[0].Size != 2 {
 		t.Errorf("RawSections: got %+v, want one {ID:200, Size:2}", c.RawSections)
 	}
 }
@@ -389,9 +390,16 @@ func TestCustomSectionTruncatedBody(t *testing.T) {
 	}
 }
 
+func TestMalformedSectionID(t *testing.T) {
+	_, err := Decode(bytes.NewReader(append(preamble(), 200, 0)))
+	if err == nil || err.Error() != "malformed section id: 200" {
+		t.Errorf("got err=%v, want malformed section id: 200", err)
+	}
+}
+
 func TestUnknownSectionTruncatedBody(t *testing.T) {
-	// Unknown section (id=200) claims size 50 but supplies 0 bytes.
-	buf := append(preamble(), 200, 50)
+	// A skipped section (id=12) claims size 50 but supplies 0 bytes.
+	buf := append(preamble(), 12, 50)
 	_, err := Decode(bytes.NewReader(buf))
 	if !errors.Is(err, ErrTruncatedBinary) {
 		t.Errorf("got err=%v, want ErrTruncatedBinary", err)
@@ -603,8 +611,8 @@ func TestReadExternNameAttributes(t *testing.T) {
 func TestReadExternNameInvalidKind(t *testing.T) {
 	buf := []byte{0xff}
 	_, _, err := readExternName(buf, 0)
-	if err == nil || !strings.Contains(err.Error(), "invalid kind byte") {
-		t.Errorf("got err=%v, want invalid kind byte error", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid leading byte (0xff) for component name") {
+		t.Errorf("got err=%v, want invalid leading byte error", err)
 	}
 }
 
@@ -814,27 +822,20 @@ func TestReadOptValTypeRefTruncated(t *testing.T) {
 }
 
 func TestReadVariantCaseDescRefines(t *testing.T) {
+	// The grammar's `refines` left it: the byte after a case is 0x00.
 	t.Run("refines present", func(t *testing.T) {
-		// name len=1 "x", opt-valtype tag=0x00 (none), refines tag=0x01,
-		// refines index=0x00.
 		buf := []byte{0x01, 'x', 0x00, 0x01, 0x00}
-		c, off, err := readVariantCaseDesc(buf, 0)
-		if err != nil {
-			t.Fatalf("readVariantCaseDesc: %v", err)
-		}
-		if c.Name != "x" || c.Type != nil {
-			t.Errorf("case: got %+v", c)
-		}
-		if off != len(buf) {
-			t.Errorf("off=%d, want %d", off, len(buf))
+		_, _, err := readVariantCaseDesc(buf, 0)
+		if err == nil || !strings.Contains(err.Error(), "invalid leading byte (0x1) for zero byte required") {
+			t.Errorf("got err=%v, want the zero byte required", err)
 		}
 	})
 
 	t.Run("invalid refines tag", func(t *testing.T) {
 		buf := []byte{0x01, 'x', 0x00, 0xff}
 		_, _, err := readVariantCaseDesc(buf, 0)
-		if err == nil || !strings.Contains(err.Error(), "invalid tag") {
-			t.Errorf("got err=%v, want invalid tag error", err)
+		if err == nil || !strings.Contains(err.Error(), "invalid leading byte (0xff) for zero byte required") {
+			t.Errorf("got err=%v, want the zero byte required", err)
 		}
 	})
 
@@ -1015,7 +1016,7 @@ func TestReadInstanceDeclDesc(t *testing.T) {
 	t.Run("invalid tag", func(t *testing.T) {
 		buf := []byte{0xff}
 		_, err := readInstanceDeclDesc(buf, 0)
-		if err == nil || !strings.Contains(err.Error(), "invalid tag") {
+		if err == nil || !strings.Contains(err.Error(), "for component or instance type declaration") {
 			t.Errorf("got err=%v, want invalid tag error", err)
 		}
 	})
@@ -1108,8 +1109,8 @@ func TestReadDeftypeDescUnsupportedTag(t *testing.T) {
 	// 0x6c is not a defvaltype tag: it was union's, which the spec dropped.
 	buf := []byte{0x6c}
 	_, _, err := readDeftypeDesc(buf, 0)
-	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
-		t.Errorf("got err=%v, want unsupported (M1) defvaltype tag error", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid leading byte (0x6c) for component defined type") {
+		t.Errorf("got err=%v, want invalid leading byte error", err)
 	}
 }
 
@@ -1259,22 +1260,15 @@ func TestReadResultListDescUnnamedErrorPropagates(t *testing.T) {
 	}
 }
 
+// Named results left the grammar: 0x01 is no result, and 0x00 follows it.
 func TestReadResultListDescNamedWithElements(t *testing.T) {
-	// tag=named, count=2, ("x", u32), ("y", s32).
 	buf := []byte{0x01, 0x02, 0x01, 'x', 0x79, 0x01, 'y', 0x7a}
-	results, off, err := readResultListDesc(buf, 0)
-	if err != nil {
-		t.Fatalf("readResultListDesc: %v", err)
+	_, _, err := readResultListDesc(buf, 0)
+	if err == nil || !strings.Contains(err.Error(), "invalid leading byte (0x2) for number of results") {
+		t.Errorf("got err=%v, want the number of results refused", err)
 	}
-	if off != len(buf) {
-		t.Errorf("off=%d, want %d", off, len(buf))
-	}
-	if len(results.Named) != 2 || results.Named[0].Name != "x" || results.Named[0].Type.Primitive != "u32" ||
-		results.Named[1].Name != "y" || results.Named[1].Type.Primitive != "s32" {
-		t.Errorf("named results: got %+v", results.Named)
-	}
-	if results.Unnamed != nil {
-		t.Errorf("unnamed should be nil, got %v", results.Unnamed)
+	if _, _, err := readResultListDesc([]byte{0x01}, 0); err != ErrTruncatedBinary {
+		t.Errorf("got err=%v, want ErrTruncatedBinary", err)
 	}
 }
 
@@ -1699,7 +1693,7 @@ func TestDecodeAlias_Outer(t *testing.T) {
 	// sort=0x01 (func), target=0x02 (outer)
 	aliasBody := []byte{
 		0x01, // count = 1
-		0x01, // sort = func
+		0x03, // sort = type
 		0x02, // target kind = outer
 		0x01, // outer count = 1
 		0x00, // outer index = 0
@@ -1799,7 +1793,7 @@ func TestDecodeCanon_UnsupportedKind(t *testing.T) {
 	buf = append(buf, canonBody...)
 
 	_, err := Decode(bytes.NewReader(buf))
-	if err == nil || !strings.Contains(err.Error(), "unknown canon kind") {
+	if err == nil || !strings.Contains(err.Error(), "for canonical function") {
 		t.Fatalf("expected unknown canon kind error, got: %v", err)
 	}
 }
@@ -2030,7 +2024,7 @@ func TestDecodeCoreInstance_MissingPrefix(t *testing.T) {
 	buf = append(buf, coreInstBody...)
 
 	_, err := Decode(bytes.NewReader(buf))
-	if err == nil || !strings.Contains(err.Error(), "0x12 prefix") {
+	if err == nil || !strings.Contains(err.Error(), "for instantiation arg kind") {
 		t.Fatalf("expected 0x12 prefix error, got: %v", err)
 	}
 }
@@ -2128,7 +2122,7 @@ func TestDecodeAlias_TruncatedOuterCount(t *testing.T) {
 	buf := preamble()
 	aliasBody := []byte{
 		0x01, // count = 1
-		0x01, // sort = func
+		0x03, // sort = type
 		0x02, // target kind = outer
 		// missing outer count
 	}
@@ -2152,7 +2146,7 @@ func TestDecodeCanon_LiftInvalidPrefix(t *testing.T) {
 	buf = append(buf, canonBody...)
 
 	_, err := Decode(bytes.NewReader(buf))
-	if err == nil || !strings.Contains(err.Error(), "0x00 prefix") {
+	if err == nil || !strings.Contains(err.Error(), "for canonical function lift") {
 		t.Fatalf("expected 0x00 prefix error for lift, got: %v", err)
 	}
 }
@@ -2168,7 +2162,7 @@ func TestDecodeCanon_LowerInvalidPrefix(t *testing.T) {
 	buf = append(buf, canonBody...)
 
 	_, err := Decode(bytes.NewReader(buf))
-	if err == nil || !strings.Contains(err.Error(), "0x00 prefix") {
+	if err == nil || !strings.Contains(err.Error(), "for canonical function lower") {
 		t.Fatalf("expected 0x00 prefix error for lower, got: %v", err)
 	}
 }
@@ -2187,7 +2181,7 @@ func TestDecodeCanonOpts_UnsupportedKind(t *testing.T) {
 	buf = append(buf, canonBody...)
 
 	_, err := Decode(bytes.NewReader(buf))
-	if err == nil || !strings.Contains(err.Error(), "unsupported (M1)") {
+	if err == nil || !strings.Contains(err.Error(), "invalid leading byte (0xff) for canonical option") {
 		t.Fatalf("expected unsupported canon opt kind error, got: %v", err)
 	}
 }

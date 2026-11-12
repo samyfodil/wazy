@@ -1,7 +1,7 @@
 (component
   (core module $m
     (memory (export "mem") 1)
-    (func (export "run") (param i32) unreachable)
+    (func (export "run") unreachable)
     (func (export "ra") (param i32 i32 i32 i32) (result i32) unreachable))
   (type $ft (func async (result u32)))
   (core instance $i (instantiate $m))

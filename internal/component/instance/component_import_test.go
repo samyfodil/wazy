@@ -493,8 +493,11 @@ func TestComponentImport_ResourceThroughSuppliedComponent(t *testing.T) {
 	err = in.DropResource(ctx, "c", "counter", h[0].(uint32))
 	requireErrContains(t, err, "does not name a live resource")
 
+	// A method taking its resource by own is invalid in its own right, as
+	// wasm-tools validate says of counter_own too: refused before its type is
+	// compared with the import's.
 	_, err = Instantiate(ctx, r, root, WithComponentImport("counter", componentImportFixture(t, "counter_own")))
-	requireErrContains(t, err, "type mismatch for export `[method]counter.get`: type mismatch in function parameter `self`: expected borrow, found own")
+	requireErrContains(t, err, "the supplied component is invalid: export name `[method]counter.get` is not valid: function should take a first argument of `(borrow $T)`")
 }
 
 // Instantiations racing on one CompileCache share its decode of the

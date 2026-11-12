@@ -225,8 +225,11 @@ func readCoreModuleDecl(buf []byte, off int) (CoreModuleDecl, int, error) {
 		if off+1 >= len(buf) {
 			return d, off, ErrTruncatedBinary
 		}
-		if buf[off] != 0x10 || buf[off+1] != 0x01 {
-			return d, off, fmt.Errorf("core:alias: only an outer type alias (0x10 0x01) may appear in a module type, got %#x %#x", buf[off], buf[off+1])
+		if buf[off] != 0x10 {
+			return d, off, errLeadingByte(buf[off], "outer alias kind")
+		}
+		if buf[off+1] != 0x01 {
+			return d, off, errLeadingByte(buf[off+1], "outer alias target")
 		}
 		off += 2
 		if d.AliasCount, off, err = readU32(buf, off); err != nil {
@@ -241,7 +244,7 @@ func readCoreModuleDecl(buf []byte, off int) (CoreModuleDecl, int, error) {
 		d.Extern, off, err = readCoreExternType(buf, off)
 		return d, off, err
 	default:
-		return d, off, fmt.Errorf("coremoduledecl: invalid tag %#x", byte(d.Kind))
+		return d, off, errLeadingByte(byte(d.Kind), "type definition")
 	}
 }
 
@@ -374,7 +377,7 @@ func skipCompType(buf []byte, off int) (int, error) {
 	case 0x5e: // array
 		return skipFieldType(buf, off)
 	default:
-		return off, fmt.Errorf("core:comptype: invalid tag %#x", tag)
+		return off, errLeadingByte(tag, "core composite type")
 	}
 }
 
@@ -505,47 +508,89 @@ func skipU64(buf []byte, off int) (int, error) {
 	return off + int(n), nil
 }
 
+// coreSection returns the body of a core module's section id -- the bytes
+// after its size, up to the section's end -- stepping over every other
+// section by its size. ok is false when the module has none.
+func coreSection(module []byte, id byte) (body []byte, ok bool, err error) {
+	if len(module) < 8 {
+		return nil, false, ErrTruncatedBinary
+	}
+	off := 8 // magic and version
+	for off < len(module) {
+		sid := module[off]
+		size, end, err := readU32(module, off+1)
+		if err != nil {
+			return nil, false, fmt.Errorf("section %d: %w", sid, err)
+		}
+		if uint64(end)+uint64(size) > uint64(len(module)) {
+			return nil, false, fmt.Errorf("section %d: %w", sid, ErrTruncatedBinary)
+		}
+		off = end + int(size)
+		if sid == id {
+			return module[end:off], true, nil
+		}
+	}
+	return nil, false, nil
+}
+
 // CoreModuleExports calls fn with each export of a core module -- its name,
 // which aliases the module's bytes, and its sort -- reading the export
 // section alone: every other section, the code included, is stepped over by
 // its size. It is all a check of export names needs, and allocates nothing.
 func CoreModuleExports(module []byte, fn func(name []byte, kind byte)) error {
-	if len(module) < 8 {
-		return ErrTruncatedBinary
+	body, ok, err := coreSection(module, 7)
+	if !ok {
+		return err
 	}
-	off := 8 // magic and version
-	for off < len(module) {
-		id := module[off]
-		size, end, err := readU32(module, off+1)
-		if err != nil {
-			return fmt.Errorf("section %d: %w", id, err)
+	count, p, err := readU32(body, 0)
+	if err != nil {
+		return fmt.Errorf("section 7: %w", err)
+	}
+	for i := range count {
+		var n uint32
+		if n, p, err = readU32(body, p); err != nil {
+			return fmt.Errorf("section 7 entry %d: %w", i, err)
 		}
-		if uint64(end)+uint64(size) > uint64(len(module)) {
-			return fmt.Errorf("section %d: %w", id, ErrTruncatedBinary)
+		if uint64(p)+uint64(n) >= uint64(len(body)) {
+			return fmt.Errorf("section 7 entry %d: %w", i, ErrTruncatedBinary)
 		}
-		body := module[:end+int(size)]
-		off = end + int(size)
-		if id != 7 {
-			continue
+		name, kind := body[p:p+int(n)], body[p+int(n)]
+		if _, p, err = readU32(body, p+int(n)+1); err != nil {
+			return fmt.Errorf("section 7 entry %d: %w", i, err)
 		}
-		count, p, err := readU32(body, end)
-		if err != nil {
-			return fmt.Errorf("section 7: %w", err)
-		}
-		for i := range count {
+		fn(name, kind)
+	}
+	return nil
+}
+
+// CoreModuleImports calls fn with the two names of each import of a core
+// module, which alias the module's bytes, reading the import section alone,
+// as CoreModuleExports reads the export section.
+func CoreModuleImports(module []byte, fn func(module, name []byte)) error {
+	body, ok, err := coreSection(module, 2)
+	if !ok {
+		return err
+	}
+	count, p, err := readU32(body, 0)
+	if err != nil {
+		return fmt.Errorf("section 2: %w", err)
+	}
+	for i := range count {
+		var names [2][]byte
+		for j := range names {
 			var n uint32
 			if n, p, err = readU32(body, p); err != nil {
-				return fmt.Errorf("section 7 entry %d: %w", i, err)
+				return fmt.Errorf("section 2 entry %d: %w", i, err)
 			}
-			if uint64(p)+uint64(n) >= uint64(len(body)) {
-				return fmt.Errorf("section 7 entry %d: %w", i, ErrTruncatedBinary)
+			if uint64(p)+uint64(n) > uint64(len(body)) {
+				return fmt.Errorf("section 2 entry %d: %w", i, ErrTruncatedBinary)
 			}
-			name, kind := body[p:p+int(n)], body[p+int(n)]
-			if _, p, err = readU32(body, p+int(n)+1); err != nil {
-				return fmt.Errorf("section 7 entry %d: %w", i, err)
-			}
-			fn(name, kind)
+			names[j], p = body[p:p+int(n)], p+int(n)
 		}
+		if _, p, err = readCoreExternType(body, p); err != nil {
+			return fmt.Errorf("section 2 entry %d: %w", i, err)
+		}
+		fn(names[0], names[1])
 	}
 	return nil
 }

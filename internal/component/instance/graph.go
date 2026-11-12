@@ -787,13 +787,16 @@ func instantiateGraph(ctx context.Context, r wazy.Runtime, comp *binary.Componen
 		err = coreUpTo(uint32(len(comp.CoreInstances)))
 	}
 	if err == nil {
-		err = checkResourceDtors(comp, func(idx uint32) api.Function {
+		fnAt := func(idx uint32) api.Function {
 			mod, name, err := coreFuncTarget(int(idx))
 			if err != nil {
 				return nil
 			}
 			return safeExportedFunction(mod, name)
-		})
+		}
+		if err = checkResourceDtors(comp, fnAt); err == nil {
+			err = checkLifts(comp, cfg, resolve, fnAt)
+		}
 	}
 	if err != nil {
 		closeSubs()
@@ -2321,6 +2324,10 @@ func canonMemoryAndRealloc(canon binary.Canon, coreMemTarget func(int) (api.Modu
 			fn := mod.ExportedFunction(name)
 			if fn == nil {
 				return nil, nil, 0, fmt.Errorf("canon lower realloc option: core instance %q has no exported function %q", mod.Name(), name)
+			}
+			i32 := api.ValueTypeI32
+			if !sameCoreSig(fn.Definition(), []api.ValueType{i32, i32, i32, i32}, []api.ValueType{i32}) {
+				return nil, nil, 0, fmt.Errorf("canonical option `realloc` uses a core function with an incorrect signature")
 			}
 			reallocFn = fn
 		}

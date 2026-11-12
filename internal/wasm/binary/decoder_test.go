@@ -252,7 +252,7 @@ func TestDecodeModule_Errors(t *testing.T) {
 				wasm.SectionIDStart, 1, 0,
 				wasm.SectionIDStart, 1, 0,
 			),
-			expectedErr: `invalid section order`,
+			expectedErr: `section out of order`,
 		},
 		{
 			name: "redundant name section",

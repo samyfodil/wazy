@@ -122,6 +122,11 @@ type Component struct {
 	// dump a whole Component with it.
 	Outer *Component
 
+	// OuterBounds are the sizes of Outer's index spaces when this component
+	// was decoded: an `alias outer 1` can name only what Outer defined before
+	// it.
+	OuterBounds SpaceSizes
+
 	// Aliases bring names into scope (section 6).
 	Aliases []AliasDef
 
@@ -421,6 +426,11 @@ type Canon struct {
 	// then an empty opts vec, while a no-result task.return encodes as
 	// `09 01 00 00` (tag=0x01 named-list, count=0, then empty opts vec).
 	TaskReturnResult FuncResults
+}
+
+// SpaceSizes are the sizes of the index spaces an `alias outer` can name.
+type SpaceSizes struct {
+	Types, CoreTypes, CoreModules, Components uint32
 }
 
 // AliasDef represents an alias binding (section 6).

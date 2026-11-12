@@ -119,14 +119,10 @@ func (MapDesc) Kind() string { return "map" }
 
 // IsValidMapKeyPrimitive reports whether prim is one of the primitives the
 // Component Model spec's `keytype` grammar allows as a map key: bool, every
-// integer width, char, or string. It only ever sees MapDesc.Key.Primitive,
-// so it cannot itself resolve a key given by type index -- every keytype is,
-// however, a bare primitive a conformant producer always spells inline (see
-// readValTypeRef), so an index there (Key.Primitive == "") already names
-// something keytype does not permit: a composite, a resource handle, or a
-// stream/future. TypeTable.Map treats it that way for the one type index
-// that can occur in this codebase's own type tables (which never assign an
-// index to a primitive to begin with -- see TypeTable.Add).
+// integer width, char, or string. A key may also be a type index naming one
+// of these, which the type check resolves; TypeTable.Map refuses an index,
+// since this codebase's own type tables never assign one to a primitive (see
+// TypeTable.Add).
 func IsValidMapKeyPrimitive(prim string) bool {
 	switch prim {
 	case "bool", "s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64", "char", "string":
@@ -446,23 +442,14 @@ func readVariantCaseDesc(buf []byte, off int) (VariantCase, int, error) {
 	}
 	off = newOff
 
-	// option(refines:u32) — currently always absent in practice
+	// A 0x00 where the grammar once had option(refines:u32).
 	if off >= len(buf) {
 		return VariantCase{}, off, ErrTruncatedBinary
 	}
-	switch buf[off] {
-	case 0x00:
-		off++
-	case 0x01:
-		off++
-		_, m, e := leb128.LoadUint32(buf[off:])
-		if e != nil {
-			return VariantCase{}, off, e
-		}
-		off += int(m)
-	default:
-		return VariantCase{}, off, fmt.Errorf("variant case refines: invalid tag %#x", buf[off])
+	if buf[off] != 0x00 {
+		return VariantCase{}, off, errLeadingByte(buf[off], "zero byte required")
 	}
+	off++
 
 	return VariantCase{Name: name, Type: typ}, off, nil
 }
@@ -500,18 +487,16 @@ func readResultListDesc(buf []byte, off int) (FuncResults, int, error) {
 			return FuncResults{}, off, err
 		}
 		return FuncResults{Unnamed: &ref}, off, nil
-	case 0x01:
-		fields, off, err := readLabelValtypeVecDesc(buf, off)
-		if err != nil {
-			return FuncResults{}, off, err
+	case 0x01: // no result: 0x01 0x00, where a named list once was
+		if off >= len(buf) {
+			return FuncResults{}, off, ErrTruncatedBinary
 		}
-		results := make([]FuncResult, len(fields))
-		for i, f := range fields {
-			results[i] = FuncResult{Name: f.Name, Type: f.Type}
+		if buf[off] != 0x00 {
+			return FuncResults{}, off, errLeadingByte(buf[off], "number of results")
 		}
-		return FuncResults{Named: results}, off, nil
+		return FuncResults{}, off + 1, nil
 	default:
-		return FuncResults{}, off, fmt.Errorf("result list: invalid tag %#x", tag)
+		return FuncResults{}, off, errLeadingByte(tag, "component function results")
 	}
 }
 
@@ -574,15 +559,10 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 		if e != nil {
 			return nil, off2, e
 		}
-		// A conformant producer always spells a keytype inline (see
-		// IsValidMapKeyPrimitive's doc); a type-index key already fails this
-		// the same way an invalid inline primitive does, since Primitive is
-		// "" for it.
-		if key.TypeIndex != nil {
-			return nil, off2, fmt.Errorf("map: invalid key type (type index %d): spec restricts map keys to bool, an integer, char, or string", *key.TypeIndex)
-		}
-		if !IsValidMapKeyPrimitive(key.Primitive) {
-			return nil, off2, fmt.Errorf("map: invalid key type %q: spec restricts map keys to bool, an integer, char, or string", key.Primitive)
+		// A key given by type index may name a primitive one, which only the
+		// type check can resolve (ctConvertVal).
+		if key.TypeIndex == nil && !IsValidMapKeyPrimitive(key.Primitive) {
+			return nil, off2, fmt.Errorf("invalid map key type %q: map keys are bool, an integer, char or string", key.Primitive)
 		}
 		val, off3, e := readValTypeRef(buf, off2)
 		desc, off, err = MapDesc{Key: key, Value: val}, off3, e
@@ -628,7 +608,7 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 			// test/async/validate-no-stream-char.wast vendors it as
 			// assert_invalid. See
 			// https://github.com/WebAssembly/component-model/pull/607.
-			e = fmt.Errorf("`stream<char>` is not valid")
+			e = fmt.Errorf("`stream<char>` is not valid at this time")
 		}
 		desc, off, err = StreamDesc{Element: elem}, off2, e
 	case 0x65: // future: option(valtype), same shape as stream.
@@ -637,7 +617,7 @@ func readDefvaltypeDesc(buf []byte, off int, tag byte) (TypeDesc, int, error) {
 		elem, off2, e := readOptValTypeRef(buf, off)
 		desc, off, err = FutureDesc{Element: elem}, off2, e
 	default:
-		return nil, off, fmt.Errorf("unsupported (M1): defvaltype tag %#x", tag)
+		return nil, off, errLeadingByte(tag, "component defined type")
 	}
 	return desc, off, err
 }

@@ -1,7 +1,9 @@
 package binary
 
 import (
+	"errors"
 	"fmt"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/samyfodil/wazy/internal/leb128"
@@ -84,7 +86,19 @@ func readLabel(buf []byte, off int) (string, int, error) {
 	if length == 0 {
 		return "", off, nil
 	}
-	return unsafe.String(&buf[off], int(length)), off + int(length), nil
+	name := unsafe.String(&buf[off], int(length))
+	if !utf8.ValidString(name) {
+		return "", off, errMalformedUTF8
+	}
+	return name, off + int(length), nil
+}
+
+var errMalformedUTF8 = errors.New("malformed UTF-8 encoding")
+
+// errLeadingByte is wasmparser's error for a byte that selects none of the
+// forms the grammar allows at what.
+func errLeadingByte(b byte, what string) error {
+	return fmt.Errorf("invalid leading byte (%#x) for %s", b, what)
 }
 
 // readExternName consumes an import/export name: a 0x00/0x01 kind byte, a
@@ -101,7 +115,7 @@ func readExternName(buf []byte, off int) (string, int, error) {
 	case 0x02:
 		return "", off, fmt.Errorf("unsupported (M1): extern name with attributes (0x02)")
 	default:
-		return "", off, fmt.Errorf("extern name: invalid kind byte %#x", kind)
+		return "", off, errLeadingByte(kind, "component name")
 	}
 }
 
@@ -131,8 +145,11 @@ func readExternDesc(buf []byte, off int) (ExternDesc, int, error) {
 	off++
 	switch d.Sort {
 	case 0x00: // core:type -- expect 0x11 then core typeidx
-		if off >= len(buf) || buf[off] != 0x11 {
-			return d, off, fmt.Errorf("externdesc: expected core module type prefix 0x11")
+		if off >= len(buf) {
+			return d, off, ErrTruncatedBinary
+		}
+		if buf[off] != 0x11 {
+			return d, off, errLeadingByte(buf[off], "component external kind")
 		}
 		off++
 	case 0x01, 0x04, 0x05: // func, component, instance: typeidx
@@ -148,10 +165,10 @@ func readExternDesc(buf []byte, off int) (ExternDesc, int, error) {
 		case 0x01:
 			return d, off, nil
 		default:
-			return d, off, fmt.Errorf("externdesc: invalid type bound %#x", bound)
+			return d, off, errLeadingByte(bound, "type bound")
 		}
 	default:
-		return d, off, fmt.Errorf("unsupported (M1): externdesc sort %#x", d.Sort)
+		return d, off, errLeadingByte(d.Sort, "component external kind")
 	}
 	idx, n, err := leb128.LoadUint32(buf[off:])
 	if err != nil {

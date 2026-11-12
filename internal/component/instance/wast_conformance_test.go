@@ -130,6 +130,10 @@ type wastCmd struct {
 	Name     string `json:"name"`
 	Instance string `json:"instance"`
 	Module   string `json:"module"`
+
+	// ModuleType is an assert_malformed's: "binary", or "text" for a
+	// malformation of the text format, which wazy does not read.
+	ModuleType string `json:"module_type"`
 }
 
 func runWastSuite(t *testing.T, suite string) {
