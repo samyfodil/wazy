@@ -359,7 +359,7 @@ jobs:
           environment_variables: WAZYCLI WAZY_SPECTEST_REQUIRE_CASES
           sync_files: false
           shutdown_vm: false
-          run: "true"
+          run: "false"
 
       - name: Discard the VM that did not boot
         if: steps.boot.outcome == 'failure'
