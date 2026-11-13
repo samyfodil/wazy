@@ -12,6 +12,11 @@ type CallWatch struct {
 	stop     func() bool
 }
 
+// AfterWatchFire, if set, runs after a watcher has fired, for a test that has
+// to know it has: the watcher fires on a goroutine of its own, whenever that
+// gets to run.
+var AfterWatchFire atomic.Pointer[func()]
+
 // WatchCall returns a watcher for a call's context, or nil if the context can
 // never be done. context.AfterFunc starts no goroutine until the context is done;
 // then, on a goroutine of its own, the watcher is marked canceled and onDone, if
@@ -26,6 +31,9 @@ func WatchCall(ctx context.Context, onDone func()) *CallWatch {
 		w.canceled.Store(true)
 		if onDone != nil {
 			onDone()
+		}
+		if f := AfterWatchFire.Load(); f != nil {
+			(*f)()
 		}
 	}
 	select {

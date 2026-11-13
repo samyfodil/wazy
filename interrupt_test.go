@@ -43,8 +43,9 @@ var spinWasm = []byte{
 
 // TestInterruptCheck_GCNotBlockedAndInterrupts is the load-bearing test: a tight
 // infinite loop (a) still yields often enough that Go's GC stop-the-world is
-// not blocked, and (b) is terminated when the context deadline fires. Without
-// the preemption check a tight loop blocks GC for its entire duration.
+// not blocked, and (b) is terminated when its context is canceled. Without the
+// preemption check a tight loop blocks GC for its entire duration, which is
+// forever: only a cancel ends it, and only once the collection is over.
 func TestInterruptCheck_GCNotBlockedAndInterrupts(t *testing.T) {
 	ctx := context.Background()
 	requireCompiler(t)
@@ -54,7 +55,7 @@ func TestInterruptCheck_GCNotBlockedAndInterrupts(t *testing.T) {
 	require.NoError(t, err)
 	fn := mod.ExportedFunction("loop_forever")
 
-	callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	callCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
@@ -64,16 +65,27 @@ func TestInterruptCheck_GCNotBlockedAndInterrupts(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond) // ensure the goroutine is inside the loop
 
-	start := time.Now()
-	runtime.GC()
-	gcDur := time.Since(start)
-	require.True(t, gcDur < 500*time.Millisecond,
-		"runtime.GC() took %v: the running loop is holding its P", gcDur)
-
+	gcDone := make(chan struct{})
+	go func() {
+		runtime.GC()
+		close(gcDone)
+	}()
+	select {
+	case <-gcDone:
+	case <-time.After(time.Minute):
+		t.Fatal("runtime.GC() did not finish: the running loop is holding its P")
+	}
 	select {
 	case e := <-errCh:
-		require.True(t, errors.Is(e, context.DeadlineExceeded), "got %v", e)
-	case <-time.After(5 * time.Second):
+		t.Fatalf("the loop returned before it was canceled: %v", e)
+	default:
+	}
+
+	cancel()
+	select {
+	case e := <-errCh:
+		require.True(t, errors.Is(e, context.Canceled), "got %v", e)
+	case <-time.After(time.Minute):
 		t.Fatal("loop did not terminate on context cancellation")
 	}
 }

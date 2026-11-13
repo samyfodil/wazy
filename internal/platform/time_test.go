@@ -72,15 +72,18 @@ func Test_Nanotime_ensure_monotonic(t *testing.T) {
 	require.True(t, n1 < n2)
 }
 
+// Nanosleep sleeps as long as it is asked to, in nanoseconds. How much longer
+// is up to the scheduler: a loaded machine took 1.35s over a 50ms sleep. The
+// bounds are for a unit mistake, which would be off 1000 times; the lower one
+// is not ns itself because on Windows Nanotime and the sleep read different
+// clocks.
 func Test_Nanosleep(t *testing.T) {
-	// In CI, Nanosleep(50ms) returned after 197ms.
-	// As we can't control the platform clock, we have to be lenient
 	ns := int64(50 * time.Millisecond)
-	max := ns * 5
+	max := ns * 200
 
 	start := Nanotime()
 	Nanosleep(ns)
 	duration := Nanotime() - start
 
-	require.True(t, duration > 0 && duration < max, "Nanosleep(%d) slept for %d", ns, duration)
+	require.True(t, duration > ns/2 && duration < max, "Nanosleep(%d) slept for %d", ns, duration)
 }

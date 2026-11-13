@@ -3,8 +3,8 @@ package adhoc
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
-	"time"
 
 	"github.com/samyfodil/wazy"
 	"github.com/samyfodil/wazy/api"
@@ -19,11 +19,11 @@ func TestCancelInHostCall_Compiler(t *testing.T) {
 	if !platform.CompilerSupported() {
 		t.Skip()
 	}
-	testCancelInHostCall(t, wazy.NewRuntimeConfigCompiler())
+	testCancelInHostCall(t, wazy.NewRuntimeConfigCompiler(), true)
 }
 
 func TestCancelInHostCall_Interpreter(t *testing.T) {
-	testCancelInHostCall(t, wazy.NewRuntimeConfigInterpreter())
+	testCancelInHostCall(t, wazy.NewRuntimeConfigInterpreter(), false)
 }
 
 type cancelKey struct{}
@@ -35,21 +35,38 @@ type cancelKey struct{}
 // that recursion, which would otherwise run until the stack overflows, ends
 // with the context's error: it reaches no host call, but it grows the stack.
 //
+// The watcher fires on a goroutine of its own, whenever that gets to run, so
+// under the compiler, whose calls are watched, the host function waits for it.
+//
 // Each function first makes 300 host calls, so that the watcher is registered
 // (on the 256th) before the cancel rather than left for a yield that a call this
 // short never makes.
-func testCancelInHostCall(t *testing.T, config wazy.RuntimeConfig) {
+func testCancelInHostCall(t *testing.T, config wazy.RuntimeConfig, watched bool) {
 	ctx := context.Background()
 	r := wazy.NewRuntimeWithConfig(ctx, config)
 	defer r.Close(ctx)
+
+	fired := make(chan struct{}, 1)
+	onFire := func() {
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+	}
+	wasm.AfterWatchFire.Store(&onFire)
+	t.Cleanup(func() { wasm.AfterWatchFire.Store(nil) })
 
 	wasi_snapshot_preview1.MustInstantiate(ctx, r)
 	b := r.NewHostModuleBuilder("host")
 	wazy.HostProc0(b.NewFunctionBuilder(), func(context.Context, api.Module) {}).Export("tick")
 	wazy.HostProc0(b.NewFunctionBuilder(), func(ctx context.Context, m api.Module) {
 		ctx.Value(cancelKey{}).(context.CancelFunc)()
-		// Long enough for the watcher to fire while this goroutine runs Go code.
-		time.Sleep(time.Millisecond)
+		if watched {
+			<-fired
+		}
+		// Serves the preemption request the watcher made, as Go does at
+		// whatever function call comes next.
+		runtime.Gosched()
 	}).Export("cancel")
 	wazy.HostProc0(b.NewFunctionBuilder(), func(context.Context, api.Module) {
 		panic("host panic")
