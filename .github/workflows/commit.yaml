@@ -343,9 +343,46 @@ jobs:
         env:
           GOOS: ${{ matrix.os.name }}
 
+      # Now and then the VM never boots: ssh is reset until the action gives up. So it boots on its
+      # own, and once more if that fails, and the tests run in it after; a test failure is never
+      # retried. The action reuses a VM its pidfile names, if the inputs it hashes (OS, version,
+      # shell, environment variables) match, so a retry kills the first VM and removes the pidfile.
+      - name: Boot VM
+        id: boot
+        continue-on-error: true
+        uses: cross-platform-actions/action@v0.32.0
+        timeout-minutes: 8  # a boot takes about one
+        with:
+          operating_system: ${{ matrix.os.name }}
+          version: ${{ matrix.os.version }}
+          shell: bash
+          environment_variables: WAZYCLI WAZY_SPECTEST_REQUIRE_CASES
+          sync_files: false
+          shutdown_vm: false
+          run: "true"
+
+      - name: Discard the VM that did not boot
+        if: steps.boot.outcome == 'failure'
+        run: |
+          sudo pkill -f qemu-system || true
+          sudo rm -f /tmp/cross-platform-actions.pid
+
+      - name: Boot VM again
+        if: steps.boot.outcome == 'failure'
+        uses: cross-platform-actions/action@v0.32.0
+        timeout-minutes: 8
+        with:
+          operating_system: ${{ matrix.os.name }}
+          version: ${{ matrix.os.version }}
+          shell: bash
+          environment_variables: WAZYCLI WAZY_SPECTEST_REQUIRE_CASES
+          sync_files: false
+          shutdown_vm: false
+          run: "true"
+
       - name: Run built test binaries
         uses: cross-platform-actions/action@v0.32.0
-        timeout-minutes: 20  # under 5 normally; a VM that never boots retries ssh for hours
+        timeout-minutes: 20  # under 5 normally
         env:
           WAZYCLI: ./wazycli
           WAZY_SPECTEST_REQUIRE_CASES: "1"
