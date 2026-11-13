@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync/atomic"
 
 	"github.com/samyfodil/wazy/api"
@@ -40,32 +41,86 @@ const maxFlatAsyncParams = 4
 // the reference canon_lower's on_start/on_resolve closures
 // (testdata/definitions.py ~2250-2268) collapsed into one object (on_start's
 // role -- lifting args -- happens before the AsyncHostFunc is even called;
-// see buildAsyncHostWrapper). Single-threaded contract: Resolve/Defer may
-// only be called (a) synchronously inside the AsyncHostFunc invocation, or
-// (b) from a thunk running on the instance's scheduler (i.e. from a Defer'd
-// func, transitively) -- both provably on the one goroutine driving this
-// Instance. Calling Resolve from anywhere else (another goroutine, or after
-// the originating Call has returned) panics: external completion is
-// CallAsync's job, not yet implemented (see the design doc's §2.5 "truly
-// external completion").
+// see buildAsyncHostWrapper). Resolve may be called from any goroutine while
+// the AsyncHostFunc invocation is on the stack, and from any goroutine while a
+// CallAsync is outstanding; otherwise Resolve/Defer may only be called from a
+// thunk running on the instance's scheduler (i.e. from a Defer'd func,
+// transitively) or another host call, on the one goroutine driving this
+// Instance. Calling Resolve from anywhere else panics.
 type AsyncCall struct {
 	in *Instance
 	st *subtask
-	// inCall is true while the AsyncHostFunc invocation is on the stack. It is
-	// per-AsyncCall, so a truly-external Resolve (from a goroutine the host
-	// spawned) always reads it false: this call's host invocation has returned
-	// by the time that goroutine fires, whatever else the driver is doing.
-	// atomic so that external read is race-free against the driver's Store.
-	inCall   atomic.Bool
+	// call is where the AsyncHostFunc invocation is (acIdle, acRunning), and
+	// whether a completion made while it ran is being handed to the wrapper
+	// (acClaimed) or has been (acStashed with its results in early, or
+	// acStashedCancelled). Such a completion may come from a goroutine the
+	// host started, as well as from the invocation itself, so only the
+	// wrapper, once the invocation returns, applies it.
+	call     atomic.Uint32
 	resolved bool
+	early    []abi.Value
+}
+
+const (
+	acIdle uint32 = iota
+	acRunning
+	acClaimed
+	acStashed
+	acStashedCancelled
+)
+
+// stash hands c to the wrapper if the AsyncHostFunc invocation is still on
+// the stack, reporting whether it did.
+func (ac *AsyncCall) stash(c asyncCompletion) bool {
+	for {
+		switch ac.call.Load() {
+		case acRunning:
+			if ac.call.CompareAndSwap(acRunning, acClaimed) {
+				ac.early = c.results
+				ac.resolved = true
+				if c.cancelled {
+					ac.call.Store(acStashedCancelled)
+				} else {
+					ac.call.Store(acStashed)
+				}
+				return true
+			}
+		case acClaimed, acStashed, acStashedCancelled:
+			panic(fmt.Errorf("component/instance: async import: Resolve/ResolveCancelled called twice"))
+		default:
+			return false
+		}
+	}
+}
+
+// finish ends the AsyncHostFunc invocation, returning the completion made
+// while it ran, if any.
+func (ac *AsyncCall) finish() (asyncCompletion, bool) {
+	for {
+		switch ac.call.Load() {
+		case acRunning:
+			if ac.call.CompareAndSwap(acRunning, acIdle) {
+				return asyncCompletion{}, false
+			}
+		case acClaimed:
+			runtime.Gosched() // stash is between its two stores
+		case acStashed, acStashedCancelled:
+			c := asyncCompletion{ac: ac, results: ac.early, cancelled: ac.call.Load() == acStashedCancelled}
+			ac.early = nil
+			ac.call.Store(acIdle)
+			return c, true
+		default:
+			return asyncCompletion{}, false
+		}
+	}
 }
 
 // Resolve delivers the import's results (reference Subtask.on_resolve, the
 // canon_lower on_resolve closure it's built from). One-shot -- a second call
 // panics, matching Subtask.resolve's assert(not self.resolved()).
 //
-//   - Called while inCall (synchronously, before the AsyncHostFunc returns):
-//     the wrapper's epilogue observes st.resolved() and takes the
+//   - Called before the AsyncHostFunc returns, from it or from another
+//     goroutine: the wrapper applies it once it returns, and takes the
 //     reference's immediate fast path -- packed [RETURNED], the subtask
 //     never enters the table, no event, no WAIT needed.
 //   - Called later, from a scheduler thunk (the subtask already parked):
@@ -74,17 +129,19 @@ type AsyncCall struct {
 //     call time) and installs the SUBTASK pending-event closure, so the
 //     next WAIT driver's predicate check sees it.
 func (ac *AsyncCall) Resolve(results []abi.Value) {
-	if ac.in.asyncActive.Load() && !ac.inCall.Load() {
+	if ac.stash(asyncCompletion{ac: ac, results: results}) {
+		return
+	}
+	if ac.in.asyncActive.Load() {
 		// CallAsync mode, off-driver completion (hop A): hand it to the driver's
-		// mailbox. A synchronous inCall resolve falls through to the inline path
-		// below so it still takes the RETURNED fast path.
+		// mailbox.
 		ac.in.queueExternalCompletion(asyncCompletion{ac: ac, results: results})
 		return
 	}
 	if ac.resolved {
 		panic(fmt.Errorf("component/instance: async import: Resolve called twice"))
 	}
-	if !ac.inCall.Load() && !ac.in.sched.pumping && ac.in.inHostCall == 0 {
+	if !ac.in.sched.pumping && ac.in.inHostCall == 0 {
 		// Structural single-threadedness guard, no goroutine-ID hacks: the
 		// only legal Resolve call sites are inside the import call itself,
 		// inside a scheduler thunk, or inside another host call (an import,
@@ -126,14 +183,17 @@ func (ac *AsyncCall) OnCancel(fn func()) {
 // without cancellationRequested (the reference asserts a None result
 // implies cancellation_requested).
 func (ac *AsyncCall) ResolveCancelled() {
-	if ac.in.asyncActive.Load() && !ac.inCall.Load() {
+	if ac.stash(asyncCompletion{ac: ac, cancelled: true}) {
+		return
+	}
+	if ac.in.asyncActive.Load() {
 		ac.in.queueExternalCompletion(asyncCompletion{ac: ac, cancelled: true})
 		return
 	}
 	if ac.resolved {
 		panic(fmt.Errorf("component/instance: async import: Resolve/ResolveCancelled called twice"))
 	}
-	if !ac.inCall.Load() && !ac.in.sched.pumping && ac.in.inHostCall == 0 {
+	if !ac.in.sched.pumping && ac.in.inHostCall == 0 {
 		panic(fmt.Errorf("component/instance: async import: ResolveCancelled called outside the instance scheduler; external completion requires CallAsync (not yet implemented)"))
 	}
 	if !ac.st.cancellationRequested {
@@ -156,17 +216,14 @@ func installSubtaskEvent(st *subtask, si uint32) {
 }
 
 // installParkedPendingEventIfNeeded is Resolve/ResolveCancelled's shared
-// epilogue: the immediate fast path (still inCall) needs nothing more --
-// the wrapper's own epilogue observes st.resolved() -- but a call already
-// parked in the table (reference on_progress/subtask_event) needs its
-// pending-event closure installed so the next WAIT driver's predicate check
-// sees it. Both the delivered state (p2) and deliver_resolve (lend release)
+// epilogue for a call already parked in the table (reference
+// on_progress/subtask_event): its pending-event closure is installed so the
+// next WAIT driver's predicate check sees it. A call resolved before it was
+// parked never gets here: the wrapper applies that completion itself (see
+// stash). Both the delivered state (p2) and deliver_resolve (lend release)
 // are evaluated at DELIVERY (Waitable.getPendingEvent), matching the
 // reference exactly, not here at resolve time.
 func (ac *AsyncCall) installParkedPendingEventIfNeeded() {
-	if ac.inCall.Load() {
-		return // the wrapper's epilogue sees st.resolved() and takes the immediate path
-	}
 	st := ac.st
 	st.setPendingSubtaskEvent(st, st.subtaski()) // closure-free; body lives in getPendingEvent
 }
@@ -526,7 +583,7 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 
 		ac := &st.ac
 		ac.in, ac.st = in, st
-		ac.inCall.Store(true)
+		ac.call.Store(acRunning)
 		// Bracket the actual Go call -- see buildHostWrapper's identical
 		// comment (host_import.go): this is what lets a Write/Read/Set/Get
 		// called synchronously from inside an AsyncHostFunc invocation pass
@@ -537,7 +594,11 @@ func buildAsyncHostWrapper(in *Instance, iface, funcName string, hi *hostImport,
 		if ferr != nil {
 			panic(fmt.Errorf("component/instance: async import %q %q: %w", iface, funcName, ferr))
 		}
-		ac.inCall.Store(false)
+		if c, ok := ac.finish(); ok {
+			if err := in.applyQueued(c); err != nil {
+				panic(err)
+			}
+		}
 
 		if st.resolved() {
 			// Immediate fast path (reference: "if subtask.resolved(): ...

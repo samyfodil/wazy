@@ -61,10 +61,11 @@ type waitable struct {
 	// with pendingEvent by construction (a subtask never arms a stream/future
 	// event on itself, and vice versa); getPendingEvent/hasPendingEvent honor
 	// both. Evaluated at DELIVERY exactly like the thunk it replaces.
-	pendingSub   *subtask
-	pendingSubSi uint32
+	pendingSub *subtask
 
 	wset *waitableSet
+
+	pendingSubSi uint32
 
 	// syncWaiter mirrors Waitable.has_sync_waiter (Phase 3, retiring the
 	// Phase-1/2 "no sync waiters exist" collapse -- docs/component-model-
@@ -258,7 +259,6 @@ const (
 // against it now so Phase 3 borrow scopes only have to start calling addLender.
 type subtask struct {
 	waitable
-	state       subtaskState
 	lenders     []*resourceEntry
 	flatResults []uint64
 
@@ -274,10 +274,6 @@ type subtask struct {
 	// subtask source exists yet -- Phase 2/3 add guest->guest lowers and
 	// streams/futures).
 	resolveCfg *asyncResolveCfg
-
-	// retPtr is the per-call trailing out-pointer, decoded from the core
-	// stack at call time (buildAsyncHostWrapper).
-	retPtr uint32
 
 	// memMod is the per-call CALLING module (or memOverride) captured at
 	// call time.
@@ -317,10 +313,16 @@ type subtask struct {
 	// time cancel is called (nothing left to cancel).
 	cancelTask *task
 
+	state subtaskState
+
 	// cancellationRequested mirrors Subtask.cancellation_requested: set the
 	// first time subtask.cancel is called on this subtask; a second call
 	// traps (canon_subtask_cancel's trap_if(cancellation_requested)).
 	cancellationRequested bool
+
+	// retPtr is the per-call trailing out-pointer, decoded from the core
+	// stack at call time (buildAsyncHostWrapper).
+	retPtr uint32
 
 	// si is this subtask's OWN table index, once it has been parked there
 	// (buildAsyncHostWrapper's/the guest<->guest callee wrapper's epilogue
@@ -328,11 +330,11 @@ type subtask struct {
 	// allocating). 0 until then (0 is never a valid handle). The guest<->
 	// guest callee wrapper's onResolve closure (async_host_import.go's
 	// buildAsyncHostWrapper) needs this to know, when it fires, whether the
-	// subtask is still on the immediate/inCall fast path (si == 0, nothing
-	// to install an event for -- the wrapper's own epilogue handles it) or
+	// subtask is still on the immediate fast path (si == 0, nothing to
+	// install an event for -- the wrapper's own epilogue handles it) or
 	// already parked (si != 0, install the pending-event closure itself) --
-	// the same distinction AsyncCall.subtaski/inCall draws for a host
-	// import, but this subtask has no AsyncCall wrapping it.
+	// the distinction AsyncCall.stash draws for a host import, but this
+	// subtask has no AsyncCall wrapping it.
 	si uint32
 }
 

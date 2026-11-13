@@ -470,10 +470,11 @@ func subtaskCancelHostFuncGraph(in *Instance, canon binary.Canon) hostFuncDef {
 				// explicitly promises the callee may call
 				// Resolve/ResolveCancelled SYNCHRONOUSLY from inside fn
 				// (async_host_import.go), and those methods' single-
-				// threadedness guard only recognizes "inCall" (the ORIGINAL
-				// AsyncHostFunc invocation, long since returned by the time
-				// a later subtask.cancel fires) or "sched.pumping" as proof
-				// of running on the driving goroutine. Without this bracket
+				// threadedness guard only recognizes the ORIGINAL
+				// AsyncHostFunc invocation still running (long since
+				// returned by the time a later subtask.cancel fires) or
+				// "sched.pumping" as proof of running on the driving
+				// goroutine. Without this bracket
 				// every synchronous OnCancel->Resolve/ResolveCancelled call
 				// (a real, documented, spec-legal shape -- e.g. a host
 				// import that completes cancellation immediately rather

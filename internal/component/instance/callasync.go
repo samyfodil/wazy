@@ -54,9 +54,10 @@ func (in *Instance) queueExternalCompletion(c asyncCompletion) {
 
 // applyQueued applies one drained completion on the driver goroutine -- the
 // exact parked-completion path buildAsyncHostWrapper's guest<->guest onResolve
-// uses: applyResolve (or the cancelled resolve), then install the SUBTASK
-// pending event so the next drive delivers it. Never reads ac.inCall (the
-// driver may differ from the goroutine that ran the host call).
+// uses: applyResolve (or the cancelled resolve), then, for a parked subtask,
+// install the SUBTASK pending event so the next drive delivers it. The wrapper
+// applies a completion made before the subtask was parked the same way, and
+// then takes the immediate path.
 func (in *Instance) applyQueued(c asyncCompletion) error {
 	st := c.ac.st
 	if c.cancelled {
