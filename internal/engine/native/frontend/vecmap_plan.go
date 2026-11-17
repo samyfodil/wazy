@@ -191,7 +191,9 @@ type vecPlan struct {
 }
 
 type vecPlanner struct {
-	why      string
+	why string
+	// whyOp is the opcode the planner stopped at, when why is empty: see reason.
+	whyOp    int
 	p        vecPlan
 	body     []byte
 	pc       int
@@ -202,27 +204,40 @@ type vecPlanner struct {
 	exitSeen bool
 }
 
-// planVecMap plans the loop whose body starts at body[pc], just past the loop's block type. types are the
-// function's locals' types, parameters first. It reports false, and why, for a loop it does not take.
-func planVecMap(body []byte, pc int, types []wasm.ValueType) (*vecPlan, string, bool) {
-	pl := &vecPlanner{body: body, pc: pc, types: types}
-	pl.p.nodes = make([]vecNode, 0, 16)
+// plan plans the loop whose body starts at body[pc], just past the loop's block type. types are the
+// function's locals' types, parameters first. It reports false for a loop it does not take, and reason
+// then says why. The plan is pl's own, good until pl plans another loop, and so is the memory pl keeps
+// from one loop to the next.
+func (pl *vecPlanner) plan(body []byte, pc int, types []wasm.ValueType) (*vecPlan, bool) {
+	p := &pl.p
+	*pl = vecPlanner{
+		body: body, pc: pc, types: types, whyOp: -1, stack: pl.stack[:0],
+		p: vecPlan{nodes: p.nodes[:0], loads: p.loads[:0], stores: p.stores[:0], invAffs: p.invAffs[:0], reduces: p.reduces[:0]},
+	}
 	for i := range pl.p.partner {
 		pl.p.partner[i] = -1
 	}
 	if !pl.run() {
 		if pl.why == "" && pl.pc > 0 && pl.pc <= len(body) {
-			pl.why = "opcode " + wasm.InstructionName(body[pl.pc-1])
+			pl.whyOp = int(body[pl.pc-1])
 		}
-		return nil, pl.why, false
+		return nil, false
 	}
 	if !pl.finish() {
 		if pl.why == "" {
 			pl.why = "finish"
 		}
-		return nil, pl.why, false
+		return nil, false
 	}
-	return &pl.p, "", true
+	return &pl.p, true
+}
+
+// reason says why plan did not take the loop.
+func (pl *vecPlanner) reason() string {
+	if pl.whyOp >= 0 {
+		return "opcode " + wasm.InstructionName(wasm.Opcode(pl.whyOp))
+	}
+	return pl.why
 }
 
 func (pl *vecPlanner) slot(l wasm.Index) (int, bool) {
@@ -1371,7 +1386,6 @@ var VecPlanHook func(fn wasm.Index, pc int, ok bool, why string)
 
 // localTypes returns the types of the function's locals, parameters first.
 func (c *Compiler) localTypes() []wasm.ValueType {
-	types := make([]wasm.ValueType, 0, len(c.wasmFunctionTyp.Params)+len(c.wasmFunctionLocalTypes))
-	types = append(types, c.wasmFunctionTyp.Params...)
-	return append(types, c.wasmFunctionLocalTypes...)
+	c.localTypesBuf = append(append(c.localTypesBuf[:0], c.wasmFunctionTyp.Params...), c.wasmFunctionLocalTypes...)
+	return c.localTypesBuf
 }

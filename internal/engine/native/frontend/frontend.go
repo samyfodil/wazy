@@ -136,6 +136,11 @@ type Compiler struct {
 	inlineResults wasm.FunctionType
 	// vecSum is the vector sum being lowered, and where to look for the next.
 	vecSum vecSum
+	// vecPlanner plans each loop for lowerVecMap, and popcountSim reads each for popcountLoop. They
+	// keep their memory from one loop, and one function, to the next, as localTypesBuf does.
+	vecPlanner    vecPlanner
+	popcountSim   *vsSim
+	localTypesBuf []wasm.ValueType
 	// lastStore is the last full-width store, while nothing that may write memory has run since in its
 	// block: a load of the same address and width takes its value instead of reading it back.
 	lastStore storedValue

@@ -245,7 +245,7 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 		followingBlock: c.ssaBuilder.ReturnBlock(),
 	})
 
-	c.vecSum = vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim}
+	c.vecSum = vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim, run: c.vecSum.run}
 	for c.loweringState.pc < len(c.wasmFunctionBody) {
 		c.lowerVecSums()
 		blkBeforeLowering := c.ssaBuilder.CurrentBlock()
@@ -1474,7 +1474,8 @@ func (c *Compiler) lowerCurrentOpcode() {
 			break
 		}
 		if (c.vecMap || VecPlanHook != nil) && len(bt.Params) == 0 && len(bt.Results) == 0 && c.vecMapMemory() {
-			plan, why, ok := planVecMap(c.wasmFunctionBody, state.pc+1, c.localTypes())
+			plan, ok := c.vecPlanner.plan(c.wasmFunctionBody, state.pc+1, c.localTypes())
+			why := ""
 			// A top exit leaves the construct around the loop, which must then end right after it, as the
 			// planner checks, and not be a loop: branching to that would go round it instead.
 			if ok && plan.top && state.ctrlPeekAt(0).kind == controlFrameKindLoop {
@@ -1484,6 +1485,9 @@ func (c *Compiler) lowerCurrentOpcode() {
 				ok = c.lowerVecMap(plan)
 			}
 			if VecPlanHook != nil {
+				if plan == nil {
+					why = c.vecPlanner.reason()
+				}
 				VecPlanHook(c.wasmLocalFunctionIndex, loopStart, ok, why)
 			}
 		}
