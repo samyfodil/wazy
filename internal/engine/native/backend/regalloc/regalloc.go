@@ -1708,16 +1708,22 @@ func (a *Allocator[I, B, F]) computeNextUseDistances(f F) {
 		}
 	}
 	a.distBuf = dist
-	// A block is visited again only where a successor's distances went down since it last was.
-	work := a.nextUseWork[:0]
+	// The blocks are swept in post-order, successors before predecessors, for as long as distances go
+	// down, and a sweep visits only the blocks a successor's distances went down for since they last
+	// were. One sweep settles all but what crosses a back edge, so it takes one more than the loops are
+	// deep: a queue takes the blocks out of order, and visits each many times over.
+	order := a.nextUseWork[:0]
 	for blk := f.PostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.PostOrderBlockIteratorNext() {
-		work = append(work, blk)
+		order = append(order, blk)
 		a.getOrAllocateBlockState(blk.ID()).queued = true
 	}
-	for head := 0; head < len(work); head++ {
-		blk := work[head]
-		{
+	for again := true; again; {
+		again = false
+		for _, blk := range order {
 			info := a.getOrAllocateBlockState(blk.ID())
+			if !info.queued {
+				continue
+			}
 			info.queued = false
 			changed := false
 			a.stamp++
@@ -1750,15 +1756,13 @@ func (a *Allocator[I, B, F]) computeNextUseDistances(f F) {
 			}
 			if changed {
 				for i, n := 0, blk.Preds(); i < n; i++ {
-					if p := a.getOrAllocateBlockState(f.Pred(blk, i).ID()); !p.queued {
-						p.queued = true
-						work = append(work, f.Pred(blk, i))
-					}
+					a.getOrAllocateBlockState(f.Pred(blk, i).ID()).queued = true
 				}
+				again = true
 			}
 		}
 	}
-	a.nextUseWork = work[:0]
+	a.nextUseWork = order[:0]
 }
 
 // nearestAfter leaves, in each value live into a successor of blk, dist with its distance from blk's
