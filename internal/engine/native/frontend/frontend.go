@@ -77,9 +77,16 @@ type Compiler struct {
 	// threading the same fix through the N-way predecessor intersection.
 	// A deliberately coarse ceiling: ship correct now, add the memory-aware merge
 	// if multi-memory codegen benchmarks show it's worth it.
-	multiMemory    bool
-	memoryShared   []bool
-	memoryMaxPages []uint64
+	multiMemory bool
+	// sharesDisplacedAddress makes an access at a nonzero displacement from a base address go through the
+	// absolute address an earlier access through that base computed, rather than compute its own. It is
+	// worth it only where the addressing mode cannot fold base, index and displacement together: amd64
+	// can, so a shared address there only costs an instruction and a register, and puts an add between a
+	// pointer loaded from memory and the load through it. arm64 cannot, so an access with a displacement
+	// needs the add anyway; one without keeps it off the path.
+	sharesDisplacedAddress bool
+	memoryShared           []bool
+	memoryMaxPages         []uint64
 	// memoryIndex64 records, per memory index, whether that memory has an i64
 	// index type, in which case its address and length operands are full 64-bit
 	// values whose arithmetic can overflow. anyMemory64 is true if any does.
@@ -197,6 +204,7 @@ func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 		loopYield:                         LoopYield,
 		inlineLeaves:                      true,
 		vecMap:                            runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64",
+		sharesDisplacedAddress:            runtime.GOARCH == "arm64",
 		needSourceOffsetInfo:              sourceInfo,
 		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
@@ -213,6 +221,10 @@ func (c *Compiler) SetInlineLeaves(on bool) { c.inlineLeaves = on }
 // SetVecMap turns off vectorizing loops (see lowerVecMap), for tests that pin how a loop is lowered. It must
 // be called before lowering.
 func (c *Compiler) SetVecMap(on bool) { c.vecMap = on }
+
+// SetSharesDisplacedAddress picks how addresses are shared between accesses through one base (see
+// sharesDisplacedAddress), for tests that pin the lowering on every host. It must be called before lowering.
+func (c *Compiler) SetSharesDisplacedAddress(on bool) { c.sharesDisplacedAddress = on }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {

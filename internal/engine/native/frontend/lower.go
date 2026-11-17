@@ -5105,6 +5105,12 @@ func (c *Compiler) recordRangeSafeBound(memIndex wasm.Index, baseAddr ssa.Value,
 	return address
 }
 
+// sharesAddress reports whether an access disp bytes past a base address goes through the absolute
+// address an earlier access through that base computed (see sharesDisplacedAddress).
+func (c *Compiler) sharesAddress(disp uint64) bool {
+	return c.sharesDisplacedAddress && disp != 0
+}
+
 func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
 	if c.memoryIsIndex64(memIndex) {
 		return c.memOpSetup64(memIndex, baseAddr, constOffset, operationSizeInBytes)
@@ -5123,7 +5129,9 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 	if !c.multiMemory {
 		if known := c.getKnownSafeBound(baseAddrID); known.valid() {
 			// We reuse the calculated absolute address even if the bound is not known to be safe.
-			address = known.absoluteAddr
+			if c.sharesAddress(constOffset) {
+				address = known.absoluteAddr
+			}
 			if ceil <= known.bound {
 				if !address.Valid() {
 					// This means that, the bound is known to be safe, but the memory base might have changed.
@@ -5135,7 +5143,9 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 						Return()
 					address = builder.AllocateInstruction().
 						AsIadd(memBase, extBaseAddr).Insert(builder).Return()
-					known.absoluteAddr = address // Update the absolute address for the subsequent memory access.
+					if !known.absoluteAddr.Valid() {
+						known.absoluteAddr = address // Update the absolute address for the subsequent memory access.
+					}
 				}
 				return
 			}
@@ -5268,12 +5278,17 @@ func (c *Compiler) derivedSafeAddress(memIndex wasm.Index, baseAddr ssa.Value, c
 		return ssa.ValueInvalid, false
 	}
 	builder := c.ssaBuilder
-	base := known.absoluteAddr
+	base := ssa.ValueInvalid
+	if c.sharesAddress(k) {
+		base = known.absoluteAddr
+	}
 	if !base.Valid() {
 		memBase := c.getMemoryBaseValue(memIndex, false)
 		ext := builder.AllocateInstruction().AsUExtend(x, 32, 64).Insert(builder).Return()
 		base = builder.AllocateInstruction().AsIadd(memBase, ext).Insert(builder).Return()
-		known.absoluteAddr = base
+		if !known.absoluteAddr.Valid() {
+			known.absoluteAddr = base
+		}
 	}
 	kv := builder.AllocateInstruction().AsIconst64(k).Insert(builder).Return()
 	address := builder.AllocateInstruction().AsIadd(base, kv).Insert(builder).Return()
