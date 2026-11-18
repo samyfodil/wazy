@@ -2642,6 +2642,7 @@ L7 (SSA Block: blk7):
 			fc := frontend.NewFrontendCompiler(tc.m, ssab, &offset, false, false)
 			fc.SetInlineLeaves(false) // the call cases pin how a call is lowered.
 			fc.SetVecMap(false)
+			fc.SetUnrollLoops(false) // the loop cases pin how a loop is lowered.
 			machine := newMachine()
 			machine.DisableStackCheck()
 			be := backend.NewCompiler(context.Background(), machine, ssab)

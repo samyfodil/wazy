@@ -90,6 +90,14 @@ type (
 		// entered. See settleExits.
 		exitsFrom      int
 		checkedOnEntry bool
+		// copy2 is, while the first of a loop frame's two copies of its body is lowered, the block the
+		// second starts at, where a branch back goes; bodyStart is where the body starts in the code, and
+		// vecSums and ehEntries how many sum candidates were left and try_tables had been lowered when it
+		// did. copy1Exit is, while the second is, the block the first falls off its end in. See
+		// unrollCandidate.
+		copy2, copy1Exit   ssa.BasicBlock
+		bodyStart          int
+		vecSums, ehEntries int
 		// landingBlk and catches are a controlFrameKindTryTableWithCatch
 		// frame's landing pad and catch clauses; see lowerCatchLanding.
 		landingBlk ssa.BasicBlock
@@ -1473,6 +1481,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.unreachableDepth++
 			break
 		}
+		vecMapped := false
 		if (c.vecMap || VecPlanHook != nil) && len(bt.Params) == 0 && len(bt.Results) == 0 && c.vecMapMemory() {
 			plan, ok := c.vecPlanner.plan(c.wasmFunctionBody, state.pc+1, c.localTypes())
 			why := ""
@@ -1483,6 +1492,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 			if ok && c.vecMap {
 				ok = c.lowerVecMap(plan)
+				vecMapped = ok
 			}
 			if VecPlanHook != nil {
 				if plan == nil {
@@ -1525,6 +1535,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			frame.preheader, frame.loopStart = preheader, loopStart
 			if state.dispatch.frame < 0 {
 				c.detectDispatch()
+			}
+			if !vecMapped && len(bt.Params) == 0 && len(bt.Results) == 0 && c.unrollCandidate(frame) {
+				frame.copy2, frame.bodyStart = builder.AllocateBasicBlock(), state.pc
+				frame.vecSums, frame.ehEntries = len(c.vecSum.cands), len(c.pendingEhEntries)
 			}
 		}
 	case wasm.OpcodeIf:
@@ -1619,6 +1633,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		ctrl := state.ctrlPop()
+		if ctrl.copy2 != nil && c.lowerSecondCopy(&ctrl) {
+			break
+		}
+		if ctrl.copy1Exit != nil {
+			c.leaveFirstCopy(&ctrl)
+		}
 		followingBlk := ctrl.followingBlock
 		if d := &state.dispatch; d.frame >= 0 {
 			switch i := len(state.controlFrames); {
@@ -6725,6 +6745,9 @@ func (l *loweringState) brTargetArgNumFor(labelIndex uint32) (targetBlk ssa.Basi
 	if targetFrame.isLoop() {
 		targetFrame.uncovered = targetFrame.uncovered || !yielded
 		targetBlk, argNum = targetFrame.blk, len(targetFrame.blockType.Params)
+		if targetFrame.copy2 != nil {
+			targetBlk = targetFrame.copy2
+		}
 	} else {
 		targetFrame.exitMissed = targetFrame.exitMissed || !yielded
 		targetBlk, argNum = targetFrame.followingBlock, len(targetFrame.blockType.Results)

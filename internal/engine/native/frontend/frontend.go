@@ -124,6 +124,8 @@ type Compiler struct {
 	inlineLeaves bool
 	// vecMap turns vector map loops on; see SetVecMap.
 	vecMap bool
+	// unrollLoops turns unrolling small loops on; see unrollCandidate.
+	unrollLoops bool
 	// inlinedCallee is one more than the local index of the function inlineLeaf or inlineSelf is
 	// lowering, and zero outside one. See memoryOutOfBoundsCode.
 	inlinedCallee uint32
@@ -217,6 +219,7 @@ func (c *Compiler) Reuse(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	c.loopYield = LoopYield
 	c.inlineLeaves = true
 	c.vecMap = runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
+	c.unrollLoops = true
 	c.sharesDisplacedAddress = runtime.GOARCH == "arm64"
 	c.needSourceOffsetInfo = sourceInfo
 	c.tryTableMetadata = &localTryTableMetadata{}
@@ -264,6 +267,10 @@ func (c *Compiler) SetInlineLeaves(on bool) { c.inlineLeaves = on }
 // SetVecMap turns off vectorizing loops (see lowerVecMap), for tests that pin how a loop is lowered. It must
 // be called before lowering.
 func (c *Compiler) SetVecMap(on bool) { c.vecMap = on }
+
+// SetUnrollLoops turns off unrolling small loops (see unrollCandidate), for tests that pin how a loop is
+// lowered. It must be called before lowering.
+func (c *Compiler) SetUnrollLoops(on bool) { c.unrollLoops = on }
 
 // SetSharesDisplacedAddress picks how addresses are shared between accesses through one base (see
 // sharesDisplacedAddress), for tests that pin the lowering on every host. It must be called before lowering.

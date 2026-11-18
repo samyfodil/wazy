@@ -44,6 +44,9 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 		// sharesAddress lowers accesses as for arm64, where one at a displacement from a base shares
 		// the address an earlier access computed (see Compiler.sharesDisplacedAddress).
 		sharesAddress bool
+		// unroll lets small loops be lowered twice (see Compiler.unrollCandidate), which the other cases
+		// keep to one copy so that they pin how a loop is lowered.
+		unroll bool
 	}{
 		{
 			name: "empty", m: testcases.Empty.Module,
@@ -346,6 +349,208 @@ blk4: () <-- (blk5,blk3)
 blk3: () <-- (blk1)
 	Yield v0
 	Jump blk4
+`,
+		},
+		{
+			name: "unrolled pointer chase", m: unrollModule(chaseLoop), unroll: true,
+			exp: `
+blk0: (v0:i64, v1:i64, v2:i32)
+	Jump blk1, v2
+
+blk1: (v4:i32) <-- (blk0,blk5)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
+	Jump blk4
+
+blk2: (v19:i32) <-- (blk6,blk7)
+	Jump blk_ret, v19
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v5:i64 = Iconst_64 0x4
+	v6:i64 = UExtend v4, 32->64
+	v7:i64 = Load v1, 0x10
+	v8:i64 = Isub v7, v5
+	v9:i32 = Icmp gt_u, v6, v8
+	ExitIfTrue v9, v0, memory_out_of_bounds
+	v10:i64 = Load v1, 0x8
+	v11:i64 = Iadd v10, v6
+	v12:i32 = Load v11, 0x0
+	Brnz v12, blk5
+	Jump blk6
+
+blk5: () <-- (blk4)
+	v13:i64 = Iconst_64 0x4
+	v14:i64 = UExtend v12, 32->64
+	v15:i64 = Isub v7, v13
+	v16:i32 = Icmp gt_u, v14, v15
+	ExitIfTrue v16, v0, memory_out_of_bounds
+	v17:i64 = Iadd v10, v14
+	v18:i32 = Load v17, 0x0
+	Brnz v18, blk1, v18
+	Jump blk7
+
+blk6: () <-- (blk4)
+	Jump blk2, v12
+
+blk7: () <-- (blk5)
+	Jump blk2, v18
+`,
+			expAfterPasses: `
+blk0: (v0:i64, v1:i64, v2:i32)
+	v7:i64 = Load v1, 0x10
+	v20:i64 = Iconst_64 0x4
+	v8:i64 = Isub v7, v20
+	v10:i64 = Load v1, 0x8
+	Jump fallthrough, v2
+
+blk1: (v4:i32) <-- (blk0,blk9)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
+	Jump fallthrough
+
+blk8: () <-- (blk1)
+	Jump fallthrough
+
+blk4: () <-- (blk8,blk3)
+	v6:i64 = UExtend v4, 32->64
+	v9:i32 = Icmp gt_u, v6, v8
+	ExitIfTrue v9, v0, memory_out_of_bounds
+	v11:i64 = Iadd v10, v6
+	v12:i32 = Load v11, 0x0
+	Brz v12, blk6
+	Jump fallthrough
+
+blk5: () <-- (blk4)
+	v14:i64 = UExtend v12, 32->64
+	v16:i32 = Icmp gt_u, v14, v8
+	ExitIfTrue v16, v0, memory_out_of_bounds
+	v17:i64 = Iadd v10, v14
+	v18:i32 = Load v17, 0x0
+	Brnz v18, blk9
+	Jump blk7
+
+blk9: () <-- (blk5)
+	Jump blk1, v18
+
+blk7: () <-- (blk5)
+	Jump blk2, v18
+
+blk6: () <-- (blk4)
+	Jump fallthrough, v12
+
+blk2: (v19:i32) <-- (blk6,blk7)
+	Jump blk_ret, v19
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+`,
+		},
+		{
+			name: "counted loop not unrolled", m: unrollModule(countedLoop), unroll: true,
+			exp: `
+blk0: (v0:i64, v1:i64, v2:i32)
+	v7:i32 = Iconst_32 0xffffffff
+	v8:i32 = Iadd v2, v7
+	v9:i32 = Iconst_32 0x0
+	v10:i32 = Iconst_32 0x1745
+	v11:i32 = Icmp gt_u, v8, v10
+	v12:i32 = Iconst_32 0xffffe8bb
+	v13:i32 = Iadd v8, v12
+	v14:i32 = Select v11, v13, v9
+	v24:i32 = PreemptRequested
+	Brnz v24, blk10
+	Jump blk1, v2, v14
+
+blk1: (v4:i32,v15:i32) <-- (blk0,blk4,blk8,blk9,blk10)
+	v3:i32 = PreemptRequested elided
+	Brnz v3, blk3
+	Jump blk4
+
+blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v5:i32 = Iconst_32 0x1
+	v6:i32 = Isub v4, v5
+	v16:i32 = Icmp neq, v6, v15
+	Brnz v16, blk1, v6, v15
+	Jump blk7
+
+blk5: ()
+
+blk6: () <-- (blk7)
+	Jump blk_ret, v6
+
+blk7: () <-- (blk4)
+	Brnz v6, blk8
+	Jump blk6
+
+blk8: () <-- (blk7)
+	v17:i32 = Iconst_32 0x0
+	v18:i32 = Iconst_32 0x1745
+	v19:i32 = Icmp gt_u, v6, v18
+	v20:i32 = Iconst_32 0xffffe8bb
+	v21:i32 = Iadd v6, v20
+	v22:i32 = Select v19, v21, v17
+	v23:i32 = PreemptRequested
+	Brnz v23, blk9
+	Jump blk1, v6, v22
+
+blk9: () <-- (blk8)
+	Yield v0
+	Jump blk1, v6, v22
+
+blk10: () <-- (blk0)
+	Yield v0
+	Jump blk1, v2, v14
+`,
+		},
+		{
+			name: "loop with a call not unrolled", m: unrollModule(callLoop), unroll: true,
+			exp: `
+signatures:
+	sig1: i64i64_v
+
+blk0: (v0:i64, v1:i64, v2:i32)
+	Jump blk1, v2
+
+blk1: (v4:i32) <-- (blk0,blk4)
+	v3:i32 = PreemptRequested
+	Brnz v3, blk3
+	Jump blk4
+
+blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	Call f1:sig1, v0, v1
+	v5:i64 = Iconst_64 0x4
+	v6:i64 = UExtend v4, 32->64
+	v7:i64 = Load v1, 0x10
+	v8:i64 = Isub v7, v5
+	v9:i32 = Icmp gt_u, v6, v8
+	ExitIfTrue v9, v0, memory_out_of_bounds
+	v10:i64 = Load v1, 0x8
+	v11:i64 = Iadd v10, v6
+	v12:i32 = Load v11, 0x0
+	Brnz v12, blk1, v12
+	Jump blk6
+
+blk5: ()
+
+blk6: () <-- (blk4)
+	Jump blk_ret, v12
 `,
 		},
 		{
@@ -3472,6 +3677,7 @@ blk13: () <-- (blk6)
 			fc.SetInlineLeaves(tc.inline)
 			fc.SetVecMap(false)
 			fc.SetSharesDisplacedAddress(tc.sharesAddress)
+			fc.SetUnrollLoops(tc.unroll)
 			typeIndex := tc.m.FunctionSection[tc.targetIndex]
 			code := &tc.m.CodeSection[tc.targetIndex]
 			fc.Init(tc.targetIndex, typeIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body, tc.needListener, 0)
@@ -3875,5 +4081,46 @@ func branchHinted(m *wasm.Module, hints ...wasm.BranchHint) *wasm.Module {
 	return &wasm.Module{
 		TypeSection: m.TypeSection, FunctionSection: m.FunctionSection,
 		CodeSection: []wasm.Code{code}, ExportSection: m.ExportSection,
+	}
+}
+
+// The bodies of unrollModule's function: a walk of a linked list, which unrolls, one counting down,
+// which does not, and the walk with a call in it, which does not either.
+var (
+	chaseLoop = []byte{
+		wasm.OpcodeLoop, 0x40,
+		wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Load, 2, 0, wasm.OpcodeLocalTee, 0,
+		wasm.OpcodeBrIf, 0,
+		wasm.OpcodeEnd,
+		wasm.OpcodeLocalGet, 0, wasm.OpcodeEnd,
+	}
+	countedLoop = []byte{
+		wasm.OpcodeLoop, 0x40,
+		wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Const, 1, wasm.OpcodeI32Sub, wasm.OpcodeLocalTee, 0,
+		wasm.OpcodeBrIf, 0,
+		wasm.OpcodeEnd,
+		wasm.OpcodeLocalGet, 0, wasm.OpcodeEnd,
+	}
+	callLoop = []byte{
+		wasm.OpcodeLoop, 0x40,
+		wasm.OpcodeCall, 1,
+		wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Load, 2, 0, wasm.OpcodeLocalTee, 0,
+		wasm.OpcodeBrIf, 0,
+		wasm.OpcodeEnd,
+		wasm.OpcodeLocalGet, 0, wasm.OpcodeEnd,
+	}
+)
+
+// unrollModule is a module with a memory whose first function, (i32) -> i32, has body, and whose second
+// takes and returns nothing.
+func unrollModule(body []byte) *wasm.Module {
+	return &wasm.Module{
+		TypeSection: []wasm.FunctionType{
+			{Params: []wasm.ValueType{wasm.ValueTypeI32}, Results: []wasm.ValueType{wasm.ValueTypeI32}},
+			{},
+		},
+		MemorySection:   []wasm.Memory{{Min: 1}},
+		FunctionSection: []wasm.Index{0, 1},
+		CodeSection:     []wasm.Code{{Body: body}, {Body: []byte{wasm.OpcodeEnd}}},
 	}
 }

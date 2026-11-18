@@ -178,6 +178,9 @@ type Builder interface {
 	// the body. See builder.ReturnToHeader.
 	ReturnToHeader(slow, header BasicBlock)
 
+	// Redirect makes the branches to from, which is not sealed, go to to, which is not either.
+	Redirect(from, to BasicBlock)
+
 	// CheckOnEntry makes a loop check for preemption once each time it is entered, if it can. See
 	// builder.CheckOnEntry.
 	CheckOnEntry(header, preheader BasicBlock, yield func(target BasicBlock, args Values)) bool

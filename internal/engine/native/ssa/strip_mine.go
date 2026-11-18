@@ -415,6 +415,31 @@ func (b *builder) ReturnToHeader(slow, header BasicBlock) {
 	b.currentBB = saved
 }
 
+// Redirect implements Builder.Redirect.
+func (b *builder) Redirect(from, to BasicBlock) {
+	f, t := from.(*basicBlock), to.(*basicBlock)
+	for _, p := range f.preds {
+		if br := p.branch; br.opcode == OpcodeBrTable {
+			targets := br.rValues.View()
+			for i, v := range targets {
+				if BasicBlockID(v) == f.id {
+					targets[i] = Value(t.id)
+				}
+			}
+		} else {
+			br.rValue = Value(t.id)
+		}
+		t.addPred(p.blk, p.branch)
+		for i, s := range p.blk.success {
+			if s == f {
+				p.blk.success = append(p.blk.success[:i], p.blk.success[i+1:]...)
+				break
+			}
+		}
+	}
+	f.preds = f.preds[:0]
+}
+
 // insertBefore links instr into bb right before at.
 func (bb *basicBlock) insertBefore(instr, at *Instruction) {
 	instr.prev, instr.next = at.prev, at
