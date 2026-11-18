@@ -202,21 +202,59 @@ var LoopYield = true
 // NewFrontendCompiler returns a frontend Compiler.
 func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativeapi.ModuleContextOffsetData, listenerOn bool, sourceInfo bool) *Compiler {
 	c := &Compiler{
-		m:                                 m,
-		ssaBuilder:                        ssaBuilder,
 		br:                                bytes.NewReader(nil),
-		offset:                            offset,
-		loopYield:                         LoopYield,
-		inlineLeaves:                      true,
-		vecMap:                            runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64",
-		sharesDisplacedAddress:            runtime.GOARCH == "arm64",
-		needSourceOffsetInfo:              sourceInfo,
-		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
 	}
+	return c.Reuse(m, ssaBuilder, offset, listenerOn, sourceInfo)
+}
+
+// Reuse readies c, which may have compiled another module, to compile m, as NewFrontendCompiler would,
+// and returns it. Everything that depends on the module starts over; what c keeps is the memory of its
+// per-function scratch, which Init and the lowering empty before each function anyway.
+func (c *Compiler) Reuse(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativeapi.ModuleContextOffsetData, listenerOn bool, sourceInfo bool) *Compiler {
+	*c = c.scratch()
+	c.m, c.ssaBuilder, c.offset = m, ssaBuilder, offset
+	c.loopYield = LoopYield
+	c.inlineLeaves = true
+	c.vecMap = runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
+	c.sharesDisplacedAddress = runtime.GOARCH == "arm64"
+	c.needSourceOffsetInfo = sourceInfo
+	c.tryTableMetadata = &localTryTableMetadata{}
 	c.declareSignatures(listenerOn)
 	c.declareModuleInvariants()
 	return c
+}
+
+// Release drops what c holds of the module it compiled, keeping only its scratch memory, so that a
+// pooled c does not keep the module alive.
+func (c *Compiler) Release() {
+	*c = c.scratch()
+	c.vecPlanner.body, c.vecPlanner.types = nil, nil
+}
+
+// scratch is a Compiler holding nothing but c's per-function scratch, emptied.
+func (c *Compiler) scratch() Compiler {
+	return Compiler{
+		br:                                c.br,
+		wasmLocalToVariable:               c.wasmLocalToVariable[:0],
+		loweringState:                     c.loweringState,
+		knownSafeBounds:                   c.knownSafeBounds,
+		knownSafeBoundsSet:                c.knownSafeBoundsSet,
+		wideMulTerms:                      c.wideMulTerms[:0],
+		inlineLocals:                      c.inlineLocals[:0],
+		vecSum:                            vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim, run: c.vecSum.run},
+		vecPlanner:                        c.vecPlanner,
+		popcountSim:                       c.popcountSim,
+		localTypesBuf:                     c.localTypesBuf[:0],
+		knownSafeBoundsAtTheEndOfBlocks:   c.knownSafeBoundsAtTheEndOfBlocks[:0],
+		varLengthKnownSafeBoundWithIDPool: c.varLengthKnownSafeBoundWithIDPool,
+		pendingEhEntries:                  c.pendingEhEntries[:0],
+		pointers:                          c.pointers[:0],
+		bounds:                            c.bounds[:0],
+		preds:                             c.preds[:0],
+		predSeen:                          c.predSeen,
+		predSeenEpoch:                     c.predSeenEpoch,
+	}
 }
 
 // SetInlineLeaves turns off lowering small callees in place of their calls (see isInlinableLeaf), for

@@ -309,6 +309,17 @@ type compileUnit struct {
 	machine backend.Machine
 	builder ssa.Builder
 	be      backend.Compiler
+	fe      *frontend.Compiler
+}
+
+// frontend returns the unit's frontend compiler, ready to lower m's functions.
+func (u *compileUnit) frontend(m *wasm.Module, offsets *nativeapi.ModuleContextOffsetData, withListener, needSourceInfo bool) *frontend.Compiler {
+	if u.fe == nil {
+		u.fe = frontend.NewFrontendCompiler(m, u.builder, offsets, withListener, needSourceInfo)
+	} else {
+		u.fe.Reuse(m, u.builder, offsets, withListener, needSourceInfo)
+	}
+	return u.fe
 }
 
 // compileUnits recycles compileUnits across modules. All three components hold nativeapi.Pool
@@ -332,6 +343,14 @@ func acquireCompileUnit() *compileUnit {
 	return &compileUnit{machine: machine, builder: builder, be: backend.NewCompiler(context.Background(), machine, builder)}
 }
 
+// releaseCompileUnit returns u to compileUnits, keeping nothing of the module it compiled alive.
+func releaseCompileUnit(u *compileUnit) {
+	if u.fe != nil {
+		u.fe.Release()
+	}
+	compileUnits.Put(u)
+}
+
 func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (*compiledModule, error) {
 	if module.IsHostModule {
 		return e.compileHostModule(ctx, module, listeners)
@@ -349,7 +368,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	}
 
 	unit := acquireCompileUnit()
-	defer compileUnits.Put(unit)
+	defer releaseCompileUnit(unit)
 	machine, ssaBuilder, be := unit.machine, unit.builder, unit.be
 
 	relocator, err := newEngineRelocator(machine, importedFns, localFns)
@@ -372,7 +391,7 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
 		// Compile with a single goroutine.
-		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, withListener, needSourceInfo)
+		fe := unit.frontend(module, &cm.offsets, withListener, needSourceInfo)
 
 		for i := range module.CodeSection {
 			if nativeapi.DeterministicCompilationVerifierEnabled {
@@ -425,11 +444,9 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 
 				// Takes compiler instances which are reused for each function.
 				unit := acquireCompileUnit()
-				defer compileUnits.Put(unit)
+				defer releaseCompileUnit(unit)
 				ssaBuilder, be := unit.builder, unit.be
-				fe := frontend.NewFrontendCompiler(
-					module, ssaBuilder, &cm.offsets, withListener, needSourceInfo).
-					WithTryTableMetadata(sharedTTM)
+				fe := unit.frontend(module, &cm.offsets, withListener, needSourceInfo).WithTryTableMetadata(sharedTTM)
 
 				for {
 					if err := ctx.Err(); err != nil {
@@ -813,7 +830,7 @@ func buildEhEntries(pending []frontend.EhPendingEntry, blockOffsets []backend.Co
 
 func (e *engine) compileHostModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (*compiledModule, error) {
 	unit := acquireCompileUnit()
-	defer compileUnits.Put(unit)
+	defer releaseCompileUnit(unit)
 	machine, be := unit.machine, unit.be
 
 	num := len(module.CodeSection)
@@ -1024,7 +1041,7 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 
 func (e *engine) compileSharedFunctions() {
 	unit := acquireCompileUnit()
-	defer compileUnits.Put(unit)
+	defer releaseCompileUnit(unit)
 	machine, be := unit.machine, unit.be
 
 	var sizes [14]int
@@ -1280,7 +1297,7 @@ func (e *engine) getListenerTrampolineForType(functionType *wasm.FunctionType) (
 	trampoline, ok := e.sharedFunctions.listenerTrampolines[functionType]
 	if !ok {
 		unit := acquireCompileUnit()
-		defer compileUnits.Put(unit)
+		defer releaseCompileUnit(unit)
 		machine, be := unit.machine, unit.be
 
 		var executable []byte
