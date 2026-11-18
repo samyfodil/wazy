@@ -27,11 +27,24 @@ func NewAllocator[I Instr, B Block[I], F Function[I, B]](allocatableRegs *Regist
 	}
 	a.state.vrStates = nativeapi.NewIDedPool[vrState[I, B, F]](resetVrState[I, B, F])
 	a.state.reset()
-	for _, regs := range allocatableRegs.AllocatableRegisters {
+	for typ, regs := range allocatableRegs.AllocatableRegisters {
 		for _, r := range regs {
 			a.allocatableSet = a.allocatableSet.add(r)
 		}
+		leaf := make([]RealReg, 0, len(regs))
+		for _, r := range regs {
+			if !allocatableRegs.CalleeSavedRegisters.has(r) {
+				leaf = append(leaf, r)
+			}
+		}
+		for _, r := range regs {
+			if allocatableRegs.CalleeSavedRegisters.has(r) {
+				leaf = append(leaf, r)
+			}
+		}
+		a.leafRegs[typ] = leaf
 	}
+	a.allocatable = allocatableRegs.AllocatableRegisters
 	return a
 }
 
@@ -54,7 +67,12 @@ type (
 		// regInfo is static per ABI/ISA, and is initialized by the machine during Machine.PrepareRegisterAllocator.
 		regInfo *RegisterInfo
 		// allocatableSet is a set of allocatable RealReg derived from regInfo. Static per ABI/ISA.
-		allocatableSet           RegSet
+		allocatableSet RegSet
+		// allocatable is the order registers are taken in for the function being allocated: regInfo's, or,
+		// for one that makes no call, leafRegs, its callee-saved registers last, as it would save and
+		// restore them for nothing while a register no call is there to clobber is free.
+		allocatable              [NumRegType][]RealReg
+		leafRegs                 [NumRegType][]RealReg
 		allocatedCalleeSavedRegs []VReg
 		vs                       []VReg
 		ss                       []*vrState[I, B, F]
@@ -564,6 +582,7 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 
 	var nilBlk B
 	var nilInstr I
+	calls := false
 	for blk := f.PostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.PostOrderBlockIteratorNext() {
 		// We should gather phi value data.
 		for _, p := range f.BlockParams(blk, &a.vs) {
@@ -617,6 +636,7 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 			if call {
 				clobbers |= a.regInfo.CallerSavedRegisters
 			}
+			calls = calls || call || instr.ClobbersAllRegisters()
 			var fixed RegSet
 			for _, def = range instr.Defs(&a.vs) {
 				if def.IsRealReg() {
@@ -686,6 +706,10 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 	for i := 0; i < nrs; i++ {
 		root := f.LoopNestingForestRoot(i)
 		a.loopTreeDFS(f, root)
+	}
+	a.allocatable = a.regInfo.AllocatableRegisters
+	if !calls {
+		a.allocatable = a.leafRegs
 	}
 }
 
@@ -1015,7 +1039,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 							preferred = d[0].RealReg()
 						}
 					}
-					r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[use.RegType()], currentUsedSet, preferred)
+					r = a.findOrSpillAllocatable(s, a.allocatable[use.RegType()], currentUsedSet, preferred)
 					a.recordReload(f, vs, blk)
 					f.ReloadRegisterBefore(use.SetRealReg(r), instr)
 					s.useRealReg(r, vs)
@@ -1142,7 +1166,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 						}
 					}
 					if r == RealRegInvalid {
-						regs := a.regInfo.AllocatableRegisters[def.RegType()]
+						regs := a.allocatable[def.RegType()]
 						if avoid != 0 {
 							r = s.findAllocatable(regs, avoid)
 						}
@@ -1287,12 +1311,12 @@ func (a *Allocator[I, B, F]) fixMergeState(f F, blk B) {
 		// Finds the free registers if any.
 		intTmp, floatTmp := VRegInvalid, VRegInvalid
 		if intFree := s.findAllocatable(
-			a.regInfo.AllocatableRegisters[RegTypeInt], desiredOccupantsSet,
+			a.allocatable[RegTypeInt], desiredOccupantsSet,
 		); intFree != RealRegInvalid {
 			intTmp = FromRealReg(intFree, RegTypeInt)
 		}
 		if floatFree := s.findAllocatable(
-			a.regInfo.AllocatableRegisters[RegTypeFloat], desiredOccupantsSet,
+			a.allocatable[RegTypeFloat], desiredOccupantsSet,
 		); floatFree != RealRegInvalid {
 			floatTmp = FromRealReg(floatFree, RegTypeFloat)
 		}
@@ -1575,7 +1599,7 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 		if unused(vs) {
 			continue
 		}
-		regs := a.regInfo.AllocatableRegisters[vs.v.RegType()]
+		regs := a.allocatable[vs.v.RegType()]
 		r := s.findAllocatable(regs, clobbered)
 		if r == RealRegInvalid {
 			r = s.findAllocatable(regs, 0)
@@ -1617,7 +1641,7 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 		}
 	})
 	for typ := RegType(0); typ < NumRegType; typ++ {
-		regs := a.regInfo.AllocatableRegisters[typ]
+		regs := a.allocatable[typ]
 		free := -phis[typ]
 		for _, r := range regs {
 			if !s.regsInUse.has(r) {
@@ -1663,7 +1687,7 @@ func (a *Allocator[I, B, F]) moveAsideOccupant(f F, instr I, r RealReg, pc progr
 		return
 	}
 	typ := occ.v.RegType()
-	free := s.findAllocatable(a.regInfo.AllocatableRegisters[typ], inUse.add(r))
+	free := s.findAllocatable(a.allocatable[typ], inUse.add(r))
 	if free == RealRegInvalid {
 		return
 	}

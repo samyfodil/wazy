@@ -343,7 +343,6 @@ L8:
 L0 (SSA Block: blk0):
 	pushq %rbp
 	movq %rsp, %rbp
-	pushq %rdx
 	xor %rcx, %rcx
 L1 (SSA Block: blk1):
 	testl $4095, %ecx
@@ -351,17 +350,15 @@ L1 (SSA Block: blk1):
 L9:
 L4 (SSA Block: blk4):
 	lea 1(%rcx), %ecx
-	movl $1, %edx
-	testl %edx, %edx
+	movl $1, %ebx
+	testl %ebx, %ebx
 	jnz L1
-	popq %rdx
 	movq %rbp, %rsp
 	popq %rbp
 	ret
 L6 (SSA Block: blk6):
 	jmp L1
 L5 (SSA Block: blk5):
-	popq %rdx
 	movq %rbp, %rsp
 	popq %rbp
 	ret
@@ -1541,13 +1538,10 @@ L0 (SSA Block: blk0):
 			afterFinalizeARM64: `
 L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
-	sub sp, sp, #0xa0
+	sub sp, sp, #0x30
 	stp q18, q19, [sp]
-	stp q20, q21, [sp, #0x20]
-	stp q22, q23, [sp, #0x40]
-	stp q24, q25, [sp, #0x60]
-	stp q26, q27, [sp, #0x80]
-	movz x27, #0xa0, lsl 0
+	str q20, [sp, #0x20]
+	orr x27, xzr, #0x30
 	str x27, [sp, #-0x10]!
 	movz w8, #0xd2, lsl 0
 	madd w0, w2, w8, wzr
@@ -1571,36 +1565,36 @@ L0 (SSA Block: blk0):
 	fmul s16, s0, s16
 	fmov s17, #10
 	fmul s17, s0, s17
-	fmov s18, #11
+	fmov s7, #11
+	fmul s7, s0, s7
+	fmov s6, #12
+	fmul s6, s0, s6
+	fmov s5, #13
+	fmul s5, s0, s5
+	fmov s4, #14
+	fmul s4, s0, s4
+	fmov s3, #15
+	fmul s3, s0, s3
+	fmov s2, #16
+	fmul s2, s0, s2
+	fmov s1, #17
+	fmul s1, s0, s1
+	fmov s18, #18
 	fmul s18, s0, s18
-	fmov s19, #12
+	fmov s19, #19
 	fmul s19, s0, s19
-	fmov s20, #13
-	fmul s20, s0, s20
-	fmov s21, #14
-	fmul s21, s0, s21
-	fmov s22, #15
-	fmul s22, s0, s22
-	fmov s23, #16
-	fmul s23, s0, s23
-	fmov s24, #17
-	fmul s24, s0, s24
-	fmov s25, #18
-	fmul s25, s0, s25
-	fmov s26, #19
-	fmul s26, s0, s26
-	fmov s27, #20
-	fmul s27, s0, s27
-	fadd s26, s26, s27
-	fadd s25, s25, s26
-	fadd s24, s24, s25
-	fadd s23, s23, s24
-	fadd s22, s22, s23
-	fadd s21, s21, s22
-	fadd s20, s20, s21
-	fadd s19, s19, s20
-	fadd s18, s18, s19
-	fadd s17, s17, s18
+	fmov s20, #20
+	fmul s0, s0, s20
+	fadd s0, s19, s0
+	fadd s0, s18, s0
+	fadd s1, s1, s0
+	fadd s2, s2, s1
+	fadd s3, s3, s2
+	fadd s4, s4, s3
+	fadd s5, s5, s4
+	fadd s6, s6, s5
+	fadd s7, s7, s6
+	fadd s17, s17, s7
 	fadd s16, s16, s17
 	fadd s15, s15, s16
 	fadd s14, s14, s15
@@ -1612,11 +1606,8 @@ L0 (SSA Block: blk0):
 	fadd s0, s8, s9
 	add sp, sp, #0x10
 	ldp q18, q19, [sp]
-	ldp q20, q21, [sp, #0x20]
-	ldp q22, q23, [sp, #0x40]
-	ldp q24, q25, [sp, #0x60]
-	ldp q26, q27, [sp, #0x80]
-	add sp, sp, #0xa0
+	ldr q20, [sp, #0x20]
+	add sp, sp, #0x30
 	ldr x30, [sp], #0x10
 	ret
 `,
@@ -1799,17 +1790,14 @@ L2:
 L0 (SSA Block: blk0):
 	pushq %rbp
 	movq %rsp, %rbp
-	pushq %rdx
 	sub $16, %rsp
 	mov.q %rax, (%rsp)
-	movq 16(%rbx), %rdx
-	sub $4, %rdx
-	cmpq %rdx, %rcx
+	movq 16(%rbx), %rsi
+	sub $4, %rsi
+	cmpq %rsi, %rcx
 	jnbe L2
-	movq 8(%rbx), %rdx
-	movzx.lq (%rdx,%rcx,1), %rax
-	add $16, %rsp
-	popq %rdx
+	movq 8(%rbx), %rbx
+	movzx.lq (%rbx,%rcx,1), %rax
 	movq %rbp, %rsp
 	popq %rbp
 	ret
@@ -2097,40 +2085,40 @@ L0 (SSA Block: blk0):
 	pushq %rdx
 	sub $16, %rsp
 	mov.q %rax, (%rsp)
-	movq 8(%rbx), %rdx
-	lock xadd.b %rcx, (%rdx)
+	movq 8(%rbx), %rbx
+	lock xadd.b %rcx, (%rbx)
 	movzx.bl %rcx, %rcx
-	movabsq $8, %rbx
-	testq $1, %rbx
+	movabsq $8, %rdx
+	testq $1, %rdx
 	jnz L2
-	movq %rdi, %rbx
-	lock xadd.w %rbx, 8(%rdx)
-	movzx.wl %rbx, %rbx
-	movabsq $16, %rdi
-	testq $3, %rdi
+	lock xadd.w %rdi, 8(%rbx)
+	movzx.wl %rdi, %rdi
+	movabsq $16, %rdx
+	testq $3, %rdx
 	jnz L2
-	lock xadd.l %rsi, 16(%rdx)
-	movq %r8, %rdi
-	lock xadd.b %rdi, 24(%rdx)
-	movzx.bq %rdi, %rdi
-	movabsq $32, %r8
-	testq $1, %r8
+	lock xadd.l %rsi, 16(%rbx)
+	lock xadd.b %r8, 24(%rbx)
+	movzx.bq %r8, %r8
+	movabsq $32, %rdx
+	testq $1, %rdx
 	jnz L2
-	lock xadd.w %r9, 32(%rdx)
+	lock xadd.w %r9, 32(%rbx)
 	movzx.wq %r9, %r9
-	movabsq $40, %r8
-	testq $3, %r8
+	movabsq $40, %rdx
+	testq $3, %rdx
 	jnz L2
-	movq %r10, %r8
-	lock xadd.l %r8, 40(%rdx)
-	movzx.lq %r8, %r8
-	movabsq $48, %r10
-	testq $7, %r10
+	lock xadd.l %r10, 40(%rbx)
+	movzx.lq %r10, %r10
+	movabsq $48, %rdx
+	testq $7, %rdx
 	jnz L2
-	lock xadd.q %r11, 48(%rdx)
+	lock xadd.q %r11, 48(%rbx)
 	movl %ecx, %eax
+	movl %edi, %ebx
 	movl %esi, %ecx
+	movq %r8, %rdi
 	movq %r9, %rsi
+	movq %r10, %r8
 	movq %r11, %r9
 	add $16, %rsp
 	popq %rdx
@@ -2260,7 +2248,7 @@ L2 (SSA Block: blk2):
 L0 (SSA Block: blk0):
 	pushq %rbp
 	movq %rsp, %rbp
-	pushq %rdx
+	sub $16, %rsp
 	testb $0x80, 7(%r13)
 	jnz L1
 L9 (SSA Block: blk9):
@@ -2269,7 +2257,6 @@ L2 (SSA Block: blk2):
 	jnz L4
 L3 (SSA Block: blk3):
 	movl %edi, %eax
-	popq %rdx
 	movq %rbp, %rsp
 	popq %rbp
 	ret
@@ -2280,16 +2267,15 @@ L6 (SSA Block: blk6):
 L8 (SSA Block: blk8):
 	movl %esi, %eax
 L5 (SSA Block: blk5):
-	popq %rdx
 	movq %rbp, %rsp
 	popq %rbp
 	ret
 L7 (SSA Block: blk7):
 	sub $1, %ecx
-	lea (%rdi,%rsi,1), %edx
+	lea (%rdi,%rsi,1), %edi
+	mov.l %rdi, (%rsp)
 	movl %esi, %edi
-	movl %edx, %esi
-	popq %rdx
+	movzx.lq (%rsp), %rsi
 	movq %rbp, %rsp
 	popq %rbp
 	tailCall f0
