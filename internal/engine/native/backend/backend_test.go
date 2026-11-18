@@ -463,9 +463,8 @@ L7 (SSA Block: blk7):
 L10:
 	ldr x27, [x21]
 	tbnz x27, #63, #-0x2c (L4)
-	subs wzr, w2, #0x0
-	b.eq #-0x40, (L1)
-	b #-0x4c (L11)
+	cbz w2, #-0x3c L1
+	b #-0x48 (L11)
 `,
 			// The loop's test for zero moved into the island (L8), after the
 			// preemption check: the masked test sees every zero.
@@ -2303,11 +2302,10 @@ L0 (SSA Block: blk0):
 	stp x30, xzr, [sp, #-0x10]!
 	str xzr, [sp, #-0x10]!
 	ldr x8, [x21]
-	tbnz x8, #63, #0x50 (L1)
+	tbnz x8, #63, #0x4c (L1)
 L9 (SSA Block: blk9):
 L2 (SSA Block: blk2):
-	subs wzr, w2, #0x0
-	b.ne #0x14, (L4)
+	cbnz w2, #0x14 (L4)
 L3 (SSA Block: blk3):
 	mov x0, x3
 	add sp, sp, #0x10
@@ -2333,7 +2331,7 @@ L7 (SSA Block: blk7):
 	b f0
 L1 (SSA Block: blk1):
 	yield x0
-	b #-0x5c (L2)
+	b #-0x58 (L2)
 `,
 		},
 		{

@@ -176,13 +176,16 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 			cc = cc.invert()
 		}
 
+		cvalDef.Instr.MarkLowered()
 		if !m.tryLowerBandToFlag(x, y, c) {
+			if m.lowerBranchOnZero(x, y, c, cc == eq, target) {
+				break
+			}
 			m.lowerIcmpToFlag(x, y, signed)
 		}
 		cbr := m.allocateInstr()
 		cbr.asCondBr(cc.asCond(), target, false /* ignored */)
 		m.insert(cbr)
-		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeFcmp): // This case we can use the Fpu flag directly.
 		cvalInstr := cvalDef.Instr
 		x, y, c := cvalInstr.FcmpData()
@@ -207,6 +210,29 @@ func (m *machine) LowerConditionalBranch(b *ssa.Instruction) {
 		cbr.asCondBr(c, target, false)
 		m.insert(cbr)
 	}
+}
+
+// lowerBranchOnZero branches to target where x is zero, or, with zero false, where it is not, if the
+// comparison of x with y, c, tests x against zero: a cbz or a cbnz needs no compare. It reports false,
+// emitting nothing, for any other comparison.
+func (m *machine) lowerBranchOnZero(x, y ssa.Value, c ssa.IntegerCmpCond, zero bool, target label) bool {
+	yDef := m.compiler.ValueDefinition(y)
+	if c != ssa.IntegerCmpCondEqual && c != ssa.IntegerCmpCondNotEqual ||
+		!yDef.IsFromInstr() || !yDef.Instr.Constant() || yDef.Instr.ConstantVal() != 0 {
+		return false
+	}
+	if m.compiler.MatchInstr(yDef, ssa.OpcodeIconst) {
+		yDef.Instr.MarkLowered()
+	}
+	rn := m.getOperand_NR(m.compiler.ValueDefinition(x), extModeNone).nr()
+	cond := registerAsRegNotZeroCond(rn)
+	if zero {
+		cond = registerAsRegZeroCond(rn)
+	}
+	cbr := m.allocateInstr()
+	cbr.asCondBr(cond, target, x.Type().Bits() == 64)
+	m.insert(cbr)
+	return true
 }
 
 // lowerTwoIcmpsToFlag branches to target where twoIcmpsToFlag's condition holds, or, for a brz, where it
