@@ -102,6 +102,11 @@ type (
 		// outStamp and blockLen are, for the block being allocated, the stamp of its live-outs' distances
 		// and how many instructions it has. See evictionCost.
 		outStamp, blockLen int32
+		// outPending is set while outBlk's live-outs' distances are still to be found: most blocks
+		// evict nothing, and so never need them. See settleOut.
+		outPending bool
+		outBlk     B
+		outF       F
 		// nextUseAfter is parallel to useBuf: for each use, the program counter of the same value's next
 		// use in the block, programCounterLiveOut if it has none but stays live, or -1 if it dies there.
 		nextUseAfter []programCounter
@@ -906,8 +911,8 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 	}
 	a.blockLen = int32(pc)
 	a.stamp++
-	a.nearestAfter(f, blk)
 	a.outStamp = a.stamp
+	a.outPending, a.outBlk, a.outF = true, blk, f
 
 	// Mark all live-out values by checking live-in of the successors.
 	// While doing so, we also update the desired register values.
@@ -1493,6 +1498,9 @@ func (a *Allocator[I, B, F]) Reset() {
 	a.blockStates.Reset()
 	a.phiDefInstListPool.Reset()
 	a.vs = a.vs[:0]
+	var nilB B
+	var nilF F
+	a.outPending, a.outBlk, a.outF = false, nilB, nilF
 }
 
 // computeNextUses fills nextUseAfter for the block being allocated, and leaves each value it uses
@@ -1547,6 +1555,7 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 	s := &a.state
 	// A value the loop does not use is live into its header only to be used past one of its exits: its
 	// distance from there is that far. One not live into it at all is dead.
+	a.settleOut()
 	a.stamp++
 	live := a.liveIns(header)
 	for k, st := range live {
@@ -1661,12 +1670,23 @@ func (a *Allocator[I, B, F]) evictionCost(vs *vrState[I, B, F], r RealReg) int64
 	case -1:
 		return 3 << 32
 	case programCounterLiveOut:
+		a.settleOut()
 		if vs.distStamp == a.outStamp {
 			return int64(a.blockLen) - int64(a.curPC) + int64(vs.dist) + spilledBias(vs)
 		}
 		return noNextUse
 	default:
 		return int64(next) - int64(a.curPC) + spilledBias(vs)
+	}
+}
+
+// settleOut finds the distances of the live-outs of the block being allocated, which allocBlock leaves
+// for the first eviction to need them. It runs before anything moves the stamp on, so that they come out
+// as they would have where allocBlock started.
+func (a *Allocator[I, B, F]) settleOut() {
+	if a.outPending {
+		a.outPending = false
+		a.nearestAfter(a.outF, a.outBlk)
 	}
 }
 
