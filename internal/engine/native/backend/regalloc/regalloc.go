@@ -1608,6 +1608,13 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 			phis[vs.v.RegType()]++
 		}
 	}
+	// A value the loop does not use, in a register the loop overwrites at a fixed place, a call's say, loses
+	// it there, and the back edge reloads it on every iteration.
+	s.regsInUse.range_(func(r RealReg, occ *vrState[I, B, F]) {
+		if clobbered.has(r) && movable(occ) && unused(occ) {
+			s.releaseRealReg(r)
+		}
+	})
 	for typ := RegType(0); typ < NumRegType; typ++ {
 		regs := a.regInfo.AllocatableRegisters[typ]
 		free := -phis[typ]
