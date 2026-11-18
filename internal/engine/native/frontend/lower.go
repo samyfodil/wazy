@@ -246,18 +246,11 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 	})
 
 	c.vecSum = vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim}
+	c.boundsBlk = c.ssaBuilder.CurrentBlock()
 	for c.loweringState.pc < len(c.wasmFunctionBody) {
 		c.lowerVecSums()
-		blkBeforeLowering := c.ssaBuilder.CurrentBlock()
 		c.lowerCurrentOpcode()
-		blkAfterLowering := c.ssaBuilder.CurrentBlock()
-		if blkBeforeLowering != blkAfterLowering {
-			// In Wasm, once a block exits, that means we've done compiling the block.
-			// Therefore, we finalize the known bounds at the end of the block for the exiting block.
-			c.finalizeKnownSafeBoundsAtTheEndOfBlock(blkBeforeLowering.ID())
-			// After that, we initialize the known bounds for the new compilation target block.
-			c.initializeCurrentBlockKnownBounds()
-		}
+		c.syncKnownSafeBounds()
 	}
 }
 

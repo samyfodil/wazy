@@ -106,6 +106,8 @@ type Compiler struct {
 
 	knownSafeBounds    [] /* ssa.ValueID to */ knownSafeBound
 	knownSafeBoundsSet []ssa.ValueID
+	// boundsBlk is the block knownSafeBounds describe; see syncKnownSafeBounds.
+	boundsBlk ssa.BasicBlock
 
 	// wideMulTerms is scratch for fuseWideMulAdd.
 	wideMulTerms []ssa.Value
@@ -796,8 +798,20 @@ func (c *Compiler) finalizeKnownSafeBoundsAtTheEndOfBlock(bID ssa.BasicBlockID) 
 	c.clearSafeBounds()
 }
 
+// syncKnownSafeBounds moves the known safe bounds to the current block if lowering has left the one they
+// describe: what held at that one's end is kept for its successors, and the current block starts with
+// what holds at the end of all of its predecessors. It is due after every instruction lowered, those of
+// an inlined body included, since a bound proven on one path must not reach a block another path enters.
+func (c *Compiler) syncKnownSafeBounds() {
+	if c.ssaBuilder.CurrentBlock() != c.boundsBlk {
+		c.finalizeKnownSafeBoundsAtTheEndOfBlock(c.boundsBlk.ID())
+		c.initializeCurrentBlockKnownBounds()
+	}
+}
+
 func (c *Compiler) initializeCurrentBlockKnownBounds() {
 	currentBlk := c.ssaBuilder.CurrentBlock()
+	c.boundsBlk = currentBlk
 	c.preds = c.preds[:0]
 	c.predSeenEpoch++
 	if c.predSeenEpoch == 0 {
