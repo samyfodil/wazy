@@ -430,10 +430,10 @@ func (m *machine) LowerInstr(instr *ssa.Instruction) {
 	case ssa.OpcodeYield:
 		// Below this frame the trampoline takes what a call passing nothing on the
 		// stack does, which the margin every call site keeps covers (see
-		// backend.StackBoundsCheckMarginBytes).
-		if m.maxRequiredStackSizeForCalls < 16 {
-			m.maxRequiredStackSizeForCalls = 16 // return address frame.
-		}
+		// backend.StackBoundsCheckMarginBytes), and so does the headroom a leaf
+		// keeps for a trampoline that exits to Go when it skips its own check (see
+		// backend.LeafStackCheckHeadroomBytes): it is no call for the stack check,
+		// as on amd64.
 		y := m.allocateInstr()
 		y.asYield(m.compiler.VRegOf(instr.Arg()))
 		m.insert(y)
