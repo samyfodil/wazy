@@ -554,6 +554,69 @@ blk6: () <-- (blk4)
 `,
 		},
 		{
+			name: "strip-mined loop from a constant", m: withLocal(unrollModule(countUpLoop)),
+			exp: `
+blk0: (v0:i64, v1:i64, v2:i32)
+	v3:i32 = Iconst_32 0x0
+	v4:i32 = Iconst_32 0x0
+	v11:i32 = Iconst_32 0x1
+	v12:i32 = Isub v2, v11
+	v13:i32 = Iconst_32 0x1249
+	v14:i32 = Icmp gt_u, v12, v13
+	v15:i32 = Iconst_32 0x124a
+	v16:i32 = Select v14, v15, v2
+	v27:i32 = PreemptRequested
+	Brnz v27, blk9
+	Jump blk1, v4, v2, v16
+
+blk1: (v6:i32,v9:i32,v17:i32) <-- (blk0,blk4,blk7,blk8,blk9)
+	v5:i32 = PreemptRequested elided
+	Brnz v5, blk3
+	Jump blk4
+
+blk2: ()
+
+blk3: () <-- (blk1)
+	Yield v0
+	Jump blk4
+
+blk4: () <-- (blk1,blk3)
+	v7:i32 = Iconst_32 0x1
+	v8:i32 = Iadd v6, v7
+	v10:i32 = Icmp neq, v8, v9
+	v18:i32 = Icmp neq, v8, v17
+	Brnz v18, blk1, v8, v9, v17
+	Jump blk6
+
+blk5: () <-- (blk6)
+	Jump blk_ret, v8
+
+blk6: () <-- (blk4)
+	v19:i32 = Icmp neq, v8, v9
+	Brnz v19, blk7
+	Jump blk5
+
+blk7: () <-- (blk6)
+	v20:i32 = Isub v9, v8
+	v21:i32 = Iconst_32 0x1249
+	v22:i32 = Icmp gt_u, v20, v21
+	v23:i32 = Iconst_32 0x1249
+	v24:i32 = Iadd v8, v23
+	v25:i32 = Select v22, v24, v9
+	v26:i32 = PreemptRequested
+	Brnz v26, blk8
+	Jump blk1, v8, v9, v25
+
+blk8: () <-- (blk7)
+	Yield v0
+	Jump blk1, v8, v9, v25
+
+blk9: () <-- (blk0)
+	Yield v0
+	Jump blk1, v4, v2, v16
+`,
+		},
+		{
 			name: "loop - br_if", m: testcases.LoopBrIf.Module,
 			exp: `
 blk0: (v0:i64, v1:i64)
@@ -4085,7 +4148,8 @@ func branchHinted(m *wasm.Module, hints ...wasm.BranchHint) *wasm.Module {
 }
 
 // The bodies of unrollModule's function: a walk of a linked list, which unrolls, one counting down,
-// which does not, and the walk with a call in it, which does not either.
+// which does not, one counting up from zero, which is strip-mined, and the walk with a call in it, which
+// does not unroll either.
 var (
 	chaseLoop = []byte{
 		wasm.OpcodeLoop, 0x40,
@@ -4101,6 +4165,15 @@ var (
 		wasm.OpcodeEnd,
 		wasm.OpcodeLocalGet, 0, wasm.OpcodeEnd,
 	}
+	countUpLoop = []byte{
+		wasm.OpcodeI32Const, 0, wasm.OpcodeLocalSet, 1,
+		wasm.OpcodeLoop, 0x40,
+		wasm.OpcodeLocalGet, 1, wasm.OpcodeI32Const, 1, wasm.OpcodeI32Add, wasm.OpcodeLocalTee, 1,
+		wasm.OpcodeLocalGet, 0, wasm.OpcodeI32Ne,
+		wasm.OpcodeBrIf, 0,
+		wasm.OpcodeEnd,
+		wasm.OpcodeLocalGet, 1, wasm.OpcodeEnd,
+	}
 	callLoop = []byte{
 		wasm.OpcodeLoop, 0x40,
 		wasm.OpcodeCall, 1,
@@ -4110,6 +4183,12 @@ var (
 		wasm.OpcodeLocalGet, 0, wasm.OpcodeEnd,
 	}
 )
+
+// withLocal gives the first function of m an i32 local.
+func withLocal(m *wasm.Module) *wasm.Module {
+	m.CodeSection[0].LocalTypes = []wasm.ValueType{wasm.ValueTypeI32}
+	return m
+}
 
 // unrollModule is a module with a memory whose first function, (i32) -> i32, has body, and whose second
 // takes and returns nothing.

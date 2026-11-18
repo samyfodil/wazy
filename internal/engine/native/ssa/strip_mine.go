@@ -81,7 +81,7 @@ func (b *builder) StripMine(header, preheader, body BasicBlock, lc LoopCounter, 
 	b.currentBB = pre
 	x0 := lc.Start
 	if lc.isNext(b, t.x) {
-		x0 = b.AllocateInstruction().AsIadd(lc.Start, b.iconst(typ, lc.Step)).Insert(b).Return()
+		x0 = b.addConst(typ, lc.Start, lc.Step)
 	}
 	if t.nIsConst {
 		n0 = b.iconst(typ, t.nConst)
@@ -362,8 +362,16 @@ func (m limitMaker) emit(x, n Value) Value {
 		inRange := ins().AsIcmp(x, n, m.cc).Insert(b).Return()
 		far = ins().AsBand(far, inRange).Insert(b).Return()
 	}
-	moved := ins().AsIadd(x, b.iconst(m.typ, m.step*(m.span/m.dist)&widthMask(m.typ))).Insert(b).Return()
+	moved := b.addConst(m.typ, x, m.step*(m.span/m.dist))
 	return ins().AsSelect(far, moved, n).Insert(b).Return()
+}
+
+// addConst emits x + k into the current block: the sum itself, where x is a constant.
+func (b *builder) addConst(typ Type, x Value, k uint64) Value {
+	if c, ok := b.constantOf(x); ok {
+		return b.iconst(typ, (c+k)&widthMask(typ))
+	}
+	return b.AllocateInstruction().AsIadd(x, b.iconst(typ, k&widthMask(typ))).Insert(b).Return()
 }
 
 // iconst emits an integer constant of typ into the current block.
