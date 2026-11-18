@@ -4316,3 +4316,27 @@ func unrollModule(body []byte) *wasm.Module {
 		CodeSection:     []wasm.Code{{Body: body}, {Body: []byte{wasm.OpcodeEnd}}},
 	}
 }
+
+// TestCompiler_Release requires a released compiler to hold nothing of the module it compiled: not the
+// last body it read a block type from, nor the types its control frames had.
+func TestCompiler_Release(t *testing.T) {
+	m := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Results: []wasm.ValueType{wasm.ValueTypeI32}}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection:     []wasm.Code{{Body: []byte{wasm.OpcodeBlock, 0, wasm.OpcodeI32Const, 1, wasm.OpcodeEnd, wasm.OpcodeEnd}}},
+	}
+	offset := nativeapi.NewModuleContextOffsetData(m, false)
+	fc := NewFrontendCompiler(m, ssa.NewBuilder(), &offset, false, false)
+	code := &m.CodeSection[0]
+	fc.Init(0, 0, &m.TypeSection[0], code.LocalTypes, code.Body, false, 0)
+	fc.LowerToSSA()
+	require.True(t, fc.br.Size() > 0)
+	frames := fc.loweringState.controlFrames[:cap(fc.loweringState.controlFrames)]
+	require.True(t, frames[1].blockType == &m.TypeSection[0])
+
+	fc.Release()
+	require.Equal(t, int64(0), fc.br.Size())
+	for i := range frames {
+		require.Nil(t, frames[i].blockType)
+	}
+}

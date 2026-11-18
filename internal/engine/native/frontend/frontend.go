@@ -241,6 +241,9 @@ func (c *Compiler) Reuse(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 func (c *Compiler) Release() {
 	*c = c.scratch()
 	c.vecPlanner.body, c.vecPlanner.types = nil, nil
+	c.br.Reset(nil)
+	frames := c.loweringState.controlFrames
+	clear(frames[:cap(frames)])
 }
 
 // scratch is a Compiler holding nothing but c's per-function scratch, emptied.
