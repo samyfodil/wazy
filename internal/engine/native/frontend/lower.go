@@ -90,6 +90,14 @@ type (
 		// entered. See settleExits.
 		exitsFrom      int
 		checkedOnEntry bool
+		// copy2 is, while the first of a loop frame's two copies of its body is lowered, the block the
+		// second starts at, where a branch back goes; bodyStart is where the body starts in the code, and
+		// vecSums and ehEntries how many sum candidates were left and try_tables had been lowered when it
+		// did. copy1Exit is, while the second is, the block the first falls off its end in. See
+		// unrollCandidate.
+		copy2, copy1Exit   ssa.BasicBlock
+		bodyStart          int
+		vecSums, ehEntries int
 		// landingBlk and catches are a controlFrameKindTryTableWithCatch
 		// frame's landing pad and catch clauses; see lowerCatchLanding.
 		landingBlk ssa.BasicBlock
@@ -245,19 +253,12 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 		followingBlock: c.ssaBuilder.ReturnBlock(),
 	})
 
-	c.vecSum = vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim}
+	c.vecSum = vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim, run: c.vecSum.run}
+	c.boundsBlk = c.ssaBuilder.CurrentBlock()
 	for c.loweringState.pc < len(c.wasmFunctionBody) {
 		c.lowerVecSums()
-		blkBeforeLowering := c.ssaBuilder.CurrentBlock()
 		c.lowerCurrentOpcode()
-		blkAfterLowering := c.ssaBuilder.CurrentBlock()
-		if blkBeforeLowering != blkAfterLowering {
-			// In Wasm, once a block exits, that means we've done compiling the block.
-			// Therefore, we finalize the known bounds at the end of the block for the exiting block.
-			c.finalizeKnownSafeBoundsAtTheEndOfBlock(blkBeforeLowering.ID())
-			// After that, we initialize the known bounds for the new compilation target block.
-			c.initializeCurrentBlockKnownBounds()
-		}
+		c.syncKnownSafeBounds()
 	}
 }
 
@@ -1473,8 +1474,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			state.unreachableDepth++
 			break
 		}
+		vecMapped := false
 		if (c.vecMap || VecPlanHook != nil) && len(bt.Params) == 0 && len(bt.Results) == 0 && c.vecMapMemory() {
-			plan, why, ok := planVecMap(c.wasmFunctionBody, state.pc+1, c.localTypes())
+			plan, ok := c.vecPlanner.plan(c.wasmFunctionBody, state.pc+1, c.localTypes())
+			why := ""
 			// A top exit leaves the construct around the loop, which must then end right after it, as the
 			// planner checks, and not be a loop: branching to that would go round it instead.
 			if ok && plan.top && state.ctrlPeekAt(0).kind == controlFrameKindLoop {
@@ -1482,8 +1485,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 			}
 			if ok && c.vecMap {
 				ok = c.lowerVecMap(plan)
+				vecMapped = ok
 			}
 			if VecPlanHook != nil {
+				if plan == nil {
+					why = c.vecPlanner.reason()
+				}
 				VecPlanHook(c.wasmLocalFunctionIndex, loopStart, ok, why)
 			}
 		}
@@ -1521,6 +1528,10 @@ func (c *Compiler) lowerCurrentOpcode() {
 			frame.preheader, frame.loopStart = preheader, loopStart
 			if state.dispatch.frame < 0 {
 				c.detectDispatch()
+			}
+			if !vecMapped && len(bt.Params) == 0 && len(bt.Results) == 0 && c.unrollCandidate(frame) {
+				frame.copy2, frame.bodyStart = builder.AllocateBasicBlock(), state.pc
+				frame.vecSums, frame.ehEntries = len(c.vecSum.cands), len(c.pendingEhEntries)
 			}
 		}
 	case wasm.OpcodeIf:
@@ -1615,6 +1626,12 @@ func (c *Compiler) lowerCurrentOpcode() {
 		}
 
 		ctrl := state.ctrlPop()
+		if ctrl.copy2 != nil && c.lowerSecondCopy(&ctrl) {
+			break
+		}
+		if ctrl.copy1Exit != nil {
+			c.leaveFirstCopy(&ctrl)
+		}
 		followingBlk := ctrl.followingBlock
 		if d := &state.dispatch; d.frame >= 0 {
 			switch i := len(state.controlFrames); {
@@ -5105,6 +5122,12 @@ func (c *Compiler) recordRangeSafeBound(memIndex wasm.Index, baseAddr ssa.Value,
 	return address
 }
 
+// sharesAddress reports whether an access disp bytes past a base address goes through the absolute
+// address an earlier access through that base computed (see sharesDisplacedAddress).
+func (c *Compiler) sharesAddress(disp uint64) bool {
+	return c.sharesDisplacedAddress && disp != 0
+}
+
 func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffset, operationSizeInBytes uint64) (address ssa.Value) {
 	if c.memoryIsIndex64(memIndex) {
 		return c.memOpSetup64(memIndex, baseAddr, constOffset, operationSizeInBytes)
@@ -5123,7 +5146,9 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 	if !c.multiMemory {
 		if known := c.getKnownSafeBound(baseAddrID); known.valid() {
 			// We reuse the calculated absolute address even if the bound is not known to be safe.
-			address = known.absoluteAddr
+			if c.sharesAddress(constOffset) {
+				address = known.absoluteAddr
+			}
 			if ceil <= known.bound {
 				if !address.Valid() {
 					// This means that, the bound is known to be safe, but the memory base might have changed.
@@ -5135,7 +5160,9 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 						Return()
 					address = builder.AllocateInstruction().
 						AsIadd(memBase, extBaseAddr).Insert(builder).Return()
-					known.absoluteAddr = address // Update the absolute address for the subsequent memory access.
+					if !known.absoluteAddr.Valid() {
+						known.absoluteAddr = address // Update the absolute address for the subsequent memory access.
+					}
 				}
 				return
 			}
@@ -5195,10 +5222,10 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 	memLen := c.getMemoryLenValue(memIndex, false)
 
 	cmp := builder.AllocateInstruction()
-	if constOffset == 0 && ceil <= memoryMinSizeInBytes {
-		// The address is the base itself: it is in bounds while `baseAddr <= memLen - ceil`, which the
-		// memory's minimum size keeps from wrapping. The limit is the same for every access of this size, and
-		// stays in a register across a loop that does not change the memory's length (see passLoopInvariantCodeMotionOpt).
+	if (constOffset == 0 || c.limitsDisplacedAccess) && ceil <= memoryMinSizeInBytes {
+		// The access is in bounds while `baseAddr <= memLen - ceil`, which the memory's minimum size keeps from
+		// wrapping. The limit is the same for every access that ends where this one does, and stays in a
+		// register across a loop that does not change the memory's length (see passLoopInvariantCodeMotionOpt).
 		limit := builder.AllocateInstruction().AsIsub(memLen, ceilConst.Return()).Insert(builder).Return()
 		cmp.AsIcmp(extBaseAddr, limit, ssa.IntegerCmpCondUnsignedGreaterThan)
 	} else {
@@ -5268,12 +5295,17 @@ func (c *Compiler) derivedSafeAddress(memIndex wasm.Index, baseAddr ssa.Value, c
 		return ssa.ValueInvalid, false
 	}
 	builder := c.ssaBuilder
-	base := known.absoluteAddr
+	base := ssa.ValueInvalid
+	if c.sharesAddress(k) {
+		base = known.absoluteAddr
+	}
 	if !base.Valid() {
 		memBase := c.getMemoryBaseValue(memIndex, false)
 		ext := builder.AllocateInstruction().AsUExtend(x, 32, 64).Insert(builder).Return()
 		base = builder.AllocateInstruction().AsIadd(memBase, ext).Insert(builder).Return()
-		known.absoluteAddr = base
+		if !known.absoluteAddr.Valid() {
+			known.absoluteAddr = base
+		}
 	}
 	kv := builder.AllocateInstruction().AsIconst64(k).Insert(builder).Return()
 	address := builder.AllocateInstruction().AsIadd(base, kv).Insert(builder).Return()
@@ -6706,6 +6738,9 @@ func (l *loweringState) brTargetArgNumFor(labelIndex uint32) (targetBlk ssa.Basi
 	if targetFrame.isLoop() {
 		targetFrame.uncovered = targetFrame.uncovered || !yielded
 		targetBlk, argNum = targetFrame.blk, len(targetFrame.blockType.Params)
+		if targetFrame.copy2 != nil {
+			targetBlk = targetFrame.copy2
+		}
 	} else {
 		targetFrame.exitMissed = targetFrame.exitMissed || !yielded
 		targetBlk, argNum = targetFrame.followingBlock, len(targetFrame.blockType.Results)

@@ -6,7 +6,8 @@ import (
 	"github.com/samyfodil/wazy/internal/expctxkeys"
 )
 
-// WithCompilationWorkers sets the desired number of compilation workers.
+// WithCompilationWorkers sets the desired number of compilation workers. Without it, the
+// compiler picks the number from the size of the module, up to GOMAXPROCS.
 func WithCompilationWorkers(ctx context.Context, workers int) context.Context {
 	return context.WithValue(ctx, expctxkeys.CompilationWorkers{}, workers)
 }

@@ -453,9 +453,10 @@ func (s *vsSim) lanesOK(l [4]int32, lane map[int32]bool) bool {
 type vecSum struct {
 	scanned int
 	cands   []vsCand
-	sim     *vsSim
-	join    ssa.BasicBlock
-	end     int
+	// sim scans for candidates, and run simulates the one lowered: both keep their memory.
+	sim, run *vsSim
+	join     ssa.BasicBlock
+	end      int
 }
 
 type vsCand struct{ start, end int }
@@ -528,7 +529,10 @@ func (c *Compiler) lowerVecSums() {
 	}
 	cd := vs.cands[0]
 	vs.cands = vs.cands[1:]
-	s := newVsSim()
+	if vs.run == nil {
+		vs.run = newVsSim()
+	}
+	s := vs.run.reset()
 	for at := pc; at < cd.end; {
 		next, ok := s.step(c.wasmFunctionBody, at)
 		if !ok {

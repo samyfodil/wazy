@@ -145,7 +145,9 @@ func doCompile(args []string, stdErr io.Writer) int {
 		*workers = maxProcs
 	}
 
-	ctx = api.WithCompilationWorkers(ctx, *workers)
+	if *workers > 0 {
+		ctx = api.WithCompilationWorkers(ctx, *workers)
+	}
 
 	rt := wazy.NewRuntimeWithConfig(ctx, c)
 	defer rt.Close(ctx)
@@ -318,7 +320,9 @@ func doRun(args []string, stdOut io.Writer, stdErr logging.Writer) int {
 		*workers = maxProcs
 	}
 
-	compilationCtx = api.WithCompilationWorkers(compilationCtx, *workers)
+	if *workers > 0 {
+		compilationCtx = api.WithCompilationWorkers(compilationCtx, *workers)
+	}
 
 	if timeout > 0 {
 		newCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -504,7 +508,7 @@ func cacheDirFlag(flags *flag.FlagSet) *string {
 }
 
 func workersFlag(flags *flag.FlagSet) *int {
-	return flags.Int("workers", 1, "(experimental) Number of desired compilation workers. "+
+	return flags.Int("workers", 0, "(experimental) Number of desired compilation workers, or 0 to choose by module size. "+
 		"Increasing this value may improve compilation speed at the cost of higher memory usage.")
 }
 

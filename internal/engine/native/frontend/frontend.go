@@ -77,9 +77,21 @@ type Compiler struct {
 	// threading the same fix through the N-way predecessor intersection.
 	// A deliberately coarse ceiling: ship correct now, add the memory-aware merge
 	// if multi-memory codegen benchmarks show it's worth it.
-	multiMemory    bool
-	memoryShared   []bool
-	memoryMaxPages []uint64
+	multiMemory bool
+	// sharesDisplacedAddress makes an access at a nonzero displacement from a base address go through the
+	// absolute address an earlier access through that base computed, rather than compute its own. It is
+	// worth it only where the addressing mode cannot fold base, index and displacement together: amd64
+	// can, so a shared address there only costs an instruction and a register, and puts an add between a
+	// pointer loaded from memory and the load through it. arm64 cannot, so an access with a displacement
+	// needs the add anyway; one without keeps it off the path.
+	sharesDisplacedAddress bool
+	// limitsDisplacedAccess checks an access at a nonzero displacement from its base against a limit, the
+	// memory's length less where the access ends, as one at none is, rather than add that end to the base
+	// and compare the length with the sum. amd64 then compares and branches in one fused instruction, for
+	// a register per distinct end in a loop; arm64 measured no faster.
+	limitsDisplacedAccess bool
+	memoryShared          []bool
+	memoryMaxPages        []uint64
 	// memoryIndex64 records, per memory index, whether that memory has an i64
 	// index type, in which case its address and length operands are full 64-bit
 	// values whose arithmetic can overflow. anyMemory64 is true if any does.
@@ -106,6 +118,8 @@ type Compiler struct {
 
 	knownSafeBounds    [] /* ssa.ValueID to */ knownSafeBound
 	knownSafeBoundsSet []ssa.ValueID
+	// boundsBlk is the block knownSafeBounds describe; see syncKnownSafeBounds.
+	boundsBlk ssa.BasicBlock
 
 	// wideMulTerms is scratch for fuseWideMulAdd.
 	wideMulTerms []ssa.Value
@@ -117,6 +131,8 @@ type Compiler struct {
 	inlineLeaves bool
 	// vecMap turns vector map loops on; see SetVecMap.
 	vecMap bool
+	// unrollLoops turns unrolling small loops on; see unrollCandidate.
+	unrollLoops bool
 	// inlinedCallee is one more than the local index of the function inlineLeaf or inlineSelf is
 	// lowering, and zero outside one. See memoryOutOfBoundsCode.
 	inlinedCallee uint32
@@ -129,6 +145,11 @@ type Compiler struct {
 	inlineResults wasm.FunctionType
 	// vecSum is the vector sum being lowered, and where to look for the next.
 	vecSum vecSum
+	// vecPlanner plans each loop for lowerVecMap, and popcountSim reads each for popcountLoop. They
+	// keep their memory from one loop, and one function, to the next, as localTypesBuf does.
+	vecPlanner    vecPlanner
+	popcountSim   *vsSim
+	localTypesBuf []wasm.ValueType
 	// lastStore is the last full-width store, while nothing that may write memory has run since in its
 	// block: a load of the same address and width takes its value instead of reading it back.
 	lastStore storedValue
@@ -190,20 +211,64 @@ var LoopYield = true
 // NewFrontendCompiler returns a frontend Compiler.
 func NewFrontendCompiler(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativeapi.ModuleContextOffsetData, listenerOn bool, sourceInfo bool) *Compiler {
 	c := &Compiler{
-		m:                                 m,
-		ssaBuilder:                        ssaBuilder,
 		br:                                bytes.NewReader(nil),
-		offset:                            offset,
-		loopYield:                         LoopYield,
-		inlineLeaves:                      true,
-		vecMap:                            runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64",
-		needSourceOffsetInfo:              sourceInfo,
-		tryTableMetadata:                  &localTryTableMetadata{},
 		varLengthKnownSafeBoundWithIDPool: nativeapi.NewVarLengthPool[knownSafeBoundWithID](),
 	}
+	return c.Reuse(m, ssaBuilder, offset, listenerOn, sourceInfo)
+}
+
+// Reuse readies c, which may have compiled another module, to compile m, as NewFrontendCompiler would,
+// and returns it. Everything that depends on the module starts over; what c keeps is the memory of its
+// per-function scratch, which Init and the lowering empty before each function anyway.
+func (c *Compiler) Reuse(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativeapi.ModuleContextOffsetData, listenerOn bool, sourceInfo bool) *Compiler {
+	*c = c.scratch()
+	c.m, c.ssaBuilder, c.offset = m, ssaBuilder, offset
+	c.loopYield = LoopYield
+	c.inlineLeaves = true
+	c.vecMap = runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
+	c.unrollLoops = true
+	c.sharesDisplacedAddress = runtime.GOARCH == "arm64"
+	c.limitsDisplacedAccess = runtime.GOARCH == "amd64"
+	c.needSourceOffsetInfo = sourceInfo
+	c.tryTableMetadata = &localTryTableMetadata{}
 	c.declareSignatures(listenerOn)
 	c.declareModuleInvariants()
 	return c
+}
+
+// Release drops what c holds of the module it compiled, keeping only its scratch memory, so that a
+// pooled c does not keep the module alive.
+func (c *Compiler) Release() {
+	*c = c.scratch()
+	c.vecPlanner.body, c.vecPlanner.types = nil, nil
+	c.br.Reset(nil)
+	frames := c.loweringState.controlFrames
+	clear(frames[:cap(frames)])
+}
+
+// scratch is a Compiler holding nothing but c's per-function scratch, emptied.
+func (c *Compiler) scratch() Compiler {
+	return Compiler{
+		br:                                c.br,
+		wasmLocalToVariable:               c.wasmLocalToVariable[:0],
+		loweringState:                     c.loweringState,
+		knownSafeBounds:                   c.knownSafeBounds,
+		knownSafeBoundsSet:                c.knownSafeBoundsSet,
+		wideMulTerms:                      c.wideMulTerms[:0],
+		inlineLocals:                      c.inlineLocals[:0],
+		vecSum:                            vecSum{cands: c.vecSum.cands[:0], sim: c.vecSum.sim, run: c.vecSum.run},
+		vecPlanner:                        c.vecPlanner,
+		popcountSim:                       c.popcountSim,
+		localTypesBuf:                     c.localTypesBuf[:0],
+		knownSafeBoundsAtTheEndOfBlocks:   c.knownSafeBoundsAtTheEndOfBlocks[:0],
+		varLengthKnownSafeBoundWithIDPool: c.varLengthKnownSafeBoundWithIDPool,
+		pendingEhEntries:                  c.pendingEhEntries[:0],
+		pointers:                          c.pointers[:0],
+		bounds:                            c.bounds[:0],
+		preds:                             c.preds[:0],
+		predSeen:                          c.predSeen,
+		predSeenEpoch:                     c.predSeenEpoch,
+	}
 }
 
 // SetInlineLeaves turns off lowering small callees in place of their calls (see isInlinableLeaf), for
@@ -213,6 +278,18 @@ func (c *Compiler) SetInlineLeaves(on bool) { c.inlineLeaves = on }
 // SetVecMap turns off vectorizing loops (see lowerVecMap), for tests that pin how a loop is lowered. It must
 // be called before lowering.
 func (c *Compiler) SetVecMap(on bool) { c.vecMap = on }
+
+// SetUnrollLoops turns off unrolling small loops (see unrollCandidate), for tests that pin how a loop is
+// lowered. It must be called before lowering.
+func (c *Compiler) SetUnrollLoops(on bool) { c.unrollLoops = on }
+
+// SetSharesDisplacedAddress picks how addresses are shared between accesses through one base (see
+// sharesDisplacedAddress), for tests that pin the lowering on every host. It must be called before lowering.
+func (c *Compiler) SetSharesDisplacedAddress(on bool) { c.sharesDisplacedAddress = on }
+
+// SetLimitsDisplacedAccess picks how an access at a displacement is bounds checked (see
+// limitsDisplacedAccess), for tests that pin the lowering on every host. It must be called before lowering.
+func (c *Compiler) SetLimitsDisplacedAccess(on bool) { c.limitsDisplacedAccess = on }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {
@@ -796,8 +873,20 @@ func (c *Compiler) finalizeKnownSafeBoundsAtTheEndOfBlock(bID ssa.BasicBlockID) 
 	c.clearSafeBounds()
 }
 
+// syncKnownSafeBounds moves the known safe bounds to the current block if lowering has left the one they
+// describe: what held at that one's end is kept for its successors, and the current block starts with
+// what holds at the end of all of its predecessors. It is due after every instruction lowered, those of
+// an inlined body included, since a bound proven on one path must not reach a block another path enters.
+func (c *Compiler) syncKnownSafeBounds() {
+	if c.ssaBuilder.CurrentBlock() != c.boundsBlk {
+		c.finalizeKnownSafeBoundsAtTheEndOfBlock(c.boundsBlk.ID())
+		c.initializeCurrentBlockKnownBounds()
+	}
+}
+
 func (c *Compiler) initializeCurrentBlockKnownBounds() {
 	currentBlk := c.ssaBuilder.CurrentBlock()
+	c.boundsBlk = currentBlk
 	c.preds = c.preds[:0]
 	c.predSeenEpoch++
 	if c.predSeenEpoch == 0 {

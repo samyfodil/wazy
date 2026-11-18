@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -79,6 +80,81 @@ func TestEngine_CompileModule(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompileWorkers(t *testing.T) {
+	bg := context.Background()
+	procs := runtime.GOMAXPROCS(0)
+	const step = parallelCompileBytesPerWorker
+	mod := func(sizes ...int) *wasm.Module {
+		m := &wasm.Module{}
+		for _, size := range sizes {
+			m.CodeSection = append(m.CodeSection, wasm.Code{Body: make([]byte, size)})
+		}
+		return m
+	}
+	many := make([]int, 64)
+	for i := range many {
+		many[i] = step
+	}
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		m    *wasm.Module
+		want int
+	}{
+		{name: "one function", ctx: bg, m: mod(1 << 20), want: 1},
+		{name: "small module", ctx: bg, m: mod(100, 100, 100), want: 1},
+		{name: "largest function dominates", ctx: bg, m: mod(1<<20, step-1), want: 1},
+		{name: "one worker per step past the largest", ctx: bg, m: mod(1<<20, step, step), want: min(3, procs)},
+		{name: "up to GOMAXPROCS", ctx: bg, m: mod(many...), want: min(64, procs)},
+		{name: "asked", ctx: api.WithCompilationWorkers(bg, 3), m: mod(1, 1, 1, 1), want: 3},
+		{name: "asked for more than there are functions", ctx: api.WithCompilationWorkers(bg, 8), m: mod(1, 1), want: 2},
+		{name: "asked for one", ctx: api.WithCompilationWorkers(bg, 1), m: mod(many...), want: 1},
+		{name: "asked for none", ctx: api.WithCompilationWorkers(bg, 0), m: mod(many...), want: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, compileWorkers(tc.ctx, tc.m))
+		})
+	}
+}
+
+func TestCompileOrder(t *testing.T) {
+	m := &wasm.Module{CodeSection: []wasm.Code{
+		{Body: make([]byte, 2)}, {Body: make([]byte, 5)}, {Body: make([]byte, 2)}, {Body: make([]byte, 9)},
+	}}
+	require.Equal(t, []int{0, 1, 2, 3}, compileOrder(m, nil, 1))
+	require.Equal(t, []int{3, 1, 0, 2}, compileOrder(m, nil, 2))
+	require.Equal(t, []int{2, 0, 3, 1}, compileOrder(m, []int{2, 0, 3, 1}, 2))
+}
+
+// TestEngine_CompileModule_workers requires a module big enough to be compiled by several workers
+// without asking to come out byte for byte as it does from one.
+func TestEngine_CompileModule_workers(t *testing.T) {
+	// Each function returns its own index, so a body placed at the wrong offset changes the code.
+	m := &wasm.Module{TypeSection: []wasm.FunctionType{{Results: []wasm.ValueType{wasm.ValueTypeI32}}}}
+	for i := range 6 {
+		var body []byte
+		for range (i + 1) * parallelCompileBytesPerWorker / 6 {
+			body = append(body, wasm.OpcodeI32Const, 1, wasm.OpcodeI32Const, 2, wasm.OpcodeI32Add, wasm.OpcodeDrop)
+		}
+		body = append(body, wasm.OpcodeI32Const, byte(i), wasm.OpcodeEnd)
+		m.FunctionSection = append(m.FunctionSection, 0)
+		m.CodeSection = append(m.CodeSection, wasm.Code{Body: body})
+	}
+	if runtime.GOMAXPROCS(0) > 1 {
+		require.True(t, compileWorkers(context.Background(), m) > 1)
+	}
+
+	e := NewEngine(context.Background(), api.CoreFeaturesV2, nil).(*engine)
+	one, err := e.compileModule(api.WithCompilationWorkers(context.Background(), 1), m, nil)
+	require.NoError(t, err)
+	several, err := e.compileModule(context.Background(), m, nil)
+	require.NoError(t, err)
+	require.Equal(t, one.functionOffsets, several.functionOffsets)
+	require.Equal(t, one.executable, several.executable)
 }
 
 func TestEngine_CompileModule_alignment(t *testing.T) {

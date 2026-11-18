@@ -18,6 +18,7 @@ import (
 	"github.com/samyfodil/wazy/internal/engine/native/frontend"
 	"github.com/samyfodil/wazy/internal/engine/native/nativeapi"
 	"github.com/samyfodil/wazy/internal/engine/native/ssa"
+	"github.com/samyfodil/wazy/internal/expctxkeys"
 	"github.com/samyfodil/wazy/internal/filecache"
 	"github.com/samyfodil/wazy/internal/platform"
 	"github.com/samyfodil/wazy/internal/version"
@@ -309,6 +310,17 @@ type compileUnit struct {
 	machine backend.Machine
 	builder ssa.Builder
 	be      backend.Compiler
+	fe      *frontend.Compiler
+}
+
+// frontend returns the unit's frontend compiler, ready to lower m's functions.
+func (u *compileUnit) frontend(m *wasm.Module, offsets *nativeapi.ModuleContextOffsetData, withListener, needSourceInfo bool) *frontend.Compiler {
+	if u.fe == nil {
+		u.fe = frontend.NewFrontendCompiler(m, u.builder, offsets, withListener, needSourceInfo)
+	} else {
+		u.fe.Reuse(m, u.builder, offsets, withListener, needSourceInfo)
+	}
+	return u.fe
 }
 
 // compileUnits recycles compileUnits across modules. All three components hold nativeapi.Pool
@@ -332,6 +344,14 @@ func acquireCompileUnit() *compileUnit {
 	return &compileUnit{machine: machine, builder: builder, be: backend.NewCompiler(context.Background(), machine, builder)}
 }
 
+// releaseCompileUnit returns u to compileUnits, keeping nothing of the module it compiled alive.
+func releaseCompileUnit(u *compileUnit) {
+	if u.fe != nil {
+		u.fe.Release()
+	}
+	compileUnits.Put(u)
+}
+
 func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (*compiledModule, error) {
 	if module.IsHostModule {
 		return e.compileHostModule(ctx, module, listeners)
@@ -349,8 +369,8 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	}
 
 	unit := acquireCompileUnit()
-	defer compileUnits.Put(unit)
-	machine, ssaBuilder, be := unit.machine, unit.builder, unit.be
+	defer releaseCompileUnit(unit)
+	machine, be := unit.machine, unit.be
 
 	relocator, err := newEngineRelocator(machine, importedFns, localFns)
 	if err != nil {
@@ -370,115 +390,85 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 		indexes = nativeapi.DeterministicCompilationVerifierRandomizeIndexes(ctx)
 	}
 
-	if workers := api.GetCompilationWorkers(ctx); workers <= 1 {
-		// Compile with a single goroutine.
-		fe := frontend.NewFrontendCompiler(module, ssaBuilder, &cm.offsets, withListener, needSourceInfo)
+	// Functions are compiled by workers, the calling goroutine with its unit among them, each taking the
+	// next function in order, largest first: the largest is what a module waits for longest, so it starts
+	// at once and the rest fill in around it. Their results are added to the relocator in index order once
+	// all are done, which keeps the executable's layout independent of who compiled what when.
+	workers := compileWorkers(ctx, module)
+	order := compileOrder(module, indexes, workers)
+	type compiledFunc struct {
+		fctx        context.Context
+		body        []byte
+		relsPerFunc []backend.RelocationInfo
+		offsPerFunc []backend.SourceOffsetInfo
+		ehEntries   []nativeapi.EhEntry
+		frameSize   int64
+	}
+	compiledFuncs := make([]compiledFunc, len(module.CodeSection))
+	// The first function that fails stops the rest; how the caller's context ends is not this one's business.
+	var failed atomic.Bool
+	var failure error
+	var failureOnce sync.Once
 
-		for i := range module.CodeSection {
-			if nativeapi.DeterministicCompilationVerifierEnabled {
-				i = indexes[i]
+	// Try-table IDs are baked into compiled machine code, so all workers must share one table to keep them
+	// unique across the module.
+	var sharedTTM *frontend.SharedTryTableMetadata
+	if workers > 1 {
+		sharedTTM = frontend.NewSharedTryTableMetadata()
+	}
+	var next atomic.Uint32
+	work := func(unit *compileUnit) {
+		ssaBuilder, be := unit.builder, unit.be
+		fe := unit.frontend(module, &cm.offsets, withListener, needSourceInfo)
+		if sharedTTM != nil {
+			fe = fe.WithTryTableMetadata(sharedTTM)
+		}
+		for !failed.Load() {
+			k := int(next.Add(1)) - 1
+			if k >= len(order) {
+				break
 			}
-
+			i := order[k]
 			fidx := wasm.Index(i + importedFns)
 			fctx := functionContext(ctx, module, i, fidx)
-
 			needListener := len(listeners) > i && listeners[i] != nil
 			body, relsPerFunc, ehEntries, frameSize, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener)
 			if err != nil {
-				return nil, fmt.Errorf("compile function %d/%d: %v", i, len(module.CodeSection)-1, err)
+				failureOnce.Do(func() { failure = fmt.Errorf("compile function %d/%d: %v", i, len(module.CodeSection)-1, err) })
+				failed.Store(true)
+				return
 			}
-
-			relocator.appendFunction(fctx, module, cm, i, fidx, body, relsPerFunc, be.SourceOffsetInfo(), ehEntries, frameSize)
+			// The relocations and the source offsets belong to the backend, which reuses them for the next
+			// function; the body and the exception entries are the function's own already.
+			compiledFuncs[i] = compiledFunc{
+				fctx, body, slices.Clone(relsPerFunc), slices.Clone(be.SourceOffsetInfo()), ehEntries, frameSize,
+			}
 		}
-		cm.tryTableInfo = fe.TryTableMetadata()
-	} else {
-		// Compile with N worker goroutines.
-		// Collect compiled functions across workers in a slice,
-		// to be added to the relocator in-order and resolved serially at the end.
-		// This uses more memory and CPU (across cores), but can be significantly faster.
-		type compiledFunc struct {
-			fctx        context.Context
-			fnum        int
-			fidx        wasm.Index
-			body        []byte
-			relsPerFunc []backend.RelocationInfo
-			offsPerFunc []backend.SourceOffsetInfo
-			ehEntries   []nativeapi.EhEntry
-			frameSize   int64
+		if sharedTTM == nil {
+			cm.tryTableInfo = fe.TryTableMetadata()
 		}
-
-		compiledFuncs := make([]compiledFunc, len(module.CodeSection))
-		ctx, cancel := context.WithCancelCause(ctx)
-		defer cancel(nil)
-
-		// Try-table IDs are baked into compiled machine code, so all
-		// workers must share a single table to ensure globally unique IDs.
-		sharedTTM := frontend.NewSharedTryTableMetadata()
-
-		var count atomic.Uint32
-		var wg sync.WaitGroup
-		wg.Add(workers)
-
-		for range workers {
-			go func() {
-				defer wg.Done()
-
-				// Takes compiler instances which are reused for each function.
-				unit := acquireCompileUnit()
-				defer compileUnits.Put(unit)
-				ssaBuilder, be := unit.builder, unit.be
-				fe := frontend.NewFrontendCompiler(
-					module, ssaBuilder, &cm.offsets, withListener, needSourceInfo).
-					WithTryTableMetadata(sharedTTM)
-
-				for {
-					if err := ctx.Err(); err != nil {
-						// Compilation canceled!
-						return
-					}
-
-					i := int(count.Add(1)) - 1
-					if i >= len(module.CodeSection) {
-						return
-					}
-
-					if nativeapi.DeterministicCompilationVerifierEnabled {
-						i = indexes[i]
-					}
-
-					fidx := wasm.Index(i + importedFns)
-					fctx := functionContext(ctx, module, i, fidx)
-
-					needListener := len(listeners) > i && listeners[i] != nil
-					body, relsPerFunc, ehEntries, frameSize, err := e.compileLocalWasmFunction(fctx, module, wasm.Index(i), fe, ssaBuilder, be, needListener)
-					if err != nil {
-						cancel(fmt.Errorf("compile function %d/%d: %v", i, len(module.CodeSection)-1, err))
-						return
-					}
-
-					compiledFuncs[i] = compiledFunc{
-						fctx, i, fidx, body,
-						// These slices are internal to the backend compiler and since we are going to buffer them instead
-						// of process them immediately we need to copy the memory.
-						slices.Clone(relsPerFunc),
-						slices.Clone(be.SourceOffsetInfo()),
-						ehEntries, // already a fresh slice: buildEhEntries allocates its own.
-						frameSize,
-					}
-				}
-			}()
-		}
-
-		wg.Wait()
-		if err := context.Cause(ctx); err != nil {
-			return nil, err
-		}
-
-		for i := range compiledFuncs {
-			fn := &compiledFuncs[i]
-			relocator.appendFunction(fn.fctx, module, cm, fn.fnum, fn.fidx, fn.body, fn.relsPerFunc, fn.offsPerFunc, fn.ehEntries, fn.frameSize)
-		}
+	}
+	var wg sync.WaitGroup
+	for range workers - 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			u := acquireCompileUnit()
+			defer releaseCompileUnit(u)
+			work(u)
+		}()
+	}
+	work(unit)
+	wg.Wait()
+	if failure != nil {
+		return nil, failure
+	}
+	if sharedTTM != nil {
 		cm.tryTableInfo = sharedTTM.Table()
+	}
+	for i := range compiledFuncs {
+		fn := &compiledFuncs[i]
+		relocator.appendFunction(fn.fctx, module, cm, i, wasm.Index(i+importedFns), fn.body, fn.relsPerFunc, fn.offsPerFunc, fn.ehEntries, fn.frameSize)
 	}
 
 	// Allocate executable memory and then copy the generated machine code.
@@ -513,6 +503,46 @@ func (e *engine) compileModule(ctx context.Context, module *wasm.Module, listene
 	cm.sharedFunctions = e.sharedFunctions
 	e.setFinalizer(cm.executables, executablesFinalizer)
 	return cm, nil
+}
+
+// parallelCompileBytesPerWorker is how much wasm code past a module's largest function, in bytes, takes one
+// more worker to compile without compileWorkers being asked: about what the worker's start costs to make up.
+const parallelCompileBytesPerWorker = 2 << 10
+
+// compileWorkers returns how many goroutines compile module's functions: as many as ctx asks for, if it
+// does, and otherwise one for each parallelCompileBytesPerWorker the module has past its largest function,
+// up to GOMAXPROCS. A module is ready once its largest function is, which one worker compiles while the
+// others take the rest.
+func compileWorkers(ctx context.Context, module *wasm.Module) int {
+	n := len(module.CodeSection)
+	if w, ok := ctx.Value(expctxkeys.CompilationWorkers{}).(int); ok {
+		return max(1, min(w, n))
+	}
+	total, largest := 0, 0
+	for i := range module.CodeSection {
+		size := len(module.CodeSection[i].Body)
+		total += size
+		largest = max(largest, size)
+	}
+	return max(1, min(n, runtime.GOMAXPROCS(0), 1+(total-largest)/parallelCompileBytesPerWorker))
+}
+
+// compileOrder returns the order module's functions are compiled in: indexes if given, the deterministic
+// compilation verifier's; the largest first when workers share them; and their own otherwise.
+func compileOrder(module *wasm.Module, indexes []int, workers int) []int {
+	if indexes != nil {
+		return indexes
+	}
+	order := make([]int, len(module.CodeSection))
+	for i := range order {
+		order[i] = i
+	}
+	if workers > 1 {
+		slices.SortStableFunc(order, func(a, b int) int {
+			return len(module.CodeSection[b].Body) - len(module.CodeSection[a].Body)
+		})
+	}
+	return order
 }
 
 func functionContext(ctx context.Context, module *wasm.Module, fnum int, fidx wasm.Index) context.Context {
@@ -813,7 +843,7 @@ func buildEhEntries(pending []frontend.EhPendingEntry, blockOffsets []backend.Co
 
 func (e *engine) compileHostModule(ctx context.Context, module *wasm.Module, listeners []api.FunctionListener) (*compiledModule, error) {
 	unit := acquireCompileUnit()
-	defer compileUnits.Put(unit)
+	defer releaseCompileUnit(unit)
 	machine, be := unit.machine, unit.be
 
 	num := len(module.CodeSection)
@@ -1024,7 +1054,7 @@ func (e *engine) NewModuleEngine(m *wasm.Module, mi *wasm.ModuleInstance) (wasm.
 
 func (e *engine) compileSharedFunctions() {
 	unit := acquireCompileUnit()
-	defer compileUnits.Put(unit)
+	defer releaseCompileUnit(unit)
 	machine, be := unit.machine, unit.be
 
 	var sizes [14]int
@@ -1280,7 +1310,7 @@ func (e *engine) getListenerTrampolineForType(functionType *wasm.FunctionType) (
 	trampoline, ok := e.sharedFunctions.listenerTrampolines[functionType]
 	if !ok {
 		unit := acquireCompileUnit()
-		defer compileUnits.Put(unit)
+		defer releaseCompileUnit(unit)
 		machine, be := unit.machine, unit.be
 
 		var executable []byte

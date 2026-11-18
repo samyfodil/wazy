@@ -27,11 +27,24 @@ func NewAllocator[I Instr, B Block[I], F Function[I, B]](allocatableRegs *Regist
 	}
 	a.state.vrStates = nativeapi.NewIDedPool[vrState[I, B, F]](resetVrState[I, B, F])
 	a.state.reset()
-	for _, regs := range allocatableRegs.AllocatableRegisters {
+	for typ, regs := range allocatableRegs.AllocatableRegisters {
 		for _, r := range regs {
 			a.allocatableSet = a.allocatableSet.add(r)
 		}
+		leaf := make([]RealReg, 0, len(regs))
+		for _, r := range regs {
+			if !allocatableRegs.CalleeSavedRegisters.has(r) {
+				leaf = append(leaf, r)
+			}
+		}
+		for _, r := range regs {
+			if allocatableRegs.CalleeSavedRegisters.has(r) {
+				leaf = append(leaf, r)
+			}
+		}
+		a.leafRegs[typ] = leaf
 	}
+	a.allocatable = allocatableRegs.AllocatableRegisters
 	return a
 }
 
@@ -54,7 +67,12 @@ type (
 		// regInfo is static per ABI/ISA, and is initialized by the machine during Machine.PrepareRegisterAllocator.
 		regInfo *RegisterInfo
 		// allocatableSet is a set of allocatable RealReg derived from regInfo. Static per ABI/ISA.
-		allocatableSet           RegSet
+		allocatableSet RegSet
+		// allocatable is the order registers are taken in for the function being allocated: regInfo's, or,
+		// for one that makes no call, leafRegs, its callee-saved registers last, as it would save and
+		// restore them for nothing while a register no call is there to clobber is free.
+		allocatable              [NumRegType][]RealReg
+		leafRegs                 [NumRegType][]RealReg
 		allocatedCalleeSavedRegs []VReg
 		vs                       []VReg
 		ss                       []*vrState[I, B, F]
@@ -102,6 +120,11 @@ type (
 		// outStamp and blockLen are, for the block being allocated, the stamp of its live-outs' distances
 		// and how many instructions it has. See evictionCost.
 		outStamp, blockLen int32
+		// outPending is set while outBlk's live-outs' distances are still to be found: most blocks
+		// evict nothing, and so never need them. See settleOut.
+		outPending bool
+		outBlk     B
+		outF       F
 		// nextUseAfter is parallel to useBuf: for each use, the program counter of the same value's next
 		// use in the block, programCounterLiveOut if it has none but stays live, or -1 if it dies there.
 		nextUseAfter []programCounter
@@ -559,6 +582,7 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 
 	var nilBlk B
 	var nilInstr I
+	calls := false
 	for blk := f.PostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.PostOrderBlockIteratorNext() {
 		// We should gather phi value data.
 		for _, p := range f.BlockParams(blk, &a.vs) {
@@ -612,6 +636,7 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 			if call {
 				clobbers |= a.regInfo.CallerSavedRegisters
 			}
+			calls = calls || call || instr.ClobbersAllRegisters()
 			var fixed RegSet
 			for _, def = range instr.Defs(&a.vs) {
 				if def.IsRealReg() {
@@ -681,6 +706,10 @@ func (a *Allocator[I, B, F]) livenessAnalysis(f F) {
 	for i := 0; i < nrs; i++ {
 		root := f.LoopNestingForestRoot(i)
 		a.loopTreeDFS(f, root)
+	}
+	a.allocatable = a.regInfo.AllocatableRegisters
+	if !calls {
+		a.allocatable = a.leafRegs
 	}
 }
 
@@ -906,8 +935,8 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 	}
 	a.blockLen = int32(pc)
 	a.stamp++
-	a.nearestAfter(f, blk)
 	a.outStamp = a.stamp
+	a.outPending, a.outBlk, a.outF = true, blk, f
 
 	// Mark all live-out values by checking live-in of the successors.
 	// While doing so, we also update the desired register values.
@@ -1010,7 +1039,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 							preferred = d[0].RealReg()
 						}
 					}
-					r = a.findOrSpillAllocatable(s, a.regInfo.AllocatableRegisters[use.RegType()], currentUsedSet, preferred)
+					r = a.findOrSpillAllocatable(s, a.allocatable[use.RegType()], currentUsedSet, preferred)
 					a.recordReload(f, vs, blk)
 					f.ReloadRegisterBefore(use.SetRealReg(r), instr)
 					s.useRealReg(r, vs)
@@ -1137,7 +1166,7 @@ func (a *Allocator[I, B, F]) allocBlock(f F, blk B) {
 						}
 					}
 					if r == RealRegInvalid {
-						regs := a.regInfo.AllocatableRegisters[def.RegType()]
+						regs := a.allocatable[def.RegType()]
 						if avoid != 0 {
 							r = s.findAllocatable(regs, avoid)
 						}
@@ -1282,12 +1311,12 @@ func (a *Allocator[I, B, F]) fixMergeState(f F, blk B) {
 		// Finds the free registers if any.
 		intTmp, floatTmp := VRegInvalid, VRegInvalid
 		if intFree := s.findAllocatable(
-			a.regInfo.AllocatableRegisters[RegTypeInt], desiredOccupantsSet,
+			a.allocatable[RegTypeInt], desiredOccupantsSet,
 		); intFree != RealRegInvalid {
 			intTmp = FromRealReg(intFree, RegTypeInt)
 		}
 		if floatFree := s.findAllocatable(
-			a.regInfo.AllocatableRegisters[RegTypeFloat], desiredOccupantsSet,
+			a.allocatable[RegTypeFloat], desiredOccupantsSet,
 		); floatFree != RealRegInvalid {
 			floatTmp = FromRealReg(floatFree, RegTypeFloat)
 		}
@@ -1493,6 +1522,9 @@ func (a *Allocator[I, B, F]) Reset() {
 	a.blockStates.Reset()
 	a.phiDefInstListPool.Reset()
 	a.vs = a.vs[:0]
+	var nilB B
+	var nilF F
+	a.outPending, a.outBlk, a.outF = false, nilB, nilF
 }
 
 // computeNextUses fills nextUseAfter for the block being allocated, and leaves each value it uses
@@ -1547,6 +1579,7 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 	s := &a.state
 	// A value the loop does not use is live into its header only to be used past one of its exits: its
 	// distance from there is that far. One not live into it at all is dead.
+	a.settleOut()
 	a.stamp++
 	live := a.liveIns(header)
 	for k, st := range live {
@@ -1566,7 +1599,7 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 		if unused(vs) {
 			continue
 		}
-		regs := a.regInfo.AllocatableRegisters[vs.v.RegType()]
+		regs := a.allocatable[vs.v.RegType()]
 		r := s.findAllocatable(regs, clobbered)
 		if r == RealRegInvalid {
 			r = s.findAllocatable(regs, 0)
@@ -1591,7 +1624,8 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 	// The loop needs registers for its own temporaries. Taking one from a value it does not use, which
 	// the header starts with, has the back edge reload that value on every iteration; leaving the value
 	// on the stack instead reloads it once, after the loop. That value may be an outer loop's parameter,
-	// which is then stored where that loop defines it.
+	// which is then stored where that loop defines it. The values to leave are those used furthest away:
+	// one used past the loops around this one is reloaded less often than one the next of them uses.
 	// The header's parameters take registers too, once it starts.
 	var phis [NumRegType]int
 	for _, vs := range live {
@@ -1599,20 +1633,40 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 			phis[vs.v.RegType()]++
 		}
 	}
+	// A value the loop does not use, in a register the loop overwrites at a fixed place, a call's say, loses
+	// it there, and the back edge reloads it on every iteration.
+	s.regsInUse.range_(func(r RealReg, occ *vrState[I, B, F]) {
+		if clobbered.has(r) && movable(occ) && unused(occ) {
+			s.releaseRealReg(r)
+		}
+	})
 	for typ := RegType(0); typ < NumRegType; typ++ {
-		regs := a.regInfo.AllocatableRegisters[typ]
+		regs := a.allocatable[typ]
 		free := -phis[typ]
 		for _, r := range regs {
 			if !s.regsInUse.has(r) {
 				free++
 			}
 		}
-		for i := len(regs) - 1; i >= 0 && free < loopFreeRegs; i-- {
-			occ := s.regsInUse.get(regs[i])
-			if occ != nil && movable(occ) && unused(occ) {
-				s.releaseRealReg(regs[i])
-				free++
+		for ; free < loopFreeRegs; free++ {
+			victim, far := RealRegInvalid, int32(-1)
+			for i := len(regs) - 1; i >= 0; i-- {
+				occ := s.regsInUse.get(regs[i])
+				if occ == nil || !movable(occ) || !unused(occ) {
+					continue
+				}
+				d := int32(noNextUse)
+				if occ.distStamp == a.stamp {
+					d = occ.dist
+				}
+				if d > far {
+					victim, far = regs[i], d
+				}
 			}
+			if victim == RealRegInvalid {
+				break
+			}
+			s.releaseRealReg(victim)
 		}
 	}
 }
@@ -1633,7 +1687,7 @@ func (a *Allocator[I, B, F]) moveAsideOccupant(f F, instr I, r RealReg, pc progr
 		return
 	}
 	typ := occ.v.RegType()
-	free := s.findAllocatable(a.regInfo.AllocatableRegisters[typ], inUse.add(r))
+	free := s.findAllocatable(a.allocatable[typ], inUse.add(r))
 	if free == RealRegInvalid {
 		return
 	}
@@ -1661,12 +1715,23 @@ func (a *Allocator[I, B, F]) evictionCost(vs *vrState[I, B, F], r RealReg) int64
 	case -1:
 		return 3 << 32
 	case programCounterLiveOut:
+		a.settleOut()
 		if vs.distStamp == a.outStamp {
 			return int64(a.blockLen) - int64(a.curPC) + int64(vs.dist) + spilledBias(vs)
 		}
 		return noNextUse
 	default:
 		return int64(next) - int64(a.curPC) + spilledBias(vs)
+	}
+}
+
+// settleOut finds the distances of the live-outs of the block being allocated, which allocBlock leaves
+// for the first eviction to need them. It runs before anything moves the stamp on, so that they come out
+// as they would have where allocBlock started.
+func (a *Allocator[I, B, F]) settleOut() {
+	if a.outPending {
+		a.outPending = false
+		a.nearestAfter(a.outF, a.outBlk)
 	}
 }
 
@@ -1708,16 +1773,22 @@ func (a *Allocator[I, B, F]) computeNextUseDistances(f F) {
 		}
 	}
 	a.distBuf = dist
-	// A block is visited again only where a successor's distances went down since it last was.
-	work := a.nextUseWork[:0]
+	// The blocks are swept in post-order, successors before predecessors, for as long as distances go
+	// down, and a sweep visits only the blocks a successor's distances went down for since they last
+	// were. One sweep settles all but what crosses a back edge, so it takes one more than the loops are
+	// deep: a queue takes the blocks out of order, and visits each many times over.
+	order := a.nextUseWork[:0]
 	for blk := f.PostOrderBlockIteratorBegin(); blk != nilBlk; blk = f.PostOrderBlockIteratorNext() {
-		work = append(work, blk)
+		order = append(order, blk)
 		a.getOrAllocateBlockState(blk.ID()).queued = true
 	}
-	for head := 0; head < len(work); head++ {
-		blk := work[head]
-		{
+	for again := true; again; {
+		again = false
+		for _, blk := range order {
 			info := a.getOrAllocateBlockState(blk.ID())
+			if !info.queued {
+				continue
+			}
 			info.queued = false
 			changed := false
 			a.stamp++
@@ -1750,15 +1821,13 @@ func (a *Allocator[I, B, F]) computeNextUseDistances(f F) {
 			}
 			if changed {
 				for i, n := 0, blk.Preds(); i < n; i++ {
-					if p := a.getOrAllocateBlockState(f.Pred(blk, i).ID()); !p.queued {
-						p.queued = true
-						work = append(work, f.Pred(blk, i))
-					}
+					a.getOrAllocateBlockState(f.Pred(blk, i).ID()).queued = true
 				}
+				again = true
 			}
 		}
 	}
-	a.nextUseWork = work[:0]
+	a.nextUseWork = order[:0]
 }
 
 // nearestAfter leaves, in each value live into a successor of blk, dist with its distance from blk's

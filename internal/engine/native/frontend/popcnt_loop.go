@@ -28,7 +28,10 @@ func (c *Compiler) popcountLoop(pc int) (n, x uint32, end int, ok bool) {
 	if pc+1 >= len(body) || body[pc+1] != 0x40 { // An empty block type: no params, no results.
 		return
 	}
-	s := newVsSim()
+	if c.popcountSim == nil {
+		c.popcountSim = newVsSim()
+	}
+	s := c.popcountSim.reset()
 	at := pc + 2
 	for ops := 0; ; ops++ {
 		if at >= len(body) || ops > 16 {
