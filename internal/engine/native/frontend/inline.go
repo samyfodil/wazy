@@ -137,6 +137,7 @@ func (c *Compiler) inlineLeaf(fnIndex uint32) {
 	c.inlinedCallee = i + 1
 	for state.pc = 0; state.pc < len(code.Body)-1; {
 		c.lowerCurrentOpcode()
+		c.syncKnownSafeBounds()
 	}
 	c.inlinedCallee = 0
 
@@ -203,6 +204,7 @@ func (c *Compiler) inlineSelf(fnIndex uint32) {
 	c.inlinedCallee, c.inlineBase = i+1, len(state.controlFrames)
 	for state.pc = 0; state.pc < len(code.Body); {
 		c.lowerCurrentOpcode()
+		c.syncKnownSafeBounds()
 	}
 	c.inlinedCallee, c.inlineBase = 0, 0
 	state.pc, c.branchHintAt = pc, hintAt
