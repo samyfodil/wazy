@@ -5229,10 +5229,10 @@ func (c *Compiler) memOpSetup(memIndex wasm.Index, baseAddr ssa.Value, constOffs
 	memLen := c.getMemoryLenValue(memIndex, false)
 
 	cmp := builder.AllocateInstruction()
-	if constOffset == 0 && ceil <= memoryMinSizeInBytes {
-		// The address is the base itself: it is in bounds while `baseAddr <= memLen - ceil`, which the
-		// memory's minimum size keeps from wrapping. The limit is the same for every access of this size, and
-		// stays in a register across a loop that does not change the memory's length (see passLoopInvariantCodeMotionOpt).
+	if (constOffset == 0 || c.limitsDisplacedAccess) && ceil <= memoryMinSizeInBytes {
+		// The access is in bounds while `baseAddr <= memLen - ceil`, which the memory's minimum size keeps from
+		// wrapping. The limit is the same for every access that ends where this one does, and stays in a
+		// register across a loop that does not change the memory's length (see passLoopInvariantCodeMotionOpt).
 		limit := builder.AllocateInstruction().AsIsub(memLen, ceilConst.Return()).Insert(builder).Return()
 		cmp.AsIcmp(extBaseAddr, limit, ssa.IntegerCmpCondUnsignedGreaterThan)
 	} else {

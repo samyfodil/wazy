@@ -85,8 +85,13 @@ type Compiler struct {
 	// pointer loaded from memory and the load through it. arm64 cannot, so an access with a displacement
 	// needs the add anyway; one without keeps it off the path.
 	sharesDisplacedAddress bool
-	memoryShared           []bool
-	memoryMaxPages         []uint64
+	// limitsDisplacedAccess checks an access at a nonzero displacement from its base against a limit, the
+	// memory's length less where the access ends, as one at none is, rather than add that end to the base
+	// and compare the length with the sum. amd64 then compares and branches in one fused instruction, for
+	// a register per distinct end in a loop; arm64 measured no faster.
+	limitsDisplacedAccess bool
+	memoryShared          []bool
+	memoryMaxPages        []uint64
 	// memoryIndex64 records, per memory index, whether that memory has an i64
 	// index type, in which case its address and length operands are full 64-bit
 	// values whose arithmetic can overflow. anyMemory64 is true if any does.
@@ -221,6 +226,7 @@ func (c *Compiler) Reuse(m *wasm.Module, ssaBuilder ssa.Builder, offset *nativea
 	c.vecMap = runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
 	c.unrollLoops = true
 	c.sharesDisplacedAddress = runtime.GOARCH == "arm64"
+	c.limitsDisplacedAccess = runtime.GOARCH == "amd64"
 	c.needSourceOffsetInfo = sourceInfo
 	c.tryTableMetadata = &localTryTableMetadata{}
 	c.declareSignatures(listenerOn)
@@ -275,6 +281,10 @@ func (c *Compiler) SetUnrollLoops(on bool) { c.unrollLoops = on }
 // SetSharesDisplacedAddress picks how addresses are shared between accesses through one base (see
 // sharesDisplacedAddress), for tests that pin the lowering on every host. It must be called before lowering.
 func (c *Compiler) SetSharesDisplacedAddress(on bool) { c.sharesDisplacedAddress = on }
+
+// SetLimitsDisplacedAccess picks how an access at a displacement is bounds checked (see
+// limitsDisplacedAccess), for tests that pin the lowering on every host. It must be called before lowering.
+func (c *Compiler) SetLimitsDisplacedAccess(on bool) { c.limitsDisplacedAccess = on }
 
 // tryTableMetadata accumulates try_table metadata during compilation.
 type tryTableMetadata interface {

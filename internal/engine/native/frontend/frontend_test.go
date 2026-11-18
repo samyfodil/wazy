@@ -47,6 +47,9 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 		// unroll lets small loops be lowered twice (see Compiler.unrollCandidate), which the other cases
 		// keep to one copy so that they pin how a loop is lowered.
 		unroll bool
+		// limits bounds checks an access at a displacement against a limit, as for amd64 (see
+		// Compiler.limitsDisplacedAccess).
+		limits bool
 	}{
 		{
 			name: "empty", m: testcases.Empty.Module,
@@ -349,6 +352,115 @@ blk4: () <-- (blk5,blk3)
 blk3: () <-- (blk1)
 	Yield v0
 	Jump blk4
+`,
+		},
+		{
+			name: "memory_loads (amd64)", m: testcases.MemoryLoads.Module, limits: true,
+			exp: `
+blk0: (v0:i64, v1:i64, v2:i32)
+	v3:i64 = Iconst_64 0x4
+	v4:i64 = UExtend v2, 32->64
+	v5:i64 = Load v1, 0x10
+	v6:i64 = Isub v5, v3
+	v7:i32 = Icmp gt_u, v4, v6
+	ExitIfTrue v7, v0, memory_out_of_bounds
+	v8:i64 = Load v1, 0x8
+	v9:i64 = Iadd v8, v4
+	v10:i32 = Load v9, 0x0
+	v11:i64 = Iconst_64 0x8
+	v12:i64 = UExtend v2, 32->64
+	v13:i64 = Isub v5, v11
+	v14:i32 = Icmp gt_u, v12, v13
+	ExitIfTrue v14, v0, memory_out_of_bounds
+	v15:i64 = Iadd v8, v12
+	v16:i64 = Load v15, 0x0
+	v17:i64 = UExtend v2, 32->64
+	v18:i64 = Iadd v8, v17
+	v19:f32 = Load v18, 0x0
+	v20:i64 = UExtend v2, 32->64
+	v21:i64 = Iadd v8, v20
+	v22:f64 = Load v21, 0x0
+	v23:i64 = Iconst_64 0x13
+	v24:i64 = UExtend v2, 32->64
+	v25:i64 = Isub v5, v23
+	v26:i32 = Icmp gt_u, v24, v25
+	ExitIfTrue v26, v0, memory_out_of_bounds
+	v27:i64 = Iadd v8, v24
+	v28:i32 = Load v27, 0xf
+	v29:i64 = Iconst_64 0x17
+	v30:i64 = UExtend v2, 32->64
+	v31:i64 = Isub v5, v29
+	v32:i32 = Icmp gt_u, v30, v31
+	ExitIfTrue v32, v0, memory_out_of_bounds
+	v33:i64 = Iadd v8, v30
+	v34:i64 = Load v33, 0xf
+	v35:i64 = UExtend v2, 32->64
+	v36:i64 = Iadd v8, v35
+	v37:f32 = Load v36, 0xf
+	v38:i64 = UExtend v2, 32->64
+	v39:i64 = Iadd v8, v38
+	v40:f64 = Load v39, 0xf
+	v41:i64 = UExtend v2, 32->64
+	v42:i64 = Iadd v8, v41
+	v43:i32 = Sload8 v42, 0x0
+	v44:i64 = UExtend v2, 32->64
+	v45:i64 = Iadd v8, v44
+	v46:i32 = Sload8 v45, 0xf
+	v47:i64 = UExtend v2, 32->64
+	v48:i64 = Iadd v8, v47
+	v49:i32 = Uload8 v48, 0x0
+	v50:i64 = UExtend v2, 32->64
+	v51:i64 = Iadd v8, v50
+	v52:i32 = Uload8 v51, 0xf
+	v53:i64 = UExtend v2, 32->64
+	v54:i64 = Iadd v8, v53
+	v55:i32 = Sload16 v54, 0x0
+	v56:i64 = UExtend v2, 32->64
+	v57:i64 = Iadd v8, v56
+	v58:i32 = Sload16 v57, 0xf
+	v59:i64 = UExtend v2, 32->64
+	v60:i64 = Iadd v8, v59
+	v61:i32 = Uload16 v60, 0x0
+	v62:i64 = UExtend v2, 32->64
+	v63:i64 = Iadd v8, v62
+	v64:i32 = Uload16 v63, 0xf
+	v65:i64 = UExtend v2, 32->64
+	v66:i64 = Iadd v8, v65
+	v67:i64 = Sload8 v66, 0x0
+	v68:i64 = UExtend v2, 32->64
+	v69:i64 = Iadd v8, v68
+	v70:i64 = Sload8 v69, 0xf
+	v71:i64 = UExtend v2, 32->64
+	v72:i64 = Iadd v8, v71
+	v73:i64 = Uload8 v72, 0x0
+	v74:i64 = UExtend v2, 32->64
+	v75:i64 = Iadd v8, v74
+	v76:i64 = Uload8 v75, 0xf
+	v77:i64 = UExtend v2, 32->64
+	v78:i64 = Iadd v8, v77
+	v79:i64 = Sload16 v78, 0x0
+	v80:i64 = UExtend v2, 32->64
+	v81:i64 = Iadd v8, v80
+	v82:i64 = Sload16 v81, 0xf
+	v83:i64 = UExtend v2, 32->64
+	v84:i64 = Iadd v8, v83
+	v85:i64 = Uload16 v84, 0x0
+	v86:i64 = UExtend v2, 32->64
+	v87:i64 = Iadd v8, v86
+	v88:i64 = Uload16 v87, 0xf
+	v89:i64 = UExtend v2, 32->64
+	v90:i64 = Iadd v8, v89
+	v91:i64 = Sload32 v90, 0x0
+	v92:i64 = UExtend v2, 32->64
+	v93:i64 = Iadd v8, v92
+	v94:i64 = Sload32 v93, 0xf
+	v95:i64 = UExtend v2, 32->64
+	v96:i64 = Iadd v8, v95
+	v97:i64 = Uload32 v96, 0x0
+	v98:i64 = UExtend v2, 32->64
+	v99:i64 = Iadd v8, v98
+	v100:i64 = Uload32 v99, 0xf
+	Jump blk_ret, v10, v16, v19, v22, v28, v34, v37, v40, v43, v46, v49, v52, v55, v58, v61, v64, v67, v70, v73, v76, v79, v82, v85, v88, v91, v94, v97, v100
 `,
 		},
 		{
@@ -3741,6 +3853,7 @@ blk13: () <-- (blk6)
 			fc.SetVecMap(false)
 			fc.SetSharesDisplacedAddress(tc.sharesAddress)
 			fc.SetUnrollLoops(tc.unroll)
+			fc.SetLimitsDisplacedAccess(tc.limits)
 			typeIndex := tc.m.FunctionSection[tc.targetIndex]
 			code := &tc.m.CodeSection[tc.targetIndex]
 			fc.Init(tc.targetIndex, typeIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body, tc.needListener, 0)
