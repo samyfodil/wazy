@@ -2894,7 +2894,14 @@ func (m *machine) lowerSelect(c, x, y, result ssa.Value) {
 	shared, sharedReg := ssa.ValueInvalid, regalloc.VRegInvalid
 
 	var cc condFlag
+	// Either of two comparisons, or both, is a compare and a conditional compare, as for a branch.
+	twoIcmps := false
+	if op := cvalDef.Instr; m.compiler.MatchInstr(cvalDef, ssa.OpcodeBor) || m.compiler.MatchInstr(cvalDef, ssa.OpcodeBand) {
+		cc, twoIcmps = m.twoIcmpsToFlag(op, op.Opcode() == ssa.OpcodeBand)
+	}
 	switch {
+	case twoIcmps:
+		cvalDef.Instr.MarkLowered()
 	case m.compiler.MatchInstr(cvalDef, ssa.OpcodeIcmp): // This case, we can use the ALU flag set by SUBS instruction.
 		cvalInstr := cvalDef.Instr
 		cx, cy, c := cvalInstr.IcmpData()

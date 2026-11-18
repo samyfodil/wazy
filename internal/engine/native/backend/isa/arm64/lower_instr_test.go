@@ -92,11 +92,70 @@ func TestMachine_LowerConditionalBranch(t *testing.T) {
 		}
 	}
 
+	// icmpWithZero branches on a parameter of typ compared by cond with zero.
+	icmpWithZero := func(brz bool, cond ssa.IntegerCmpCond, typ ssa.Type, ctx *mockCompiler, builder ssa.Builder, m *machine) (instr *ssa.Instruction, verify func(t *testing.T)) {
+		entry := builder.CurrentBlock()
+		v1 := entry.AddParam(builder, typ)
+		zero := builder.AllocateInstruction()
+		if typ == ssa.TypeI32 {
+			zero.AsIconst32(0)
+		} else {
+			zero.AsIconst64(0)
+		}
+		builder.InsertInstruction(zero)
+		icmp := builder.AllocateInstruction()
+		icmp.AsIcmp(v1, zero.Return(), cond)
+		builder.InsertInstruction(icmp)
+		ctx.definitions[v1] = backend.SSAValueDefinition{V: v1}
+		ctx.definitions[zero.Return()] = backend.SSAValueDefinition{Instr: zero}
+		ctx.definitions[icmp.Return()] = backend.SSAValueDefinition{Instr: icmp}
+		ctx.vRegMap[v1], ctx.vRegMap[zero.Return()], ctx.vRegMap[icmp.Return()] = intToVReg(1), intToVReg(2), intToVReg(3)
+		b := builder.AllocateInstruction()
+		if brz {
+			b.AsBrz(icmp.Return(), ssa.ValuesNil, builder.AllocateBasicBlock())
+		} else {
+			b.AsBrnz(icmp.Return(), ssa.ValuesNil, builder.AllocateBasicBlock())
+		}
+		builder.InsertInstruction(b)
+		return b, func(t *testing.T) {
+			require.True(t, icmp.Lowered())
+			require.True(t, zero.Lowered())
+		}
+	}
+
 	for _, tc := range []struct {
 		name         string
 		setup        func(*mockCompiler, ssa.Builder, *machine) (instr *ssa.Instruction, verify func(t *testing.T))
 		instructions []string
 	}{
+		{
+			name: "brnz / i32 equal to zero",
+			setup: func(ctx *mockCompiler, builder ssa.Builder, m *machine) (instr *ssa.Instruction, verify func(t *testing.T)) {
+				return icmpWithZero(false, ssa.IntegerCmpCondEqual, ssa.TypeI32, ctx, builder, m)
+			},
+			instructions: []string{"cbz w1?, (L1)"},
+		},
+		{
+			name: "brz / i32 equal to zero",
+			setup: func(ctx *mockCompiler, builder ssa.Builder, m *machine) (instr *ssa.Instruction, verify func(t *testing.T)) {
+				return icmpWithZero(true, ssa.IntegerCmpCondEqual, ssa.TypeI32, ctx, builder, m)
+			},
+			instructions: []string{"cbnz w1?, L1"},
+		},
+		{
+			name: "brnz / i64 not equal to zero",
+			setup: func(ctx *mockCompiler, builder ssa.Builder, m *machine) (instr *ssa.Instruction, verify func(t *testing.T)) {
+				return icmpWithZero(false, ssa.IntegerCmpCondNotEqual, ssa.TypeI64, ctx, builder, m)
+			},
+			instructions: []string{"cbnz x1?, L1"},
+		},
+		{
+			name: "brz / i64 not equal to zero",
+			setup: func(ctx *mockCompiler, builder ssa.Builder, m *machine) (instr *ssa.Instruction, verify func(t *testing.T)) {
+				return icmpWithZero(true, ssa.IntegerCmpCondNotEqual, ssa.TypeI64, ctx, builder, m)
+			},
+			instructions: []string{"cbz x1?, (L1)"},
+		},
 		{
 			name: "icmp in different group",
 			setup: func(ctx *mockCompiler, builder ssa.Builder, m *machine) (instr *ssa.Instruction, verify func(t *testing.T)) {
@@ -192,6 +251,49 @@ func TestMachine_LowerConditionalBranch(t *testing.T) {
 				formatEmittedInstructionsInCurrentBlock(m))
 		})
 	}
+}
+
+// TestMachine_lowerSelect_twoIcmps checks that a select on either of two comparisons is a compare, a
+// conditional compare and a csel, rather than each comparison in a register, or-ed and compared again.
+func TestMachine_lowerSelect_twoIcmps(t *testing.T) {
+	ctx, builder, m := newSetupWithMockContext()
+	entry := builder.CurrentBlock()
+	a, b := entry.AddParam(builder, ssa.TypeI32), entry.AddParam(builder, ssa.TypeI32)
+	x, y := entry.AddParam(builder, ssa.TypeI32), entry.AddParam(builder, ssa.TypeI32)
+	far := builder.AllocateInstruction().AsIconst32(0x538)
+	builder.InsertInstruction(far)
+	zero := builder.AllocateInstruction().AsIconst32(0)
+	builder.InsertInstruction(zero)
+	c1 := builder.AllocateInstruction()
+	c1.AsIcmp(a, far.Return(), ssa.IntegerCmpCondUnsignedGreaterThan)
+	builder.InsertInstruction(c1)
+	c2 := builder.AllocateInstruction()
+	c2.AsIcmp(b, zero.Return(), ssa.IntegerCmpCondNotEqual)
+	builder.InsertInstruction(c2)
+	or := builder.AllocateInstruction()
+	or.AsBor(c1.Return(), c2.Return())
+	builder.InsertInstruction(or)
+	sel := builder.AllocateInstruction()
+	sel.AsSelect(or.Return(), x, y)
+	builder.InsertInstruction(sel)
+	for i, v := range []ssa.Value{a, b, x, y} {
+		ctx.definitions[v] = backend.SSAValueDefinition{V: v}
+		ctx.vRegMap[v] = intToVReg(i + 1)
+	}
+	for _, instr := range []*ssa.Instruction{far, zero, c1, c2, or} {
+		ctx.definitions[instr.Return()] = backend.SSAValueDefinition{Instr: instr}
+	}
+	ctx.vRegMap[sel.Return()] = intToVReg(5)
+
+	m.lowerSelect(or.Return(), x, y, sel.Return())
+	require.True(t, or.Lowered())
+	require.True(t, c1.Lowered())
+	require.True(t, c2.Lowered())
+	require.Equal(t, strings.Join([]string{
+		"subs wzr, w1?, #0x538",
+		"ccmp w2?, #0x0, #0x0, ls",
+		"csel w5?, w3?, w4?, ne",
+	}, "\n"), formatEmittedInstructionsInCurrentBlock(m))
 }
 
 func TestMachine_LowerSingleBranch(t *testing.T) {
