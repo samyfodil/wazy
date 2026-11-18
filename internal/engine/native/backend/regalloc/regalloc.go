@@ -1600,7 +1600,8 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 	// The loop needs registers for its own temporaries. Taking one from a value it does not use, which
 	// the header starts with, has the back edge reload that value on every iteration; leaving the value
 	// on the stack instead reloads it once, after the loop. That value may be an outer loop's parameter,
-	// which is then stored where that loop defines it.
+	// which is then stored where that loop defines it. The values to leave are those used furthest away:
+	// one used past the loops around this one is reloaded less often than one the next of them uses.
 	// The header's parameters take registers too, once it starts.
 	var phis [NumRegType]int
 	for _, vs := range live {
@@ -1623,12 +1624,25 @@ func (a *Allocator[I, B, F]) preloadLoopLiveIns(f F, entry, blk B, header *block
 				free++
 			}
 		}
-		for i := len(regs) - 1; i >= 0 && free < loopFreeRegs; i-- {
-			occ := s.regsInUse.get(regs[i])
-			if occ != nil && movable(occ) && unused(occ) {
-				s.releaseRealReg(regs[i])
-				free++
+		for ; free < loopFreeRegs; free++ {
+			victim, far := RealRegInvalid, int32(-1)
+			for i := len(regs) - 1; i >= 0; i-- {
+				occ := s.regsInUse.get(regs[i])
+				if occ == nil || !movable(occ) || !unused(occ) {
+					continue
+				}
+				d := int32(noNextUse)
+				if occ.distStamp == a.stamp {
+					d = occ.dist
+				}
+				if d > far {
+					victim, far = regs[i], d
+				}
 			}
+			if victim == RealRegInvalid {
+				break
+			}
+			s.releaseRealReg(victim)
 		}
 	}
 }
